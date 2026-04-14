@@ -144,8 +144,9 @@ print(
 print(f"Total field budget:      {W_total:.0f} mm")
 
 # =============================================================================
-# SECTION 4 — MPC Run (dry scenario)
+# SECTION 4 — MPC runs: 2 scenarios × 2 horizons = 4 total runs
 # =============================================================================
+
 print("\n" + "=" * 60)
 print("SECTION 4: MPC — Dry Scenario (2021)")
 print("=" * 60)
