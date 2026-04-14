@@ -147,69 +147,139 @@ print(f"Total field budget:      {W_total:.0f} mm")
 # SECTION 4 — MPC runs: 2 scenarios × 2 horizons = 4 total runs
 # =============================================================================
 
+scenarios = {
+    'dry': climate_dry,
+    'wet': climate_wet,
+}
+horizons = [8, 14]
+
+# --- No-irrigation baselines for both scenarios ---
 print("\n" + "=" * 60)
-print("SECTION 4: MPC — Dry Scenario (2021)")
+print("No-Irrigation Baselines")
 print("=" * 60)
 
-abm_mpc = CropSoilABM(gamma_flat, sends_to, Nr, theta, N)
+noirr_biomass = {}
+for scenario_name, climate in scenarios.items():
+    abm_base = CropSoilABM(gamma_flat, sends_to, Nr, theta, N)
+    abm_base.reset()
+    x4_base = []
+    for day in range(120):
+        today = {k: v[day] for k, v in climate.items()
+                 if k not in ['gwetroot', 'gwettop']}
+        state = abm_base.step(np.zeros(N), today)
+        x4_base.append(state['x4'].mean())
+    noirr_biomass[scenario_name] = x4_base[-1]
+    print(f"  {scenario_name}: {x4_base[-1]:.2f}")
 
-mpc_dry = run_mpc_season(
-    abm_mpc, climate_dry, W_total,
-    Hp=8,       # prediction horizon: 8 days (matches paper)
-    lam=0.05,   # water cost: meaningful but not dominant
-    UB=15.0     # max irrigation per agent per day (mm)
-                # UB > ET0_mean (6.5mm) so controller can overcome losses
-)
+# --- Run all 4 MPC combinations ---
+results = {}
 
-print(f"\n{'='*60}")
-print(f"MPC Results — {theta['name']} — Dry Scenario (2021)")
-print(f"{'='*60}")
-print(f"  Final biomass (MPC):      {mpc_dry['x4'][-1]:.2f}")
-print(f"  Final biomass (no irr):   {x4_noirr[-1]:.2f}")
-print(f"  Biomass increase:         "
-      f"{(mpc_dry['x4'][-1]-x4_noirr[-1])/max(x4_noirr[-1], 1)*100:.1f}%")
-print(f"  Total irrigation used:    {sum(mpc_dry['u']):.1f} mm")
-print(f"  Budget used:              "
-      f"{sum(mpc_dry['u'])/W_total*100:.1f}% of {W_total:.0f}mm")
-print(f"  Avg solve time per day:   {np.mean(mpc_dry['time']):.2f} s")
-print(f"  Max solve time:           {np.max(mpc_dry['time']):.2f} s")
-print(f"  Days above stress thresh: "
-      f"{sum(x >= raw for x in mpc_dry['x1'])}/120")
+for scenario_name, climate in scenarios.items():
+
+    # Compute budget from this scenario's actual climate
+    W_total, W_per_agent, full_need = compute_water_budget(
+        climate, theta, N, scarcity=0.70
+    )
+    print(f"\n{'='*60}")
+    print(f"Scenario: {scenario_name.upper()} | "
+          f"Budget: {W_total:.0f}mm total ({W_per_agent:.0f}mm/agent)")
+    print(f"{'='*60}")
+
+    for Hp in horizons:
+        key = f"{scenario_name}_Hp{Hp}"
+        print(f"\nRunning MPC — {scenario_name} scenario, Hp={Hp}...")
+
+        abm_mpc = CropSoilABM(gamma_flat, sends_to, Nr, theta, N)
+        results[key] = run_mpc_season(
+            abm_mpc, climate, W_total,
+            Hp=Hp, lam=0.05, UB=15.0
+        )
 
 # =============================================================================
-# SECTION 5 — Plot MPC results
+# SECTION 5 — Summary table
 # =============================================================================
-fig, axes = plt.subplots(3, 1, figsize=(12, 11))
-fig.suptitle(f'MPC Results — {theta["name"]} — Dry Scenario (2021)',
-             fontsize=13)
+print(f"\n{'='*75}")
+print(f"{'Scenario':<10} {'Hp':>4} {'MPC biomass':>12} "
+      f"{'No-irr':>10} {'Increase':>10} "
+      f"{'Avg solve':>11} {'Max solve':>11}")
+print(f"{'='*75}")
 
-axes[0].plot(mpc_dry['x1'], color='blue', label='MPC soil water')
-axes[0].axhline(fc,  color='red',    linestyle='--',
-                label=f'Field capacity ({fc:.0f}mm)')
-axes[0].axhline(wp,  color='orange', linestyle='--',
-                label=f'Wilting point ({wp:.0f}mm)')
-axes[0].axhline(raw, color='purple', linestyle=':',
-                label=f'Stress threshold ({raw:.0f}mm)')
-axes[0].set_ylabel('Mean Soil Water (mm)')
-axes[0].set_title('Soil Water Content')
-axes[0].legend(fontsize=8)
+for scenario_name in scenarios:
+    for Hp in horizons:
+        key = f"{scenario_name}_Hp{Hp}"
+        r = results[key]
+        noirr = noirr_biomass[scenario_name]
+        inc = (r['x4'][-1] - noirr) / max(noirr, 1) * 100
+        print(f"{scenario_name:<10} {Hp:>4} "
+              f"{r['x4'][-1]:>12.2f} "
+              f"{noirr:>10.2f} "
+              f"{inc:>9.1f}% "
+              f"{np.mean(r['time']):>10.1f}s "
+              f"{np.max(r['time']):>10.1f}s")
 
-axes[1].plot(mpc_dry['x4'], color='green', label='MPC')
-axes[1].plot(x4_noirr,      color='gray',  linestyle='--',
-             label='No irrigation')
-axes[1].set_ylabel('Mean Biomass')
-axes[1].set_title('Biomass Growth')
-axes[1].legend()
+# =============================================================================
+# SECTION 6 — Plots for all 4 runs
+# =============================================================================
+fig, axes = plt.subplots(4, 3, figsize=(18, 20))
+fig.suptitle(f'MPC Results — {theta["name"]} — All Scenarios',
+             fontsize=14)
 
-axes[2].bar(range(len(mpc_dry['u'])), mpc_dry['u'],
-            color='steelblue', alpha=0.8)
-axes[2].set_ylabel('Field Irrigation (mm/day)')
-axes[2].set_xlabel('Day')
-axes[2].set_title(
-    f"Irrigation Schedule — "
-    f"Used: {sum(mpc_dry['u']):.0f}mm / Budget: {W_total:.0f}mm "
-    f"({sum(mpc_dry['u'])/W_total*100:.0f}%)")
+fc = theta['theta6'] * theta['theta5']
+wp = theta['theta2'] * theta['theta5']
+raw = fc - theta['p'] * (fc - wp)
+
+for i, scenario_name in enumerate(scenarios):
+    climate = scenarios[scenario_name]
+    noirr = noirr_biomass[scenario_name]
+
+    # No-irrigation biomass curve for this scenario
+    abm_base = CropSoilABM(gamma_flat, sends_to, Nr, theta, N)
+    abm_base.reset()
+    x4_noirr_curve = []
+    for day in range(120):
+        today = {k: v[day] for k, v in climate.items()
+                 if k not in ['gwetroot', 'gwettop']}
+        state = abm_base.step(np.zeros(N), today)
+        x4_noirr_curve.append(state['x4'].mean())
+
+    for j, Hp in enumerate(horizons):
+        key = f"{scenario_name}_Hp{Hp}"
+        r = results[key]
+        row = i * 2 + j  # rows: dry_Hp8, dry_Hp14, wet_Hp8, wet_Hp14
+
+        # Soil water
+        axes[row, 0].plot(r['x1'], color='blue')
+        axes[row, 0].axhline(fc,  color='red',    linestyle='--',
+                             label=f'FC ({fc:.0f}mm)')
+        axes[row, 0].axhline(wp,  color='orange', linestyle='--',
+                             label=f'WP ({wp:.0f}mm)')
+        axes[row, 0].axhline(raw, color='purple', linestyle=':',
+                             label=f'Stress ({raw:.0f}mm)')
+        axes[row, 0].set_ylabel('Soil Water (mm)')
+        axes[row, 0].set_title(
+            f'{scenario_name.upper()} Hp={Hp} — Soil Water')
+        axes[row, 0].legend(fontsize=7)
+
+        # Biomass
+        axes[row, 1].plot(r['x4'],        color='green', label='MPC')
+        axes[row, 1].plot(x4_noirr_curve, color='gray',
+                          linestyle='--',  label='No irrigation')
+        inc = (r['x4'][-1] - noirr) / max(noirr, 1) * 100
+        axes[row, 1].set_title(
+            f'{scenario_name.upper()} Hp={Hp} — '
+            f'Biomass (+{inc:.0f}%)')
+        axes[row, 1].set_ylabel('Mean Biomass')
+        axes[row, 1].legend(fontsize=7)
+
+        # Irrigation schedule
+        axes[row, 2].bar(range(len(r['u'])), r['u'],
+                         color='steelblue', alpha=0.8)
+        axes[row, 2].set_title(
+            f'{scenario_name.upper()} Hp={Hp} — '
+            f'Irrigation ({sum(r["u"]):.0f}mm)')
+        axes[row, 2].set_ylabel('Field Irrigation (mm/day)')
+        axes[row, 2].set_xlabel('Day')
 
 plt.tight_layout()
-plt.savefig('results/mpc_dry.png', dpi=150)
+plt.savefig('results/mpc_all_scenarios.png', dpi=150)
 plt.show()

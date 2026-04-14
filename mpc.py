@@ -105,8 +105,11 @@ def run_mpc(abm, climate_forecast, W_remaining,
         cost, u0,
         method='SLSQP',
         bounds=bounds,
-        options={'maxiter': 100, 'ftol': 1e-4,
-                 'disp': False, 'eps': 1e-2}   # eps fixes gradient noise
+
+        options={'maxiter': 75,    # was 100
+                 'ftol': 1e-3,     # was 1e-4
+                 'disp': False,
+                 'eps': 1e-2}
     )
 
     # Take only first day (receding horizon principle)
