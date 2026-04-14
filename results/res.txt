@@ -1,0 +1,253 @@
+C:\Users\Tara\Documents\Thesis>python main.py
+NoData value: -32767.0
+Min elevation: 70
+Max elevation: 181
+
+Lowest agent:  129
+  Sends water to: []
+  Nr = 0  (should be 0)
+
+Highest agent: 104
+  Sends water to: [91, 92, 105, 117, 118]
+  Nr = 5  (should be > 0)
+Dry (2021): rainfall=90.1mm, mean_temp=19.9°C, mean_ET=6.5mm/day
+Wet (2022): rainfall=473.6mm, mean_temp=18.0°C, mean_ET=5.7mm/day
+Final mean biomass:  0.3786
+Mean soil water:     553354280201244928.0 mm
+Field capacity:      140.0 mm
+Wilting point:       60.0 mm
+
+C:\Users\Tara\Documents\Thesis>
+
+wheat, lambda = 0.001, Hp = 8:
+
+PS C:\Users\Tara\Documents\Thesis> & C:/Users/Tara/AppData/Local/Programs/Python/Python312/python.exe c:/Users/Tara/Documents/Thesis/main.py
+NoData value: -32767.0
+Min elevation: 70
+Max elevation: 181
+
+Lowest agent:  129
+  Sends water to: []
+  Nr = 0  (should be 0)
+
+Highest agent: 104
+  Sends water to: [91, 92, 105, 117, 118]
+  Nr = 5  (should be > 0)
+Dry (2021): rainfall=90.1mm, mean_temp=19.9°C, mean_ET=6.5mm/day
+Wet (2022): rainfall=473.6mm, mean_temp=18.0°C, mean_ET=5.7mm/day
+Validation — Final biomass:  1916.3713
+Validation — Mean soil water: 87.2 mm
+
+No-irrigation baseline biomass: 1916.33
+
+Day  20 | biomass=2.6 | soil_water=75.6mm | irrigation=0.0mm | budget_left=0mm | solve_time=0.00s
+Day  40 | biomass=44.5 | soil_water=75.3mm | irrigation=0.0mm | budget_left=0mm | solve_time=0.00s
+Day  60 | biomass=424.3 | soil_water=65.7mm | irrigation=0.0mm | budget_left=0mm | solve_time=0.00s
+Day  80 | biomass=1038.2 | soil_water=64.2mm | irrigation=0.0mm | budget_left=0mm | solve_time=0.00s
+Day 100 | biomass=1622.4 | soil_water=79.0mm | irrigation=0.0mm | budget_left=0mm | solve_time=0.00s
+
+==================================================
+MPC Results — Dry Scenario (2021)
+==================================================
+  Final biomass:         1916.35
+  No-irrigation biomass: 1916.33
+  Biomass increase:      0.0%
+  Total irrigation:      6370.0 mm
+  Water budget used:     100.0%
+  Avg solve time:        16.545 s
+  Max solve time:        474.349 s
+PS C:\Users\Tara\Documents\Thesis>
+
+
+wheat, Hp = 8
+
+PS C:\Users\Tara\Documents\Thesis> & C:/Users/Tara/AppData/Local/Programs/Python/Python312/python.exe c:/Users/Tara/Documents/Thesis/main.py
+NoData value: -32767.0
+Min elevation: 70
+Max elevation: 181
+
+Lowest agent:  129
+  Sends water to: []
+  Nr = 0  (should be 0)
+
+Highest agent: 104
+  Sends water to: [91, 92, 105, 117, 118]
+  Nr = 5  (should be > 0)
+Dry (2021): rainfall=90.1mm, mean_temp=19.9°C, mean_ET=6.5mm/day
+Wet (2022): rainfall=473.6mm, mean_temp=18.0°C, mean_ET=5.7mm/day
+============================================================
+SECTION 1: ABM Validation
+============================================================
+Fixed schedule applies 19.1 mm every 8 days.
+Fixed-schedule biomass:  1916.38
+Mean soil water:         92.9 mm
+
+============================================================
+SECTION 2: No-Irrigation Baseline
+============================================================
+No-irrigation biomass:   1916.33
+
+============================================================
+SECTION 3: Water Budget
+============================================================
+Crop:                    Wheat
+Kc (season average):     0.85
+ET0 mean:                6.50 mm/day
+Seasonal ET demand:      663 mm/agent
+Seasonal rainfall:       90 mm/agent
+Full irrigation need:    573 mm/agent
+Scarcity factor:         50%
+Budget per agent:        287 mm (2.4 mm/day avg)
+Total field budget:      37270 mm
+
+============================================================
+SECTION 4: MPC — Dry Scenario (2021)
+============================================================
+Day   0 | biomass=     0.0 | soil_water=  90.6mm | irrigation=1154.9mm | budget_left=  36115mm | solve=107.7s
+Day  20 | biomass=     2.6 | soil_water=  98.5mm | irrigation= 422.8mm | budget_left=  26396mm | solve=125.7s
+Day  40 | biomass=    44.5 | soil_water= 103.2mm | irrigation= 355.6mm | budget_left=  20815mm | solve=37.2s
+Day  60 | biomass=   424.3 | soil_water=  99.1mm | irrigation= 414.1mm | budget_left=  12407mm | solve=26.1s
+Day  80 | biomass=  1038.2 | soil_water=  99.2mm | irrigation= 467.7mm | budget_left=   4057mm | solve=21.4s
+Day 100 | biomass=  1622.4 | soil_water=  90.7mm | irrigation=   0.0mm | budget_left=      0mm | solve=0.0s
+
+============================================================
+MPC Results — Wheat — Dry Scenario (2021)
+============================================================
+  Final biomass (MPC):      1916.39
+  Final biomass (no irr):   1916.33
+  Biomass increase:         0.0%
+  Total irrigation used:    37269.7 mm
+  Budget used:              100.0% of 37270mm
+  Avg solve time per day:   47.71 s
+  Max solve time:           342.40 s
+  Days above stress thresh: 87/120
+
+
+--------------------------------------------
+rice, Hp = 8
+
+PS C:\Users\Tara\Documents\Thesis> & C:/Users/Tara/AppData/Local/Programs/Python/Python312/python.exe c:/Users/Tara/Documents/Thesis/main.py
+NoData value: -32767.0
+Min elevation: 70
+Max elevation: 181
+
+Lowest agent:  129
+  Sends water to: []
+  Nr = 0  (should be 0)
+
+Highest agent: 104
+  Sends water to: [91, 92, 105, 117, 118]
+  Nr = 5  (should be > 0)
+Dry (2021): rainfall=90.1mm, mean_temp=19.9°C, mean_ET=6.5mm/day
+Wet (2022): rainfall=473.6mm, mean_temp=18.0°C, mean_ET=5.7mm/day
+============================================================
+SECTION 1: ABM Validation
+============================================================
+Fixed schedule applies 26.9 mm every 8 days.
+Fixed-schedule biomass:  1150.04
+Mean soil water:         104.5 mm
+
+============================================================
+SECTION 2: No-Irrigation Baseline
+============================================================
+No-irrigation biomass:   1150.04
+
+============================================================
+SECTION 3: Water Budget
+============================================================
+Crop:                    Rice
+Kc (season average):     1.15
+ET0 mean:                6.50 mm/day
+Seasonal ET demand:      898 mm/agent
+Seasonal rainfall:       90 mm/agent
+Full irrigation need:    808 mm/agent
+Scarcity factor:         50%
+Budget per agent:        404 mm (3.4 mm/day avg)
+Total field budget:      52491 mm
+
+============================================================
+SECTION 4: MPC — Dry Scenario (2021)
+============================================================
+Day   0 | biomass=     0.0 | soil_water=  96.7mm | irrigation=1950.0mm | budget_left=  50541mm | solve=93.5s
+Day  20 | biomass=     1.7 | soil_water= 129.8mm | irrigation= 601.6mm | budget_left=  33390mm | solve=24.0s
+Day  40 | biomass=     6.1 | soil_water= 138.8mm | irrigation= 703.7mm | budget_left=  24934mm | solve=31.0s
+Day  60 | biomass=    35.3 | soil_water= 132.5mm | irrigation= 705.6mm | budget_left=  10098mm | solve=28.1s
+Day  80 | biomass=   222.3 | soil_water=  99.1mm | irrigation=   0.0mm | budget_left=      0mm | solve=0.0s
+Day 100 | biomass=   687.8 | soil_water=  83.7mm | irrigation=   0.0mm | budget_left=      0mm | solve=0.0s
+
+============================================================
+MPC Results — Rice — Dry Scenario (2021)
+============================================================
+  Final biomass (MPC):      1150.04
+  Final biomass (no irr):   1150.04
+  Biomass increase:         0.0%
+  Total irrigation used:    52491.2 mm
+  Budget used:              100.0% of 52491mm
+  Avg solve time per day:   19.13 s
+  Max solve time:           96.66 s
+  Days above stress thresh: 68/120
+
+---------------------
+rice
+
+PS C:\Users\Tara\Documents\Thesis> & C:/Users/Tara/AppData/Local/Programs/Python/Python312/python.exe c:/Users/Tara/Documents/Thesis/main.py
+NoData value: -32767.0
+Min elevation: 70
+Max elevation: 181
+
+Lowest agent:  129
+  Sends water to: []
+  Nr = 0  (should be 0)
+
+Highest agent: 104
+  Sends water to: [91, 92, 105, 117, 118]
+  Nr = 5  (should be > 0)
+Dry (2021): rainfall=90.1mm, mean_temp=19.9°C, mean_ET=6.5mm/day
+Wet (2022): rainfall=473.6mm, mean_temp=18.0°C, mean_ET=5.7mm/day
+============================================================
+SECTION 1: ABM Validation
+============================================================
+Fixed schedule applies 26.9 mm every 8 days.
+Fixed-schedule biomass:  746.57
+Mean soil water:         104.5 mm
+
+============================================================
+SECTION 2: No-Irrigation Baseline
+============================================================
+No-irrigation biomass:   327.38
+
+============================================================
+SECTION 3: Water Budget
+============================================================
+Crop:                    Rice
+Kc (season average):     1.15
+ET0 mean:                6.50 mm/day
+Seasonal ET demand:      898 mm/agent
+Seasonal rainfall:       90 mm/agent
+Full irrigation need:    808 mm/agent
+Scarcity factor:         70%
+Budget per agent:        565 mm (4.7 mm/day avg)
+Total field budget:      73488 mm
+
+============================================================
+SECTION 4: MPC — Dry Scenario (2021)
+============================================================
+Day   0 | biomass=     0.0 | soil_water=  96.7mm | irrigation=1950.0mm | budget_left=  71538mm | solve=63.4s      
+Day  20 | biomass=     1.7 | soil_water= 130.0mm | irrigation= 602.4mm | budget_left=  54359mm | solve=19.7s      
+Day  40 | biomass=     6.0 | soil_water= 140.0mm | irrigation= 709.8mm | budget_left=  45747mm | solve=27.2s      
+Day  60 | biomass=    32.7 | soil_water= 143.4mm | irrigation=1481.7mm | budget_left=  28690mm | solve=335.7s     
+Day  80 | biomass=   207.0 | soil_water= 150.9mm | irrigation=1495.2mm | budget_left=   9578mm | solve=336.4s     
+Day 100 | biomass=   592.2 | soil_water= 109.7mm | irrigation=   0.0mm | budget_left=      0mm | solve=0.0s       
+
+============================================================
+MPC Results — Rice — Dry Scenario (2021)
+============================================================
+  Final biomass (MPC):      830.11
+  Final biomass (no irr):   327.38
+  Biomass increase:         153.6%
+  Total irrigation used:    73487.6 mm
+  Budget used:              100.0% of 73488mm
+  Avg solve time per day:   128.99 s
+  Max solve time:           580.19 s
+  Days above stress thresh: 88/120
+
