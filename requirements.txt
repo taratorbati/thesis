@@ -1,0 +1,27 @@
+# Core scientific stack
+numpy>=1.26
+pandas>=2.0
+scipy>=1.11
+matplotlib>=3.8
+
+# Image and raster I/O
+Pillow>=10.0          # used by terrain.py to read gilan_farm.tif
+
+# Persistence
+pyarrow>=14.0         # parquet I/O (results/runs/*.parquet)
+
+# Configuration
+pyyaml>=6.0           # not yet used — for Step D when MPC config moves to YAML
+
+# Step D (MPC) — uncomment when ready:
+# casadi>=3.6
+# (IPOPT comes bundled with casadi)
+
+# Step E (RL) — uncomment when ready:
+# torch>=2.1
+# stable-baselines3>=2.2
+# gymnasium>=0.29
+# tensorboard>=2.15  # optional, for training visualization
+
+# Development:
+# pytest>=7.4        # for tests/ once they exist
