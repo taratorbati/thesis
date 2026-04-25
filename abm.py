@@ -37,7 +37,7 @@ class CropSoilABM:
 
     def reset(self):
         t = self.theta
-        self.x1 = np.full(self.N, t['theta6'] * t['theta5'] * 0.6)
+        self.x1 = np.full(self.N, t['theta6'] * t['theta5'])
         self.x2 = np.full(self.N, t.get('x2_init', 0.0))
         self.x3 = np.zeros(self.N)
         self.x4 = np.full(self.N, t.get('x4_init', 0.0))
