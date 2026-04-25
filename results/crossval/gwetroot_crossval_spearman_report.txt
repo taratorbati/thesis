@@ -1,0 +1,30 @@
+======================================================================
+GWETROOT CROSS-VALIDATION — No irrigation, CASCADE runoff
+Crop: Rice
+Root depth: 400.0 mm
+FC: 140 mm, WP: 60 mm
+======================================================================
+
+Dry (2022):
+  Spearman rank ρ:  0.528 (p = 5.46e-08)
+  Pearson linear r: 0.738 (p = 3.14e-17)
+  ABM x1:           66.7 mm (range: 60.3--83.9)
+  ABM normalized:   0.083 (0=WP, 1=FC)
+  GWETROOT:         0.461 (NASA fraction)
+  Rainfall:         39.7 mm total
+
+Moderate (2020):
+  Spearman rank ρ:  0.156 (p = 1.36e-01)
+  Pearson linear r: 0.534 (p = 3.43e-08)
+  ABM x1:           66.2 mm (range: 61.0--81.7)
+  ABM normalized:   0.077 (0=WP, 1=FC)
+  GWETROOT:         0.434 (NASA fraction)
+  Rainfall:         42.1 mm total
+
+Wet (2024):
+  Spearman rank ρ:  0.447 (p = 7.03e-06)
+  Pearson linear r: 0.338 (p = 9.18e-04)
+  ABM x1:           82.1 mm (range: 64.2--129.6)
+  ABM normalized:   0.276 (0=WP, 1=FC)
+  GWETROOT:         0.510 (NASA fraction)
+  Rainfall:         176.8 mm total

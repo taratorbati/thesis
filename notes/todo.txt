@@ -1,0 +1,41 @@
+## What Needs To Be Done Now (MPC Chapter)
+
+### MPC Design Decisions Already Made
+- **Prediction horizons:** Hp = 7 and Hp = 14 (baseline paper tested 3, 7, 14; we skip 3 as too short, and 21 as too heavy)
+- **Runoff mode for MPC prediction:** Cascade (correctly predicts sink ponding)
+
+### MPC Formulation To Implement
+
+**Proposed cost function:**
+J = -α₁ Σ_k x̄₄(k) + α₂ Σ_k ū(k) + α₃ Σ_k Σ_n max(ST - x₁ⁿ(k), 0) + α₄ Σ_k Σ_{n∈sinks} x₅ⁿ(k)
+
+Four terms:
+1. Maximize cumulative biomass (field average)
+2. Minimize total water use
+3. Drought penalty (x₁ below stress threshold)
+4. Ponding penalty at sink agents (NEW — needed because of x₅ dynamics)
+
+**Constraints:**
+- Σ_{k,n} u(k) ≤ W_remaining (budget — MUST be inside solver, not post-hoc clipping)
+- 0 ≤ uⁿ(k) ≤ UB per agent per day
+
+**Baseline paper's MPC for comparison:**
+- Cost: -terminal normalized biomass + λ × normalized water use
+- No stress penalty, no ponding penalty
+- Budget as constraint
+- Solver: interior-point (MATLAB)
+
+**Our earlier MPC (from previous conversation, now outdated):**
+- Cost: -cumulative biomass + λ × water + 0.1 × stress
+- Budget by post-hoc clipping (weakness)
+- No ponding penalty
+- No x₅ state
+- Solver: SLSQP (scipy)
+
+### Open Questions for MPC
+1. Weight selection (α₁–α₄): how to set economically meaningful weights given x₄ in g/m²
+2. Solver choice: SLSQP vs trust-constr vs other scipy solvers
+3. Computational feasibility: 130 agents × Hp days = 910 (Hp=7) or 1820 (Hp=14) decision variables per solve
+4. Perfect vs imperfect weather forecast assumption
+5. Control horizon Hc vs prediction horizon Hp (Hc < Hp reduces variables)
+6. Should the MPC optimize all 130 agents individually, or group them by elevation zones?
