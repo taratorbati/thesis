@@ -10,7 +10,8 @@
 # The loop:
 #   1. Initialize ABM at FC × root_depth (rice-realistic post-puddling state).
 #   2. Reset controller, telling it terrain, crop, season length, budget.
-#   3. Each day:
+#   3. If the controller has a set_climate() method, call it (MPC needs this).
+#   4. Each day:
 #        a. Build the controller's daily inputs (state, climate, budget).
 #        b. Call controller.step() to get u (per-agent action, mm).
 #        c. Clip action against UB and budget_remaining (safety).
@@ -89,7 +90,10 @@ def run_season(
     forecast_provider : callable or None
         Optional callable f(day, climate, horizon) -> dict that returns
         a forecast dict over the next `horizon` days. If None, the
-        controller receives None as its forecast argument.
+        controller receives None as its forecast argument. Note: the MPC
+        controller manages its own forecast internally via set_climate(),
+        so this parameter is typically only used by non-MPC controllers
+        that want external forecast access.
     forecast_horizon : int
         Forecast horizon length in days. Ignored if forecast_provider is None.
     initial_x1 : float, np.ndarray, or None
@@ -152,6 +156,10 @@ def run_season(
         terrain=terrain, crop=crop, season_days=season_days,
         budget_total=budget_total, scenario_name=scenario_name,
     )
+
+    # If the controller needs full-season climate access (e.g. MPC for forecasts)
+    if hasattr(controller, 'set_climate'):
+        controller.set_climate(climate)
 
     # ── Allocate trajectory storage ───────────────────────────────────────────
 
@@ -249,6 +257,11 @@ def run_season(
 
     final_metrics = _compute_final_metrics(trajectory, crop, terrain, budget_total)
 
+    # Collect solve times from the controller if available (MPC)
+    solve_times_list = None
+    if hasattr(controller, 'solve_times'):
+        solve_times_list = controller.solve_times
+
     metadata = {
         'scenario':           scenario_name,
         'year':               int(climate.get('year', -1)) if 'year' in climate else None,
@@ -266,15 +279,23 @@ def run_season(
         'wallclock_seconds':  float(wallclock_seconds),
         'final_metrics':      final_metrics,
     }
+    if solve_times_list is not None:
+        metadata['solve_times'] = solve_times_list
+        metadata['solve_time_mean_ms'] = float(np.mean(solve_times_list))
+        metadata['solve_time_max_ms'] = float(np.max(solve_times_list))
 
     save_run(output_path, trajectory, metadata)
     discard_partial(output_path)
 
     if verbose:
+        solve_info = ''
+        if solve_times_list is not None:
+            solve_info = (f" solve_mean={np.mean(solve_times_list):.0f}ms"
+                          f" solve_max={np.max(solve_times_list):.0f}ms")
         print(f"  [done] {output_path.name} "
               f"yield={final_metrics['yield_kg_ha']:.0f} kg/ha "
               f"water={final_metrics['water_used_mm']:.1f} mm "
-              f"({wallclock_seconds:.1f}s)")
+              f"({wallclock_seconds:.1f}s){solve_info}")
 
     return 'completed'
 
