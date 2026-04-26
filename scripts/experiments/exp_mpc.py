@@ -59,8 +59,8 @@ def main():
                         help='Seed for noisy forecast. Default: None.')
     parser.add_argument('--alpha2', type=float, default=None,
                         help='Override alpha2 weight. Default: use ARCHITECTURE.md value.')
-    parser.add_argument('--smooth', action='store_true',
-                        help='Use smooth approximations for non-differentiable ops.')
+    parser.add_argument('--no-smooth', action='store_true',
+                        help='Disable smooth approximations (use CasADi native fmax/fmin).')
     parser.add_argument('--force', action='store_true',
                         help='Overwrite existing output files.')
     parser.add_argument('--quiet', action='store_true')
@@ -90,7 +90,7 @@ def main():
         print(f"  Field: {terrain['N']} agents")
         print(f"  Horizon: Hp={args.horizon}")
         print(f"  Forecast: {args.forecast}")
-        print(f"  Smooth: {args.smooth}")
+        print(f"  Smooth: {not args.no_smooth}")
         if weights:
             print(f"  Weight overrides: {weights}")
         print()
@@ -118,7 +118,7 @@ def main():
             controller = MPCController(
                 Hp=args.horizon,
                 weights=weights,
-                use_smooth=args.smooth,
+                use_smooth=not args.no_smooth,
                 forecast_mode=args.forecast,
                 noise_sigma=0.15,
                 noise_seed=args.noise_seed,

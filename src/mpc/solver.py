@@ -217,13 +217,16 @@ def build_nlp(terrain, crop, Hp, sink_agents, weights=None, refs=None,
     nlp = {'x': w, 'f': J, 'g': g_all, 'p': p}
 
     opts = {
-        'ipopt.max_iter': 200,
-        'ipopt.tol': 1e-5,
+        'ipopt.max_iter': 500,
+        'ipopt.tol': 1e-4,              # relaxed from 1e-5 (agricultural MPC doesn't need machine precision)
+        'ipopt.acceptable_tol': 1e-3,    # accept "good enough" solutions early
+        'ipopt.acceptable_iter': 10,     # accept after 10 consecutive acceptable iterations
         'ipopt.print_level': 0,          # quiet
         'print_time': 0,
         'ipopt.linear_solver': 'mumps',
         'ipopt.warm_start_init_point': 'yes',
-        'ipopt.mu_init': 1e-3,
+        'ipopt.mu_init': 1e-2,           # larger initial barrier (helps with non-smooth transitions)
+        'ipopt.nlp_scaling_method': 'gradient-based',  # auto-scale based on gradient magnitudes
     }
 
     solver = ca.nlpsol('mpc', 'ipopt', nlp, opts)

@@ -45,7 +45,7 @@ class MPCController(Controller):
     """
 
     def __init__(self, Hp=8, weights=None, ub_mm_per_day=12.0,
-                 use_smooth=False, forecast_mode='perfect',
+                 use_smooth=True, forecast_mode='perfect',
                  noise_sigma=0.15, noise_seed=None, verbose=True):
         name = f"mpc_{forecast_mode}_Hp{Hp}"
         super().__init__(name=name)
@@ -175,40 +175,18 @@ class MPCController(Controller):
         if 'Infeasible' in info['status']:
             if self.verbose:
                 print(f"    WARNING: IPOPT infeasible at day {day}, "
-                      f"falling back to previous action")
-            u_optimal = self._u_prev.copy()
+                      f"falling back to zero irrigation")
+            u_optimal = np.zeros(N)
 
         # Update tracking for next step
         self._u_prev = u_optimal.copy()
         self._warm_x0 = info['warm_x0_next']
 
-        # Update x3 and x4 tracking (approximate, using actual ABM step result
-        # which the runner will provide via state on the next call).
-        # For x4: we track field-mean from the state dict.
+        # Read x3 and x4 from the true ABM state (not approximated).
+        # The runner provides the actual state each day, so we track it
+        # exactly rather than accumulating drift from approximations.
         self._x4_mean_current = float(state['x4'].mean())
-
-        # For x3: we need h2 and h3 from this step.
-        # h2 is precomputed; h3 depends on phi1/ETc which we approximate.
-        # This is a tracking variable, not a shooting state — small errors OK.
-        ETc = float(climate_today['ET']) * self._crop.get('Kc', 1.0)
-        if day < len(self._precomputed.h2):
-            h2_val = float(self._precomputed.h2[day])
-        else:
-            h2_val = 1.0
-
-        # Approximate h3 from current state
-        theta1 = self._crop['theta1']
-        theta2 = self._crop['theta2']
-        theta5 = self._crop['theta5']
-        theta14 = self._crop['theta14']
-        demand = theta1 * (x1_current - theta2 * theta5)
-        phi1 = np.minimum(np.maximum(demand, 0), ETc)
-        h4 = np.where(ETc > 1e-6, np.maximum(1.0 - phi1 / ETc, 0), 0)
-        h3 = 1.0 - theta14 * h4
-
-        theta11 = self._crop['theta11']
-        theta12 = self._crop['theta12']
-        self._x3_current = self._x3_current + theta11 * (1 - h2_val) + theta12 * (1 - h3)
+        self._x3_current = np.asarray(state['x3'], dtype=float).copy()
 
         return u_optimal
 
