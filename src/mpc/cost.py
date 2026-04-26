@@ -9,6 +9,10 @@
 #   + α₅ · Σ_k ||u(k+1) - u(k)||² / (u_max² · N)
 #
 # All terms are O(1) per time step when properly normalized.
+#
+# v3.0: MX-compatible. All ca.SX(0) → 0 (plain float), which works with
+# both SX and MX via CasADi operator overloading. use_smooth flag controls
+# whether the drought deficit term uses smooth_max_zero.
 # =============================================================================
 
 import casadi as ca
@@ -35,7 +39,7 @@ DEFAULT_REFS = {
 
 
 def build_cost_components(N, crop, sink_agents, weights=None, refs=None):
-    """Return a dict of callables, each computing one cost term.
+    """Return a dict of numeric values needed by the solver to build the cost.
 
     Parameters
     ----------
@@ -53,20 +57,15 @@ def build_cost_components(N, crop, sink_agents, weights=None, refs=None):
     Returns
     -------
     dict
-        Keys: 'biomass', 'water', 'drought', 'ponding', 'delta_u', 'total'.
-        Values: description strings and the weight/ref values used.
-    components : dict
-        The actual numeric values needed by the solver to build the cost.
     """
     w = {**DEFAULT_WEIGHTS, **(weights or {})}
     r = {**DEFAULT_REFS, **(refs or {})}
 
-    # Compute derived references
     fc_total = crop['theta6'] * crop['theta5']
     wp_total = crop['theta2'] * crop['theta5']
     p = crop.get('p', 0.20)
     raw = p * (fc_total - wp_total)
-    st = fc_total - raw  # stress threshold
+    st = fc_total - raw
 
     if r['W_daily_ref'] is None:
         r['W_daily_ref'] = 5.0 * N
@@ -90,32 +89,34 @@ def build_cost_components(N, crop, sink_agents, weights=None, refs=None):
 
 
 def compute_cost(u_trajectory, x1_trajectory, x5_trajectory, x4_terminal_mean,
-                 components, Hp):
+                 components, Hp, use_smooth=False):
     """Compute the total scalar cost from trajectory variables.
 
-    All inputs are CasADi symbolic expressions.
+    All inputs are CasADi symbolic expressions (SX or MX).
 
     Parameters
     ----------
-    u_trajectory : list of ca.SX, each shape (N,)
+    u_trajectory : list of CasADi vectors, each shape (N,)
         Irrigation actions for k = 0..Hp-1.
-    x1_trajectory : list of ca.SX, each shape (N,)
+    x1_trajectory : list of CasADi vectors, each shape (N,)
         Soil water AFTER step k, for k = 0..Hp-1.
-    x5_trajectory : list of ca.SX, each shape (N,)
+    x5_trajectory : list of CasADi vectors, each shape (N,)
         Surface ponding AFTER step k, for k = 0..Hp-1.
-    x4_terminal_mean : ca.SX scalar
+    x4_terminal_mean : CasADi scalar
         Field-mean biomass at the end of the horizon.
     components : dict
         From build_cost_components.
     Hp : int
         Prediction horizon.
+    use_smooth : bool
+        If True, use smooth_max_zero for the drought deficit term.
 
     Returns
     -------
-    J : ca.SX scalar
+    J : CasADi scalar
         Total cost (to be minimized by IPOPT).
     terms : dict
-        Individual cost terms (for logging/debugging).
+        Individual cost terms.
     """
     w = components['weights']
     r = components['refs']
@@ -123,42 +124,49 @@ def compute_cost(u_trajectory, x1_trajectory, x5_trajectory, x4_terminal_mean,
     sinks = components['sink_agents']
     n_sinks = components['n_sinks']
 
+    # Choose max(x, 0) operator
+    if use_smooth:
+        from src.mpc.smoothing import smooth_max_zero
+        _max0 = lambda x: smooth_max_zero(x, eps=0.01)
+    else:
+        _max0 = lambda x: ca.fmax(x, 0)
+
     # ── Term 1: Terminal biomass (Mayer term, negative = maximize) ─────────
     J_biomass = -w['alpha1'] * x4_terminal_mean / r['x4_ref']
 
     # ── Term 2: Water cost (path) ─────────────────────────────────────────
-    J_water = ca.SX(0)
+    J_water = 0.0
     for k in range(Hp):
         daily_total = ca.sum1(u_trajectory[k])
         J_water += daily_total / r['W_daily_ref']
-    J_water *= w['alpha2']
+    J_water = J_water * w['alpha2']
 
     # ── Term 3: Drought stress penalty (path) ─────────────────────────────
-    J_drought = ca.SX(0)
+    J_drought = 0.0
     st = r['ST']
     denom = max(st - r['WP'], 1e-6)
     for k in range(Hp):
-        deficit = ca.fmax(st - x1_trajectory[k], 0)  # (N,) vector
+        deficit = _max0(st - x1_trajectory[k])
         J_drought += ca.sum1(deficit) / (N * denom)
-    J_drought *= w['alpha3']
+    J_drought = J_drought * w['alpha3']
 
     # ── Term 4: Ponding at sinks (path) ───────────────────────────────────
-    J_ponding = ca.SX(0)
+    J_ponding = 0.0
     if len(sinks) > 0:
         for k in range(Hp):
-            sink_x5_sum = ca.SX(0)
+            sink_x5_sum = 0.0
             for s in sinks:
                 sink_x5_sum += x5_trajectory[k][s]
             J_ponding += sink_x5_sum / (n_sinks * r['x5_ref'])
-    J_ponding *= w['alpha4']
+    J_ponding = J_ponding * w['alpha4']
 
     # ── Term 5: Control rate regularization (path) ────────────────────────
-    J_delta_u = ca.SX(0)
+    J_delta_u = 0.0
     u_max_sq_N = r['u_max']**2 * N
     for k in range(1, Hp):
         diff = u_trajectory[k] - u_trajectory[k-1]
         J_delta_u += ca.dot(diff, diff) / u_max_sq_N
-    J_delta_u *= w['alpha5']
+    J_delta_u = J_delta_u * w['alpha5']
 
     # ── Total ─────────────────────────────────────────────────────────────
     J_total = J_biomass + J_water + J_drought + J_ponding + J_delta_u

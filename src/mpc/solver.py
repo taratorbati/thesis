@@ -4,7 +4,7 @@
 #
 # The NLP is constructed once at controller reset (expensive: ~10-30s for
 # N=130, Hp=8). Subsequent solves reuse the compiled NLP structure and
-# only update the parameter values (cheap: ~1-5s per solve).
+# only update the parameter values.
 #
 # Formulation: multiple-shooting.
 #   Decision variables: u[k] (N,) for k=0..Hp-1   → N*Hp variables
@@ -12,6 +12,15 @@
 #   Equality constraints: dynamics x1[k+1]=f(...), x5[k+1]=f(...)
 #   Inequality constraints: global budget Σu ≤ W_remaining
 #   Box constraints: 0 ≤ u ≤ UB, x1 ≥ 0, x5 ≥ 0
+#
+# v3.0: MX-based NLP construction.
+#   The dynamics step_fn is built with SX (scalar expressions, efficient for
+#   element-wise cascade routing). The NLP variables and horizon unrolling use
+#   MX (matrix expressions). When an SX-based ca.Function is called with MX
+#   arguments, CasADi keeps each call as a single opaque graph node instead
+#   of inlining the full expression tree. For Hp=8 this means IPOPT sees 8
+#   compact function-call nodes rather than 8 copies of the 130-agent cascade
+#   → dramatically smaller NLP graph, faster AD, faster solves.
 # =============================================================================
 
 import time
@@ -26,9 +35,6 @@ from src.mpc.cost import build_cost_components, compute_cost
 def build_nlp(terrain, crop, Hp, sink_agents, weights=None, refs=None,
               ub_mm_per_day=12.0, use_smooth=False, verbose=True):
     """Build the CasADi NLP structure for the MPC.
-
-    This is called once at controller reset. The returned dict contains
-    everything needed to solve the NLP at each daily step.
 
     Parameters
     ----------
@@ -56,40 +62,31 @@ def build_nlp(terrain, crop, Hp, sink_agents, weights=None, refs=None,
         print(f"  Building NLP: N={N}, Hp={Hp}, "
               f"vars={N*Hp + 2*N*(Hp+1)}...")
 
-    # Build the dynamics function (symbolic graph of one ABM step)
+    # Build the dynamics function (SX-based, encapsulated in ca.Function)
     step_fn = build_dynamics_function(terrain, crop, use_smooth=use_smooth)
 
     # Cost components
     components = build_cost_components(N, crop, sink_agents, weights, refs)
 
-    # ── Parameters (change each solve) ────────────────────────────────────
+    # ── Parameters (MX — change each solve) ───────────────────────────────
 
-    # Initial state
-    x1_init = ca.SX.sym('x1_init', N)
-    x5_init = ca.SX.sym('x5_init', N)
-    x4_init_mean = ca.SX.sym('x4_init_mean')  # scalar: field-mean biomass at start
-    x3_init = ca.SX.sym('x3_init', N)
+    x1_init = ca.MX.sym('x1_init', N)
+    x5_init = ca.MX.sym('x5_init', N)
+    x4_init_mean = ca.MX.sym('x4_init_mean')
+    x3_init = ca.MX.sym('x3_init', N)
 
-    # Budget remaining
-    W_remaining = ca.SX.sym('W_remaining')
+    W_remaining = ca.MX.sym('W_remaining')
 
-    # Precomputed climate arrays over the horizon (from src.precompute)
-    rain_h  = ca.SX.sym('rain_h', Hp)
-    ETc_h   = ca.SX.sym('ETc_h', Hp)
-    rad_h   = ca.SX.sym('rad_h', Hp)
-    h2_h    = ca.SX.sym('h2_h', Hp)
-    h7_h    = ca.SX.sym('h7_h', Hp)
-    g_base_h = ca.SX.sym('g_base_h', Hp)
+    rain_h   = ca.MX.sym('rain_h', Hp)
+    ETc_h    = ca.MX.sym('ETc_h', Hp)
+    rad_h    = ca.MX.sym('rad_h', Hp)
+    h2_h     = ca.MX.sym('h2_h', Hp)
+    h7_h     = ca.MX.sym('h7_h', Hp)
+    g_base_h = ca.MX.sym('g_base_h', Hp)
 
-    # Previous action for warm start / Δu first-step cost
-    u_prev = ca.SX.sym('u_prev', N)
+    u_prev = ca.MX.sym('u_prev', N)
 
-    # ── Decision variables ────────────────────────────────────────────────
-
-    # Control: u[k] for k = 0..Hp-1
-    # Shooting states: x1_s[k], x5_s[k] for k = 0..Hp (including initial = param)
-    # We only create decision variables for k = 1..Hp (the "internal" shooting nodes).
-    # k=0 is fixed by the parameter x1_init, x5_init.
+    # ── Decision variables (MX) ───────────────────────────────────────────
 
     opt_vars = []
     lbx = []
@@ -99,7 +96,7 @@ def build_nlp(terrain, crop, Hp, sink_agents, weights=None, refs=None,
     # Controls
     u_vars = []
     for k in range(Hp):
-        uk = ca.SX.sym(f'u_{k}', N)
+        uk = ca.MX.sym(f'u_{k}', N)
         u_vars.append(uk)
         opt_vars.append(uk)
         lbx += [0.0] * N
@@ -110,18 +107,18 @@ def build_nlp(terrain, crop, Hp, sink_agents, weights=None, refs=None,
     x1_vars = []
     x1_start = len(lbx)
     for k in range(Hp):
-        x1k = ca.SX.sym(f'x1_{k+1}', N)
+        x1k = ca.MX.sym(f'x1_{k+1}', N)
         x1_vars.append(x1k)
         opt_vars.append(x1k)
         lbx += [0.0] * N
-        ubx += [1e6] * N  # no hard upper bound on x1
+        ubx += [1e6] * N
     var_index['x1'] = (x1_start, x1_start + N * Hp)
 
     # Shooting states for x5 (k=1..Hp)
     x5_vars = []
     x5_start = len(lbx)
     for k in range(Hp):
-        x5k = ca.SX.sym(f'x5_{k+1}', N)
+        x5k = ca.MX.sym(f'x5_{k+1}', N)
         x5_vars.append(x5k)
         opt_vars.append(x5k)
         lbx += [0.0] * N
@@ -133,71 +130,70 @@ def build_nlp(terrain, crop, Hp, sink_agents, weights=None, refs=None,
 
     # ── Dynamics constraints (equality) ───────────────────────────────────
 
-    g_eq = []  # equality constraints: dynamics gaps
+    g_eq = []
 
-    # State trajectories for cost computation (including initial)
-    x1_traj = [x1_init]   # k=0
+    x1_traj = [x1_init]
     x5_traj = [x5_init]
     x4_inc_list = []
     x3_current = x3_init
 
     for k in range(Hp):
-        # Current state: x1_traj[k], x5_traj[k]
         x1_k = x1_traj[k]
         x5_k = x5_traj[k]
 
-        # Step dynamics
-        x1_next, x5_next, x4_inc, h3 = step_fn(
+        # Call SX-based step_fn with MX arguments → opaque node, not inlined
+        result = step_fn(
             x1_k, x5_k, u_vars[k],
             rain_h[k], ETc_h[k], rad_h[k],
             h2_h[k], h7_h[k], g_base_h[k],
         )
+        x1_next = result[0]
+        x5_next = result[1]
+        x4_inc  = result[2]
+        h3      = result[3]
 
         x4_inc_list.append(x4_inc)
 
-        # Shooting gap constraints: x1_vars[k] == x1_next, x5_vars[k] == x5_next
-        g_eq.append(x1_vars[k] - x1_next)  # should be zero
+        g_eq.append(x1_vars[k] - x1_next)
         g_eq.append(x5_vars[k] - x5_next)
 
-        # Next state for the trajectory
         x1_traj.append(x1_vars[k])
         x5_traj.append(x5_vars[k])
 
     # ── Budget constraint (inequality) ────────────────────────────────────
 
-    total_water = ca.SX(0)
+    total_water = ca.MX(0)
     for k in range(Hp):
-        total_water += ca.sum1(u_vars[k]) / N  # field-averaged mm
-    budget_gap = total_water - W_remaining  # must be ≤ 0
+        total_water += ca.sum1(u_vars[k]) / N
+    budget_gap = total_water - W_remaining
 
     # ── Assemble constraints ──────────────────────────────────────────────
 
     g_all = ca.vertcat(*g_eq, budget_gap)
 
     n_eq = sum(g.shape[0] for g in g_eq)
-    lbg = [0.0] * n_eq + [-1e20]  # equality + budget ≤ 0
+    lbg = [0.0] * n_eq + [-1e20]
     ubg = [0.0] * n_eq + [0.0]
 
     # ── Cost function ─────────────────────────────────────────────────────
 
-    # Terminal biomass: x4_init_mean + sum of all x4 increments (field-averaged)
     x4_terminal_mean = x4_init_mean
     for k in range(Hp):
         x4_terminal_mean = x4_terminal_mean + ca.sum1(x4_inc_list[k]) / N
 
-    # For Δu cost, prepend u_prev to the u trajectory
     u_traj_with_prev = [u_prev] + u_vars
 
     J, cost_terms = compute_cost(
-        u_trajectory=u_traj_with_prev[1:],   # u[0]..u[Hp-1]
-        x1_trajectory=[x1_traj[k+1] for k in range(Hp)],  # post-step x1
+        u_trajectory=u_traj_with_prev[1:],
+        x1_trajectory=[x1_traj[k+1] for k in range(Hp)],
         x5_trajectory=[x5_traj[k+1] for k in range(Hp)],
         x4_terminal_mean=x4_terminal_mean,
         components=components,
         Hp=Hp,
+        use_smooth=use_smooth,
     )
 
-    # Include Δu from u_prev to u[0]
+    # Δu from u_prev to u[0]
     diff0 = u_vars[0] - u_prev
     J_delta_u_prev = components['weights']['alpha5'] * ca.dot(diff0, diff0) / (
         components['refs']['u_max']**2 * N)
@@ -218,15 +214,15 @@ def build_nlp(terrain, crop, Hp, sink_agents, weights=None, refs=None,
 
     opts = {
         'ipopt.max_iter': 500,
-        'ipopt.tol': 1e-4,              # relaxed from 1e-5 (agricultural MPC doesn't need machine precision)
-        'ipopt.acceptable_tol': 1e-3,    # accept "good enough" solutions early
-        'ipopt.acceptable_iter': 10,     # accept after 10 consecutive acceptable iterations
-        'ipopt.print_level': 0,          # quiet
+        'ipopt.tol': 1e-4,
+        'ipopt.acceptable_tol': 1e-3,
+        'ipopt.acceptable_iter': 10,
+        'ipopt.print_level': 0,
         'print_time': 0,
         'ipopt.linear_solver': 'mumps',
         'ipopt.warm_start_init_point': 'yes',
-        'ipopt.mu_init': 1e-2,           # larger initial barrier (helps with non-smooth transitions)
-        'ipopt.nlp_scaling_method': 'gradient-based',  # auto-scale based on gradient magnitudes
+        'ipopt.mu_init': 1e-2,
+        'ipopt.nlp_scaling_method': 'gradient-based',
     }
 
     solver = ca.nlpsol('mpc', 'ipopt', nlp, opts)
@@ -277,7 +273,7 @@ def solve_step(nlp_data, x1_current, x5_current, x4_mean_current, x3_current,
     u_optimal : np.ndarray (N,)
         First-step optimal irrigation action.
     solve_info : dict
-        'solve_time_ms', 'status', 'cost', 'warm_x0_next' (shifted solution for warm-starting the next step)
+        'solve_time_ms', 'status', 'cost', 'warm_x0_next'
     """
     solver = nlp_data['solver']
     N = nlp_data['N']
@@ -300,7 +296,6 @@ def solve_step(nlp_data, x1_current, x5_current, x4_mean_current, x3_current,
 
     # Initial guess
     if warm_x0 is None:
-        # Default: uniform moderate irrigation + current state
         u_init = np.full(N * Hp, 2.0)
         x1_init = np.tile(x1_current, Hp)
         x5_init = np.tile(x5_current, Hp)
@@ -319,17 +314,14 @@ def solve_step(nlp_data, x1_current, x5_current, x4_mean_current, x3_current,
     )
     solve_time_ms = (time.time() - t0) * 1000
 
-    # Extract solution
     x_opt = np.asarray(sol['x']).flatten()
     status = solver.stats()['return_status']
     cost = float(sol['f'])
 
-    # Extract first-step action
     u_start, u_end = nlp_data['var_index']['u']
     u_all = x_opt[u_start:u_end].reshape(Hp, N)
     u_optimal = u_all[0]
 
-    # Build warm start for next step: shift by one period
     warm_x0_next = _shift_warm_start(x_opt, N, Hp, u_optimal)
 
     return u_optimal, {
@@ -341,12 +333,7 @@ def solve_step(nlp_data, x1_current, x5_current, x4_mean_current, x3_current,
 
 
 def _shift_warm_start(x_opt, N, Hp, u_last_fallback):
-    """Shift the solution by one time step for warm-starting the next solve.
-
-    u[0]..u[Hp-1] → u[1]..u[Hp-1], u[Hp-1] (repeat last)
-    x1[1]..x1[Hp] → x1[2]..x1[Hp], x1[Hp] (repeat last)
-    x5[1]..x5[Hp] → x5[2]..x5[Hp], x5[Hp] (repeat last)
-    """
+    """Shift the solution by one time step for warm-starting the next solve."""
     u_block = x_opt[:N*Hp].reshape(Hp, N)
     x1_block = x_opt[N*Hp:N*Hp + N*Hp].reshape(Hp, N)
     x5_block = x_opt[N*Hp + N*Hp:].reshape(Hp, N)
