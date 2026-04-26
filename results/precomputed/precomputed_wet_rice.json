@@ -1,0 +1,17 @@
+{
+  "scenario": "wet",
+  "crop_name": "rice",
+  "n_days": 93,
+  "arrays": [
+    "h1",
+    "x2",
+    "h2",
+    "h7",
+    "g_base",
+    "Kc_ET"
+  ],
+  "final_x2": 1306.2900000000004,
+  "total_Kc_ET_mm": 489.07619698834975,
+  "mean_h2": 1.0,
+  "mean_h7": 1.0
+}
