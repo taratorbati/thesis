@@ -17,6 +17,14 @@
 #     → 0.30 g/MJ incident solar (adjusted for leaf-quality management)
 #   - x4 units: g/m² total dry matter
 #   - Yield (kg/ha) = x4 × HI × 10
+#
+# Usage:
+#   from soil_data import get_crop
+#   crop = get_crop('rice')           # or 'tobacco'
+#   model = CropSoilABM(theta=crop, ...)
+#
+# RICE and TOBACCO are also exported directly for explicit use:
+#   from soil_data import RICE
 # =============================================================================
 
 # ── Shared soil parameters (silty loam, same for all crops) ───────────────────
@@ -102,6 +110,37 @@ TOBACCO = {
     'x4_init': 8.0,     # initial biomass (g/m²) — 2 plants/m² × ~4 g/seedling
 }
 
-# ── Active crop selection ─────────────────────────────────────────────────────
-# Change this line to switch crops: RICE or TOBACCO
-theta = RICE
+# ── Crop registry ─────────────────────────────────────────────────────────────
+
+CROPS = {
+    'rice':    RICE,
+    'tobacco': TOBACCO,
+}
+
+
+def get_crop(name):
+    """Return the parameter dict for a named crop.
+
+    Parameters
+    ----------
+    name : str
+        Crop name. Case-insensitive. One of {'rice', 'tobacco'}.
+
+    Returns
+    -------
+    dict
+        The crop's parameter dictionary. Mutating the returned dict will
+        not affect future calls — a shallow copy is returned.
+
+    Raises
+    ------
+    KeyError
+        If the crop name is not recognized.
+    """
+    key = name.lower().strip()
+    if key not in CROPS:
+        available = ', '.join(sorted(CROPS.keys()))
+        raise KeyError(
+            f"Unknown crop '{name}'. Available crops: {available}"
+        )
+    return dict(CROPS[key])

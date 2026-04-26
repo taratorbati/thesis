@@ -38,7 +38,7 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 YEAR = 2024  # Wet scenario
 
 df = load_cleaned_data()
-climate = extract_scenario(df, YEAR)
+climate = extract_scenario(df, YEAR, crop_params)
 n_days = crop_params['season_days']
 
 irrigations = [0.0, 5.0, 8.0]

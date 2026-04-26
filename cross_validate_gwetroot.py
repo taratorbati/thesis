@@ -48,7 +48,7 @@ scenarios = {
 results = {}
 
 for label, year in scenarios.items():
-    climate = extract_scenario(df, year)
+    climate = extract_scenario(df, year, crop_params)
 
     model = CropSoilABM(
         gamma_flat=gamma_flat,

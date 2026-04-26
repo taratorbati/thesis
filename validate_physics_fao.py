@@ -26,7 +26,7 @@ FC = crop_params['theta6'] * root_depth
 WP = crop_params['theta2'] * root_depth
 
 # We will just test the Dry Year (2022) to keep it simple
-climate = extract_scenario(df, 2022)
+climate = extract_scenario(df, 2022, crop_params)
 
 # ── 1. Run Your ABM (The Code to be Tested) ──────────────────────────────────
 model = CropSoilABM(

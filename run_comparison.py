@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 
 from abm import CropSoilABM
 from climate_data import extract_scenario, load_cleaned_data
-from soil_data import theta as crop_params
+from soil_data import RICE as crop_params
 from src.terrain import load_terrain
 
 sys.path.insert(0, '.')
@@ -40,7 +40,7 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 YEAR = 2022  # wet scenario — has actual surface runoff events
 
 df = load_cleaned_data()
-climate = extract_scenario(df, YEAR)
+climate = extract_scenario(df, YEAR, crop_params)
 n_days = crop_params['season_days']
 
 modes = ['none', 'simple', 'cascade']

@@ -2,12 +2,15 @@
 # climate_data.py
 # Load cleaned climate data and extract crop-season scenarios.
 # Reads from climate_apr_oct_cleaned.csv (produced by preprocess.py).
-# Uses Penman-Monteith ET0 and season windows from soil_data.py.
+# Uses Penman-Monteith ET0.
+#
+# extract_scenario() now takes the crop dict as an explicit parameter rather
+# than importing it at module load time. This means the same Python process
+# can load rice and tobacco scenarios without conflicting state.
 # =============================================================================
 
 import pandas as pd
 import numpy as np
-from soil_data import theta as crop_params
 
 
 DATA_CSV = 'results/preprocessing/climate_apr_oct_cleaned.csv'
@@ -20,21 +23,55 @@ SCENARIO_YEARS = {
 
 
 def load_cleaned_data(filepath=DATA_CSV):
+    """Load the cleaned April-October climate CSV produced by preprocess.py.
+
+    Parameters
+    ----------
+    filepath : str or Path
+        Default: 'results/preprocessing/climate_apr_oct_cleaned.csv'.
+
+    Returns
+    -------
+    pd.DataFrame
+        Climate dataframe with DATE, YEAR, DOY, MONTH, and weather columns
+        (T2M, T2M_MAX, T2M_MIN, PRECTOTCORR, RH2M, WS2M, PS, ALLSKY_SFC_SW_DWN,
+        GWETROOT, GWETTOP, ET0_hargreaves, ET0_penman_monteith).
+    """
     df = pd.read_csv(filepath)
     df['DATE'] = pd.to_datetime(df['DATE'])
     return df
 
 
-def extract_scenario(df, year, start_doy=None, n_days=None):
-    """
-    Extract crop season climate data for a given year.
-    Uses season window from soil_data.py if not specified.
-    Returns dict of daily arrays for the ABM.
+def extract_scenario(df, year, crop, start_doy=None, n_days=None):
+    """Extract crop-season climate data for a given year and crop.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Output of load_cleaned_data().
+    year : int
+        Calendar year (e.g. 2022).
+    crop : dict
+        Crop parameter dict (from soil_data.RICE, soil_data.TOBACCO,
+        or soil_data.get_crop(name)). Must contain 'season_start_doy'
+        and 'season_days'.
+    start_doy : int, optional
+        Override the crop's season_start_doy.
+    n_days : int, optional
+        Override the crop's season_days.
+
+    Returns
+    -------
+    dict
+        Daily arrays of length n_days, keyed by:
+            'rainfall', 'temp_mean', 'temp_max', 'temp_min',
+            'radiation', 'ET', 'humidity', 'wind',
+            'gwetroot', 'gwettop'
     """
     if start_doy is None:
-        start_doy = crop_params['season_start_doy']
+        start_doy = crop['season_start_doy']
     if n_days is None:
-        n_days = crop_params['season_days']
+        n_days = crop['season_days']
 
     df_year = df[df['YEAR'] == year].copy()
     df_season = df_year[df_year['DOY'] >= start_doy].head(n_days)
@@ -59,26 +96,53 @@ def extract_scenario(df, year, start_doy=None, n_days=None):
     return climate
 
 
-# ── Load data and extract scenarios ───────────────────────────────────────────
+def extract_scenario_by_name(df, scenario_name, crop, **kwargs):
+    """Extract a named scenario ('dry', 'moderate', 'wet') for a crop.
 
-df = load_cleaned_data()
+    Convenience wrapper around extract_scenario() that maps scenario names
+    to their canonical years.
 
-climate_dry      = extract_scenario(df, SCENARIO_YEARS['dry'])
-climate_moderate = extract_scenario(df, SCENARIO_YEARS['moderate'])
-climate_wet      = extract_scenario(df, SCENARIO_YEARS['wet'])
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Output of load_cleaned_data().
+    scenario_name : str
+        One of 'dry' (2022), 'moderate' (2020), 'wet' (2024).
+    crop : dict
+        Crop parameter dict.
+    **kwargs
+        Forwarded to extract_scenario.
 
+    Returns
+    -------
+    dict
+    """
+    key = scenario_name.lower().strip()
+    if key not in SCENARIO_YEARS:
+        available = ', '.join(sorted(SCENARIO_YEARS.keys()))
+        raise KeyError(
+            f"Unknown scenario '{scenario_name}'. Available: {available}"
+        )
+    return extract_scenario(df, SCENARIO_YEARS[key], crop, **kwargs)
+
+
+# ── Smoke test ────────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
-    crop_name = crop_params.get('name', 'Unknown')
-    print(f"Crop: {crop_name}")
-    print(f"Season: DOY {crop_params['season_start_doy']} to "
-          f"{crop_params['season_end_doy']} ({crop_params['season_days']} days)")
+    from soil_data import get_crop
+
+    crop = get_crop('rice')
+    df = load_cleaned_data()
+
+    print(f"Crop: {crop['name']}")
+    print(f"Season: DOY {crop['season_start_doy']} to "
+          f"{crop['season_end_doy']} ({crop['season_days']} days)")
     print()
 
-    for label, clim in [('Dry (2022)', climate_dry),
-                         ('Moderate (2020)', climate_moderate),
-                         ('Wet (2024)', climate_wet)]:
-        print(f"{label}:")
+    for scenario_name in ('dry', 'moderate', 'wet'):
+        clim = extract_scenario_by_name(df, scenario_name, crop)
+        year = SCENARIO_YEARS[scenario_name]
+        print(f"{scenario_name.capitalize()} ({year}):")
         print(f"  Rainfall total: {clim['rainfall'].sum():.1f} mm")
         print(f"  Mean temp:      {clim['temp_mean'].mean():.1f} °C")
         print(f"  Mean ET0 (PM):  {clim['ET'].mean():.2f} mm/day")
