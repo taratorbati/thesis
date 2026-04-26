@@ -1,0 +1,29 @@
+{
+  "scenario": "wet",
+  "year": 2024,
+  "crop": "Rice",
+  "controller": "fixed_schedule",
+  "runoff_mode": "cascade",
+  "budget_total": 411.4,
+  "ub_mm_per_day": 12.0,
+  "season_days": 93,
+  "N_agents": 130,
+  "initial_x1": 140.0,
+  "initial_x5": 0.0,
+  "seed": 0,
+  "forecast_horizon": 0,
+  "wallclock_seconds": 0.14586663246154785,
+  "final_metrics": {
+    "terminal_biomass_g_m2": 741.0845397332947,
+    "yield_kg_ha": 3112.555066879838,
+    "water_used_mm": 411.4,
+    "wue_kg_ha_per_mm": 7.56576341001419,
+    "budget_compliance": 1,
+    "drought_days_per_agent": 7.376923076923077,
+    "waterlog_days_per_agent": 76.4076923076923,
+    "sink_pond_days": 44.666666666666664,
+    "sink_x5_max_mm": 350.88633547252044,
+    "spatial_equity_cv": 0.04652078272827223
+  },
+  "completed_at": "2026-04-26T03:44:50"
+}
