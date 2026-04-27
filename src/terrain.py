@@ -1,8 +1,27 @@
 # =============================================================================
 # src/terrain.py
 # Single source of truth for DEM loading and directed-graph construction.
-# Replaces the duplicated build_directed_graph in cross_validate_gwetroot.py,
-# run_comparison.py, and run_comparison_2.py.
+#
+# v2.0: Fractional routing boundary condition via DEM padding.
+#
+# Problem (v1): The 10×13 grid was a closed basin. Edge agents could only
+# route water to internal neighbors, causing 3 sink agents to accumulate
+# all runoff from the entire field — the "bathtub effect."
+#
+# Fix: Pad the DEM by 1 cell on each edge, extrapolating the slope outward.
+# Compute the full D8 neighbor count using the padded grid, but only list
+# internal (farm) agents in sends_to. Nr counts ALL lower neighbors
+# (internal + external), so when the ABM divides phi2 by Nr, the fraction
+# routed to off-farm cells is implicitly removed from the mass balance.
+#
+# Example: An edge agent with 4 lower neighbors (2 internal, 2 external)
+# routes phi2/4 to each of the 2 internal neighbors. The remaining phi2/2
+# is off-farm drainage — it exits the system without any explicit code in
+# the ABM or CasADi dynamics.
+#
+# This is standard D8 fractional flow routing with absorbing boundary
+# conditions, widely used in computational hydrology (O'Callaghan & Mark,
+# 1984; Tarboton, 1997).
 # =============================================================================
 
 from pathlib import Path
@@ -14,8 +33,7 @@ from PIL import Image
 def load_dem(filepath):
     """Load a digital elevation model from a GeoTIFF as a 2D numpy array.
 
-    Uses PIL (no rasterio dependency). Matches the existing approach in
-    cross_validate_gwetroot.py and run_comparison.py.
+    Uses PIL (no rasterio dependency).
 
     Parameters
     ----------
@@ -50,12 +68,68 @@ def normalize_elevation(elevation_2d):
     return (elevation_2d - e_min) / (e_max - e_min)
 
 
+def _pad_dem(elevation_2d):
+    """Pad the DEM by 1 cell on each edge, extrapolating the slope.
+
+    For each edge cell, the padded cell continues the slope from the
+    nearest interior neighbor outward. Corner pads are the average of
+    their two adjacent edge pads.
+
+    Parameters
+    ----------
+    elevation_2d : np.ndarray
+        Raw elevation, shape (rows, cols).
+
+    Returns
+    -------
+    np.ndarray
+        Padded elevation, shape (rows+2, cols+2).
+    """
+    rows, cols = elevation_2d.shape
+    padded = np.zeros((rows + 2, cols + 2), dtype=float)
+    padded[1:-1, 1:-1] = elevation_2d
+
+    # Top row: continue slope outward from row 0
+    for c in range(cols):
+        slope = elevation_2d[0, c] - elevation_2d[min(1, rows - 1), c]
+        padded[0, c + 1] = elevation_2d[0, c] + slope
+
+    # Bottom row: continue slope outward from last row
+    for c in range(cols):
+        slope = elevation_2d[-1, c] - elevation_2d[max(-2, -rows), c]
+        padded[-1, c + 1] = elevation_2d[-1, c] + slope
+
+    # Left column: continue slope outward from col 0
+    for r in range(rows):
+        slope = elevation_2d[r, 0] - elevation_2d[r, min(1, cols - 1)]
+        padded[r + 1, 0] = elevation_2d[r, 0] + slope
+
+    # Right column: continue slope outward from last col
+    for r in range(rows):
+        slope = elevation_2d[r, -1] - elevation_2d[r, max(-2, -cols)]
+        padded[r + 1, -1] = elevation_2d[r, -1] + slope
+
+    # Corners: average of adjacent edge pads
+    padded[0, 0] = (padded[0, 1] + padded[1, 0]) / 2
+    padded[0, -1] = (padded[0, -2] + padded[1, -1]) / 2
+    padded[-1, 0] = (padded[-1, 1] + padded[-2, 0]) / 2
+    padded[-1, -1] = (padded[-1, -2] + padded[-2, -1]) / 2
+
+    return padded
+
+
 def build_directed_graph(elevation_2d):
     """Build the directed water-flow graph from an elevation map.
 
+    Uses DEM padding to compute fractional routing at boundaries.
     Each cell sends water to its 8-connected (Moore neighborhood) neighbors
-    that have strictly lower normalized elevation. Agents are indexed in
-    row-major order: agent n at position (row, col) has n = row * n_cols + col.
+    that have strictly lower elevation. Agents are indexed in row-major
+    order: agent n at position (row, col) has n = row * n_cols + col.
+
+    Nr[n] counts ALL lower neighbors (internal + external/padded), so that
+    phi2[n] / Nr[n] distributes runoff across the true number of downhill
+    paths. sends_to[n] only lists internal neighbors, so the fraction
+    routed to off-farm (padded) cells exits the system automatically.
 
     Parameters
     ----------
@@ -67,29 +141,30 @@ def build_directed_graph(elevation_2d):
     dict
         {
             'gamma_flat':         np.ndarray, shape (N,), normalized elevation
-            'sends_to':           dict[int, list[int]], agent -> downhill neighbors
-            'Nr':                 dict[int, int], agent -> count of downhill neighbors
-            'topological_order':  np.ndarray, shape (N,), agents sorted high-to-low
+            'sends_to':           dict[int, list[int]], agent -> internal
+                                  downhill neighbors
+            'Nr':                 dict[int, int], agent -> count of ALL
+                                  downhill neighbors (internal + external)
+            'Nr_internal':        dict[int, int], agent -> count of internal
+                                  downhill neighbors only
+            'topological_order':  np.ndarray, shape (N,), agents sorted
+                                  high-to-low
             'rows':               int, grid rows
             'cols':               int, grid cols
             'N':                  int, total number of agents
             'elevation_flat':     np.ndarray, shape (N,), raw elevations
         }
-
-    Notes
-    -----
-    Agents with Nr=0 are sink agents (they have no lower neighbors). They
-    receive runoff but cannot send any.
-
-    The topological_order is a stable sort by descending elevation, which
-    guarantees that for the cascade routing mode in CropSoilABM, every
-    sender is processed before any of its receivers within the same day.
     """
     rows, cols = elevation_2d.shape
+    N = rows * cols
+
+    # Normalize on the original (unpadded) grid for consistent gamma values
     gamma_2d = normalize_elevation(elevation_2d)
 
-    sends_to = {}
-    Nr = {}
+    # Pad the DEM to compute boundary routing
+    padded = _pad_dem(elevation_2d)
+    # Normalize the padded DEM for comparison (using padded min/max)
+    padded_norm = normalize_elevation(padded)
 
     directions = [
         (-1, -1), (-1, 0), (-1, 1),
@@ -97,36 +172,56 @@ def build_directed_graph(elevation_2d):
         (1, -1),  (1, 0),  (1, 1),
     ]
 
+    sends_to = {}
+    Nr = {}
+    Nr_internal = {}
+
     for ri in range(rows):
         for ci in range(cols):
             n = ri * cols + ci
-            lower = []
-            for dr, dc in directions:
-                nr2, nc2 = ri + dr, ci + dc
-                if 0 <= nr2 < rows and 0 <= nc2 < cols:
-                    if gamma_2d[nr2, nc2] < gamma_2d[ri, ci]:
-                        m = nr2 * cols + nc2
-                        lower.append(m)
-            sends_to[n] = lower
-            Nr[n] = len(lower)
+            # Position in padded grid
+            pri, pci = ri + 1, ci + 1
+            my_elev = padded_norm[pri, pci]
 
-    elevation_flat = elevation_2d.flatten()
+            internal_lower = []
+            total_lower = 0
+
+            for dr, dc in directions:
+                nr2, nc2 = pri + dr, pci + dc
+                # All neighbors in padded grid are valid (no bounds check needed)
+                if padded_norm[nr2, nc2] < my_elev:
+                    total_lower += 1
+                    # Is this neighbor inside the real grid?
+                    real_r, real_c = nr2 - 1, nc2 - 1
+                    if 0 <= real_r < rows and 0 <= real_c < cols:
+                        m = real_r * cols + real_c
+                        internal_lower.append(m)
+
+            sends_to[n] = internal_lower
+            Nr[n] = total_lower
+            Nr_internal[n] = len(internal_lower)
+
+    elevation_flat = elevation_2d.flatten().astype(float)
     topological_order = np.argsort(-elevation_flat, kind='stable')
 
     return {
         'gamma_flat':        gamma_2d.flatten(),
         'sends_to':          sends_to,
         'Nr':                Nr,
+        'Nr_internal':       Nr_internal,
         'topological_order': topological_order,
         'rows':              rows,
         'cols':              cols,
-        'N':                 rows * cols,
+        'N':                 N,
         'elevation_flat':    elevation_flat,
     }
 
 
 def get_sink_agents(graph):
     """Return list of agents with no downhill neighbors (Nr = 0).
+
+    With fractional routing, true sinks (agents with no lower neighbors
+    even in the padded DEM) should be rare or nonexistent on sloped terrain.
 
     Parameters
     ----------
