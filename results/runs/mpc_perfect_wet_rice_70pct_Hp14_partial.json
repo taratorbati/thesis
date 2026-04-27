@@ -1,0 +1,10 @@
+{
+  "scenario": "wet",
+  "crop": "Rice",
+  "controller": "mpc_perfect_Hp14",
+  "budget_total": 338.79999999999995,
+  "seed": 0,
+  "last_completed_day": 49,
+  "completed_at": null,
+  "checkpointed_at": "2026-04-28T01:25:47"
+}

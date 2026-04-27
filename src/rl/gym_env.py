@@ -4,43 +4,22 @@
 #
 # Observation (660 dims):
 #   Per-agent (5 × 130 = 650):
-#     x1_norm[n] = x1[n] / FC          (soil water, normalized)
-#     x5_norm[n] = x5[n] / x5_ref      (ponding, normalized)
-#     x4_norm[n] = x4[n] / x4_ref      (biomass, normalized)
-#     x3[n]                              (maturity stress, raw)
-#     elev[n]                            (normalized elevation, static)
+#     x1_norm, x5_norm, x4_norm, x3, elevation
 #   Scalars (10):
-#     day_frac       = day / season_days
-#     budget_frac    = budget_remaining / budget_total
-#     burn_rate      = water_used_so_far / max(day, 1) / daily_budget
-#     rain_today     (mm, raw)
-#     rain_forecast_3d  (sum of next 3 days, mm)
-#     ETc_today      (mm, raw)
-#     ETc_forecast_3d   (sum of next 3 days, mm)
-#     h2_today       (heat stress)
-#     h7_today       (cold stress)
-#     g_base_today   (growth function)
+#     day_frac, budget_frac, burn_rate, rain_today, rain_forecast_3d,
+#     ETc_today, ETc_forecast_3d, h2_today, h7_today, g_base_today
 #
-# Action: Box(0, 1, shape=(130,)) → scaled to [0, UB] mm/day per agent.
+# Action: Box(0, 1, shape=(130,)) → scaled to [0, UB] mm/day.
 #
-# Reward (dense, mirrors MPC cost terms):
-#   r(t) = α₁ · Δx4_mean / x4_ref                       (biomass gain)
-#        - α₂ · Σu / W_daily_ref                          (water cost)
-#        - α₃ · (1/N) Σ max(ST - x1, 0) / (ST - WP)     (drought penalty)
-#        - α₄ · (1/|S|) Σ_{sinks} x5 / x5_ref            (ponding penalty)
-#        - α₅ · ||u - u_prev||² / (UB² · N)              (Δu penalty)
-#        - λ_budget · max(burn_rate - 1, 0)²              (budget soft penalty)
-#   Terminal bonus: + α₁ · final_x4_mean / x4_ref
+# Reward (dense, mirrors MPC cost):
+#   r(t) = α₁·Δx4_mean/x4_ref - α₂·Σu/W_daily_ref
+#        - α₃·mean(max(ST-x1,0))/(ST-WP)
+#        - α₄·mean(x5)/x5_ref               ← all agents, X5_REF=50
+#        - α₅·||u-u_prev||²/(UB²·N)
+#        - λ_budget·max(burn_rate-1, 0)²
+#   Terminal: + α₁·final_x4_mean/x4_ref
 #
-# Budget enforcement:
-#   1. Soft penalty (λ_budget) in reward
-#   2. Early termination if budget_remaining < 0
-#   3. Burn-rate shaping (penalizes front-loading water use)
-#
-# References:
-#   - Reward weights mirror MPC cost (ARCHITECTURE.md §4)
-#   - Burn-rate shaping: Lillicrap et al. (2015) continuous control
-#   - Early termination for constraint satisfaction: Achiam et al. (2017) CPO
+# v2.2: Ponding penalty matches cost.py v2.2 — all N agents, X5_REF=50mm.
 # =============================================================================
 
 import gymnasium as gym
@@ -56,25 +35,15 @@ from climate_data import load_cleaned_data, extract_scenario_by_name
 
 # Normalization references (same as MPC cost)
 X4_REF = 900.0      # g/m²
-X5_REF = 10.0       # mm
+X5_REF = 50.0        # mm (raised from 10 to match cost.py v2.2)
 UB_MM = 12.0         # mm/day actuator cap
 
 # Budget violation penalty weight
-# Grounded in the MPC dual variable for the budget constraint:
-# typical Lagrange multiplier ≈ 0.5-2.0 for binding budget.
-# We use 5.0 (slightly aggressive) to ensure the RL agent learns
-# budget compliance early in training.
 LAMBDA_BUDGET = 5.0
 
 
 class IrrigationEnv(gym.Env):
     """Gymnasium environment for multi-agent irrigation control.
-
-    The environment wraps the CropSoilABM and exposes it as a single-agent
-    RL problem with a 130-dimensional continuous action space (one irrigation
-    depth per field agent). This is the CTDE paradigm: shared-parameter actor
-    acts on per-agent observations, but training uses a centralized critic
-    that sees the full state.
 
     Parameters
     ----------
@@ -120,9 +89,6 @@ class IrrigationEnv(gym.Env):
         full_need_mm = {'rice': 484.0, 'tobacco': 389.0}[crop_name]
         self.budget_total = full_need_mm * (budget_pct / 100.0)
 
-        self.sink_agents = get_sink_agents(self.terrain)
-        self.n_sinks = max(len(self.sink_agents), 1)
-
         # Elevation (static, included in obs)
         self.elev_norm = self.terrain['gamma_flat']
 
@@ -134,12 +100,10 @@ class IrrigationEnv(gym.Env):
         self.climate = extract_scenario_by_name(df, scenario, self.crop)
 
         # Spaces
-        # Observation: 5*N per-agent + 10 scalars
         obs_dim = 5 * self.N + 10
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
         )
-        # Action: [0, 1]^N → scaled to [0, UB] in step()
         self.action_space = spaces.Box(
             low=0.0, high=1.0, shape=(self.N,), dtype=np.float32
         )
@@ -160,11 +124,9 @@ class IrrigationEnv(gym.Env):
         self.u_prev = None
         self.x4_prev_mean = 0.0
 
-        # Seed
         self._np_random = np.random.default_rng(seed)
 
     def reset(self, *, seed=None, options=None):
-        """Reset the environment to the start of a new season."""
         if seed is not None:
             self._np_random = np.random.default_rng(seed)
 
@@ -179,7 +141,6 @@ class IrrigationEnv(gym.Env):
         )
         self.abm.reset()
 
-        # Set initial conditions (same as runner.py)
         self.abm.x1 = np.full(self.N, self.fc_total)
         self.abm.x2 = np.full(self.N, self.crop.get('x2_init', 0.0))
         self.abm.x3 = np.zeros(self.N)
@@ -193,30 +154,17 @@ class IrrigationEnv(gym.Env):
         self.x4_prev_mean = float(self.abm.x4.mean())
 
         obs = self._get_obs()
-        info = {}
-        return obs, info
+        return obs, {}
 
     def step(self, action):
-        """Execute one day of irrigation.
-
-        Parameters
-        ----------
-        action : np.ndarray, shape (N,)
-            Values in [0, 1], scaled to [0, UB] mm/day.
-
-        Returns
-        -------
-        obs, reward, terminated, truncated, info
-        """
         action = np.asarray(action, dtype=float).clip(0, 1)
-        u = action * UB_MM  # scale to mm/day
+        u = action * UB_MM
 
-        # Budget clip (same as runner.py)
+        # Budget clip
         if u.mean() > self.budget_remaining:
             scale = self.budget_remaining / max(u.mean(), 1e-12)
             u = u * scale
 
-        # Climate for today
         climate_today = {
             'rainfall':  float(self.climate['rainfall'][self.day]),
             'temp_mean': float(self.climate['temp_mean'][self.day]),
@@ -225,10 +173,8 @@ class IrrigationEnv(gym.Env):
             'ET':        float(self.climate['ET'][self.day]),
         }
 
-        # Step ABM
         self.abm.step(u, climate_today)
 
-        # Update budget
         daily_spend = float(u.mean())
         self.budget_remaining = max(self.budget_remaining - daily_spend, 0.0)
         self.water_used += daily_spend
@@ -237,35 +183,31 @@ class IrrigationEnv(gym.Env):
 
         x4_mean = float(self.abm.x4.mean())
 
-        # Term 1: biomass gain (positive = good)
+        # Term 1: biomass gain
         r_biomass = self.alpha1 * (x4_mean - self.x4_prev_mean) / X4_REF
 
-        # Term 2: water cost (negative)
+        # Term 2: water cost
         r_water = -self.alpha2 * u.sum() / self.W_daily_ref
 
-        # Term 3: drought penalty (negative)
+        # Term 3: drought penalty
         deficit = np.maximum(self.stress_threshold - self.abm.x1, 0)
         r_drought = -self.alpha3 * deficit.sum() / (
             self.N * max(self.stress_threshold - self.wp_total, 1e-6))
 
-        # Term 4: ponding penalty (negative)
-        r_ponding = 0.0
-        if len(self.sink_agents) > 0:
-            sink_x5 = self.abm.x5[self.sink_agents].sum()
-            r_ponding = -self.alpha4 * sink_x5 / (self.n_sinks * X5_REF)
+        # Term 4: ponding penalty — ALL agents, field-mean, X5_REF=50
+        r_ponding = -self.alpha4 * self.abm.x5.sum() / (self.N * X5_REF)
 
-        # Term 5: Δu penalty (negative)
+        # Term 5: Δu penalty
         du = u - self.u_prev
         r_delta_u = -self.alpha5 * np.dot(du, du) / (UB_MM**2 * self.N)
 
-        # Budget soft penalty: penalize over-spending rate
+        # Budget soft penalty
         daily_budget = self.budget_total / self.season_days
         burn_rate = self.water_used / max(self.day + 1, 1) / max(daily_budget, 1e-6)
         r_budget = -LAMBDA_BUDGET * max(burn_rate - 1.0, 0.0)**2
 
         reward = r_biomass + r_water + r_drought + r_ponding + r_delta_u + r_budget
 
-        # Update tracking
         self.u_prev = u.copy()
         self.x4_prev_mean = x4_mean
         self.day += 1
@@ -275,14 +217,11 @@ class IrrigationEnv(gym.Env):
         terminated = False
         truncated = False
 
-        # Early termination: budget exhausted
         if self.budget_remaining <= 0 and self.day < self.season_days:
             terminated = True
 
-        # Natural end of season
         if self.day >= self.season_days:
             truncated = True
-            # Terminal bonus
             reward += self.alpha1 * x4_mean / X4_REF
 
         obs = self._get_obs()
@@ -303,25 +242,21 @@ class IrrigationEnv(gym.Env):
         return obs, float(reward), terminated, truncated, info
 
     def _get_obs(self):
-        """Build the 660-dim observation vector."""
-        # Per-agent features (5 × N = 650)
         x1_norm = self.abm.x1 / self.fc_total
         x5_norm = self.abm.x5 / X5_REF
         x4_norm = self.abm.x4 / X4_REF
         x3 = self.abm.x3
         elev = self.elev_norm
 
-        # Scalars (10)
         day_frac = self.day / self.season_days
         budget_frac = self.budget_remaining / max(self.budget_total, 1e-6)
         daily_budget = self.budget_total / self.season_days
         burn_rate = (self.water_used / max(self.day, 1)) / max(daily_budget, 1e-6) if self.day > 0 else 0.0
 
-        rain_today = float(self.climate['rainfall'][min(self.day, self.season_days - 1)])
-        ETc_today = float(self.precomputed.Kc_ET[min(self.day, self.season_days - 1)])
-
-        # Forecast sums (3-day lookahead)
         d = min(self.day, self.season_days - 1)
+        rain_today = float(self.climate['rainfall'][d])
+        ETc_today = float(self.precomputed.Kc_ET[d])
+
         end = min(d + self.forecast_horizon, self.season_days)
         rain_forecast = float(self.climate['rainfall'][d:end].sum()) if end > d else 0.0
         ETc_forecast = float(self.precomputed.Kc_ET[d:end].sum()) if end > d else 0.0

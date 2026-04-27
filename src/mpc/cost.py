@@ -5,14 +5,23 @@
 # J = -α₁ · terminal_biomass / x4_ref
 #   + α₂ · Σ_k (Σ_n u^n(k)) / W_daily_ref
 #   + α₃ · Σ_k (1/N) Σ_n max(ST - x1^n(k), 0) / (ST - WP)
-#   + α₄ · Σ_k (1/|S|) Σ_{n∈S} x5^n(k) / x5_ref
+#   + α₄ · Σ_k (1/N) Σ_n x5^n(k) / x5_ref
 #   + α₅ · Σ_k ||u(k+1) - u(k)||² / (u_max² · N)
 #
 # All terms are O(1) per time step when properly normalized.
 #
-# v2.1 fix: compute_cost now accepts use_smooth flag. When True, the drought
-# deficit term (Term 3) uses smooth_max_zero instead of ca.fmax, removing the
-# last source of non-differentiable kinks in the cost landscape.
+# v2.2: Ponding penalty applies to ALL agents (field-mean), not just sinks.
+#   With fractional routing boundary conditions (terrain.py v2.0), former
+#   sink agents drain off-farm, so sink-only penalties would be zero.
+#   Penalizing all agents is physically correct: waterlogging damages any
+#   agent's crop. X5_REF increased from 10→50mm so that transient ponding
+#   from a single storm (typically 10-30mm) produces a small penalty, while
+#   persistent multi-day ponding (50+mm) ramps up meaningfully through the
+#   horizon summation.
+#
+#   Reference for waterlogging tolerance: Setter et al. (1997) "Review of
+#   prospects for germplasm improvement for waterlogging tolerance in wheat,
+#   barley and oats" — rice tolerates 1-2 days of shallow ponding.
 # =============================================================================
 
 import casadi as ca
@@ -23,7 +32,7 @@ DEFAULT_WEIGHTS = {
     'alpha1': 1.0,     # terminal biomass (anchor)
     'alpha2': 0.01,    # water cost (domestic water pricing)
     'alpha3': 0.1,     # drought stress regularization
-    'alpha4': 0.5,     # sink ponding penalty
+    'alpha4': 0.5,     # ponding penalty (all agents)
     'alpha5': 0.005,   # Δu regularization
 }
 
@@ -33,44 +42,36 @@ DEFAULT_REFS = {
     'W_daily_ref':  None,    # computed as 5.0 * N at build time
     'ST':           None,    # stress threshold, computed from crop at build time
     'WP':           None,    # wilting point total, computed from crop at build time
-    'x5_ref':       10.0,    # mm, ponding reference
+    'x5_ref':       50.0,    # mm, ponding reference (raised from 10 to match
+                             # realistic storm ponding; see terrain.py v2.0)
     'u_max':        12.0,    # mm/day, actuator cap
 }
 
 
 def build_cost_components(N, crop, sink_agents, weights=None, refs=None):
-    """Return a dict of callables, each computing one cost term.
+    """Return a dict of numeric values needed by the solver to build the cost.
 
     Parameters
     ----------
     N : int
-        Number of agents.
     crop : dict
-        Crop parameter dict.
     sink_agents : list[int]
-        Indices of sink agents (Nr = 0).
+        Kept for backward compatibility. No longer used for ponding penalty.
     weights : dict, optional
-        Override DEFAULT_WEIGHTS.
     refs : dict, optional
-        Override DEFAULT_REFS.
 
     Returns
     -------
     dict
-        Keys: 'biomass', 'water', 'drought', 'ponding', 'delta_u', 'total'.
-        Values: description strings and the weight/ref values used.
-    components : dict
-        The actual numeric values needed by the solver to build the cost.
     """
     w = {**DEFAULT_WEIGHTS, **(weights or {})}
     r = {**DEFAULT_REFS, **(refs or {})}
 
-    # Compute derived references
     fc_total = crop['theta6'] * crop['theta5']
     wp_total = crop['theta2'] * crop['theta5']
     p = crop.get('p', 0.20)
     raw = p * (fc_total - wp_total)
-    st = fc_total - raw  # stress threshold
+    st = fc_total - raw
 
     if r['W_daily_ref'] is None:
         r['W_daily_ref'] = 5.0 * N
@@ -102,35 +103,22 @@ def compute_cost(u_trajectory, x1_trajectory, x5_trajectory, x4_terminal_mean,
     Parameters
     ----------
     u_trajectory : list of ca.SX, each shape (N,)
-        Irrigation actions for k = 0..Hp-1.
     x1_trajectory : list of ca.SX, each shape (N,)
-        Soil water AFTER step k, for k = 0..Hp-1.
     x5_trajectory : list of ca.SX, each shape (N,)
-        Surface ponding AFTER step k, for k = 0..Hp-1.
     x4_terminal_mean : ca.SX scalar
-        Field-mean biomass at the end of the horizon.
     components : dict
-        From build_cost_components.
     Hp : int
-        Prediction horizon.
     use_smooth : bool
-        If True, use smooth_max_zero for the drought deficit term.
-        Default False (CasADi native ca.fmax).
 
     Returns
     -------
     J : ca.SX scalar
-        Total cost (to be minimized by IPOPT).
     terms : dict
-        Individual cost terms (for logging/debugging).
     """
     w = components['weights']
     r = components['refs']
     N = components['N']
-    sinks = components['sink_agents']
-    n_sinks = components['n_sinks']
 
-    # Choose max(x, 0) operator for cost terms
     if use_smooth:
         from src.mpc.smoothing import smooth_max_zero
         _max0 = lambda x: smooth_max_zero(x, eps=0.01)
@@ -152,18 +140,16 @@ def compute_cost(u_trajectory, x1_trajectory, x5_trajectory, x4_terminal_mean,
     st = r['ST']
     denom = max(st - r['WP'], 1e-6)
     for k in range(Hp):
-        deficit = _max0(st - x1_trajectory[k])  # (N,) vector
+        deficit = _max0(st - x1_trajectory[k])
         J_drought += ca.sum1(deficit) / (N * denom)
     J_drought *= w['alpha3']
 
-    # ── Term 4: Ponding at sinks (path) ───────────────────────────────────
+    # ── Term 4: Ponding penalty — all agents, field-mean (path) ───────────
+    # Transient ponding (one day) penalized lightly; persistent ponding
+    # accumulates across the horizon summation naturally.
     J_ponding = ca.SX(0)
-    if len(sinks) > 0:
-        for k in range(Hp):
-            sink_x5_sum = ca.SX(0)
-            for s in sinks:
-                sink_x5_sum += x5_trajectory[k][s]
-            J_ponding += sink_x5_sum / (n_sinks * r['x5_ref'])
+    for k in range(Hp):
+        J_ponding += ca.sum1(x5_trajectory[k]) / (N * r['x5_ref'])
     J_ponding *= w['alpha4']
 
     # ── Term 5: Control rate regularization (path) ────────────────────────
