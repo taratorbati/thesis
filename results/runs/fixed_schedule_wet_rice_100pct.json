@@ -12,18 +12,19 @@
   "initial_x5": 0.0,
   "seed": 0,
   "forecast_horizon": 0,
-  "wallclock_seconds": 0.16709399223327637,
+  "wallclock_seconds": 0.13569235801696777,
   "final_metrics": {
-    "terminal_biomass_g_m2": 657.7598266085517,
-    "yield_kg_ha": 2762.5912717559177,
-    "water_used_mm": 484.0,
-    "wue_kg_ha_per_mm": 5.707833206107268,
+    "terminal_biomass_g_m2": 664.2754282428326,
+    "yield_kg_ha": 2789.9567986198967,
+    "water_used_mm": 483.99999999999994,
+    "wue_kg_ha_per_mm": 5.764373550867556,
     "budget_compliance": 1,
-    "drought_days_per_agent": 3.792307692307692,
-    "waterlog_days_per_agent": 84.06923076923077,
-    "sink_pond_days": 53.0,
-    "sink_x5_max_mm": 469.1025469015787,
-    "spatial_equity_cv": 0.04338282499599568
+    "drought_days_per_agent": 4.2384615384615385,
+    "waterlog_days_per_agent": 83.67692307692307,
+    "pond_days_per_agent": 1.376923076923077,
+    "x5_max_mm": 23.955660242929863,
+    "x5_mean_mm": 0.19071603126491243,
+    "spatial_equity_cv": 0.02006902821991052
   },
-  "completed_at": "2026-04-26T03:44:50"
+  "completed_at": "2026-04-29T03:36:33"
 }
