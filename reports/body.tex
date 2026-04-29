@@ -1,0 +1,276 @@
+\section{Introduction}
+\label{sec:introduction}
+
+The integration of Internet of Things (IoT) technologies and artificial intelligence has initiated a paradigm shift in modern precision agriculture, transforming traditional fields into complex cyber-physical systems \cite{Bayar2025, PourgholamAmiji2024}. Central to this transformation is the optimization of irrigation, a critical requirement for mitigating regional water scarcity while maintaining agricultural productivity \cite{Nouri2023, Maniam2026}. While advanced optimal control algorithms like Model Predictive Control (MPC) and Reinforcement Learning (RL) are highly capable of managing these constrained multivariate systems, deploying them directly into physical environments is economically risky and biologically prohibitive. Consequently, the synthesis and training of these intelligent controllers necessitate a high-fidelity virtual environment that accurately captures the complex, non-linear dynamics of the soil-plant-atmosphere continuum.
+
+This work presents the complete physical and mathematical description of an agricultural system designed based on a land in northwestern Iran. The objective is to construct a high-fidelity simulation environment that serves a dual purpose: first, as the virtual plant on which the Model Predictive Controller operates, and second, as the training environment for the Reinforcement Learning agent later developed.
+
+The modeling framework builds upon the agent-based model (ABM) proposed by L\'{o}pez-Jim\'{e}nez et al.~\cite{Lopezjimenez2024}, which couples soil water dynamics with crop growth on a topographically heterogeneous field. However, several critical modifications and extensions are introduced to adapt the model to the specific agronomic conditions of rice cultivation in Gilan Province, Iran, and to correct certain mass-balance inconsistencies identified in the original formulation.
+
+The report is organized as follows. Section~\ref{sec:study_site} describes the physical field site and the digital elevation model used to define the directed flow graph and agent grid. Section~\ref{sec:climate} details the 25-year climate dataset, the reference evapotranspiration modeling, and the contrasting meteorological scenarios. Section~\ref{sec:abm_equations} presents the core discrete-time ABM equations governing the decoupled surface and subsurface water balances, thermal accumulation, and crop growth. Section~\ref{sec:corrections} formally documents the necessary mass-conservation corrections and agronomic extensions applied to the baseline framework. Section~\ref{sec:soil_crop_params} parameterizes the environment for Hashemi rice and tobacco. Section~\ref{sec:water_budget} derives the agronomically grounded seasonal water budgets. Finally, Section~\ref{sec:validation} presents the ABM validation results, including cross-validation against satellite soil wetness observations. Section~\ref{sec:conclusion} concludes the work.
+
+% ========================= SECTION 1 ================================= %
+\newpage
+\section{Study Site and Topological Graph}
+\label{sec:study_site}
+
+The study site is located on the slopes of the Talish Mountains in Gilan Province in northwest Iran, at coordinates $38.298^{\circ}$N, $48.847^{\circ}$E. Situated along the southwestern coast of the Caspian Sea, Gilan is Iran's primary rice-producing province, accounting for over 238,000 hectares of paddy fields \cite{surfiran2025}. The province experiences a humid subtropical climate with hot summers and relatively mild winters, although seasonal precipitation can vary dramatically between years. Despite its comparatively favorable water endowment relative to Iran's central plateau, Gilan faces mounting pressures from declining aquifer levels and increasing competition between agricultural, urban, and industrial water users~\cite{Nouri2023,Mesgaran2018}. These conditions make this land a representative case study for evaluating constrained irrigation control strategies.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.75\textwidth]{figures/land.png}
+    \caption{The satellite image of the study site captured using Google Earth}
+    \label{fig:land}
+\end{figure}
+
+\subsection{Digital Elevation Model}
+\label{sec:field}
+
+The selected field covers approximately 6 hectares and is discretized into a $10 \times 13$ rectangular grid, yielding $N = 130$ crop-soil agents. This resolution represents a practical balance between spatial detail and computational tractability for the simulation environment: each agent corresponds to a plot of roughly 460~m$^2$, which is sufficiently fine to capture the field's topographical heterogeneity while remaining computationally feasible for the MPC optimization solved at every daily time step.
+
+The topographical data were obtained from the USGS Earth Explorer digital elevation database which provides Shuttle Radar Topography Mission (SRTM) data at 30-meter resolution. The raw elevation raster was processed in QGIS 3034 to extract the study region, reproject it to
+UTM Zone 38N, and resample it to the $10 \times 13$ agent grid. The resulting digital elevation model (DEM) is stored as a GeoTIFF file and loaded programmatically by the simulation environment.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.75\textwidth]{figures/elevation_map.png}
+    \caption{Three-dimensional surface plot of the 130-agent grid. Elevation ranges from 70~m to 181~m above sea level, forming a bowl-shaped topology with water convergence toward the southeastern corner.}
+    \label{fig:topo3d}
+\end{figure}
+
+The elevation field exhibits a distinctive bowl-shaped topography, with elevations ranging from 70~m above sea level in the southeastern corner to to 181~m in the northwestern and southwestern ridges. This 111~m elevation gradient creates significant lateral water redistribution through surface and subsurface runoff: agents on higher ground shed excess water to their downhill neighbors, while agents in the valley bottom accumulate inflows from multiple directions. This topographical heterogeneity is a defining feature of the study site and the principal motivation for adopting an agent-based rather than a lumped-parameter modeling approach.
+
+\subsection{Directed Graph Construction}
+\label{sec:directed_graph}
+
+The topographical information is encoded in a directed graph that governs lateral water exchange between agents. Each agent occupies a cell in the $10 \times 13$ grid and is assigned a normalized elevation $\gamma^{(n)} \in [0, 1]$, computed by min--max normalization of the raw DEM values:
+\begin{equation}
+    \gamma^{(n)} = \frac{z^{(n)} - z_{\min}}{z_{\max} - z_{\min}}
+    \label{eq:gamma}
+\end{equation}
+
+where $z^{(n)}$ is the raw elevation of agent $n$. An agent at position $(r, c)$ can exchange water with up to eight neighbors in its Moore neighborhood (the eight surrounding cells). A directed edge from agent $n$ to agent $m$ is created if and only if $\gamma^{(m)} < \gamma^{(n)}$, so that water flows strictly downhill. The number of lower-elevation neighbors for each agent is denoted $N_r^{(n)}$.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.75\textwidth]{figures/directed_graphs.png}
+    \caption{Water flow directions between agents, overlaid on the normalized elevation map. Arrows indicate the direction of lateral surface runoff, governed by the directed graph.}
+    \label{fig:flow_arrows}
+\end{figure}
+
+Figure~\ref{fig:flow_arrows} visualizes the resulting directed graph. The arrow density reflects the terrain gradient: steep areas near the ridges exhibit dense, nearly parallel flow lines, while the flat valley floor shows sparser, more diffuse connections. Agents in the southeastern corner with $N_r = 0$ function as hydrological sinks; they have no lower neighbors and therefore retain all accumulated water. These sink agents are particularly susceptible to waterlogging stress, a phenomenon that the ABM captures through the waterlogging stress function $h_6$ described in Section~\ref{sec:stress_growth}.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.7\textwidth]{figures/sinks.png}
+    \caption{Spatial distribution of the neighbor count $N_r$ for each agent. Red-bordered cells indicate sink agents ($N_r = 0$) that accumulate runoff from uphill neighbors.}
+    \label{fig:sink_agents}
+\end{figure}
+
+Three sink agents were identified, two located in the southeastern corner of the field at the lowest elevations (Figure~\ref{fig:sink_agents}). This spatial concentration of sinks creates a natural drainage basin structure that any irrigation controller must account for: over-irrigating uphill agents will cause water to pool at these sinks, simultaneously wasting budget and inducing waterlogging stress in the valley.
+
+% ========================= SECTION 2 ================================= %
+
+\section{Climate Data and Scenarios}
+\label{sec:climate}
+
+Daily meteorological data were obtained from the NASA POWER (Prediction of Worldwide Energy Resource) database, which provides satellite-derived and reanalysis-based climate records at a spatial resolution of $0.5 \times 0.625$ (approximately $50 \times 60$~km). The dataset was requested for 25-year period of 2000--2025 at the field coordinates ($38.30^{\circ}$N, $48.85^{\circ}$E). Thirteen variables were extracted, including 
+
+\begin{itemize}
+    \item mean, maximum, and minimum temperatures at 2~m (T2M, T2M\_MAX, T2M\_MIN, ${\circ}$C), 
+    \item dew/frost point at 2~m (T2MDEW, ${\circ}$C), 
+    \item corrected daily precipitation (PRECTOTCORR, mm/day), 
+    \item relative humidity (RH2M, \%), 
+    \item surface shortwave downward irradiance (ALLSKY\_SFC\_SW\_DWN, MJ/m$^2$/day), 
+    \item wind speed at 2~m (WS2M, m/s), 
+    \item surface pressure (PS, kPa), and 
+    \item root and surface soil wetness (GWETROOT, GWETTOP, dimensionless, 0–1). 
+\end{itemize}
+
+The last two variables were used for validation purposes rather than as model inputs.
+
+The dataset was filtered to cover the agricultural season from April to October for each year, yielding 5,564 daily records with no missing values. During preprocessing, one extreme rainfall anomaly (375~mm recorded on April 7, 2022) was identified and replaced with the calendar-day average of 1.2~mm to prevent anomalous skewing of the soil water balance. Moreover, based on the available data, two reference evapotranspiration values were calculated and discussed in the following subsection.
+
+\subsection{Reference Evapotranspiration}
+\label{sec:et0}
+
+Reference evapotranspiration (ET$_0$) is the primary driver of crop water demand. Two estimation methods were compared to determine the most accurate representation for the study site: the temperature-based Hargreaves equation and the FAO Penman-Monteith equation \cite{allen1998}. 
+
+\textbf{Hargreaves equation}: 
+\begin{equation}
+    \text{ET}_0^{H} = 0.0023 \cdot (T_{\text{mean}} + 17.8) \cdot (T_{\text{max}} - T_{\text{min}})^{0.5} \cdot R_a
+\end{equation}
+where $T_{\text{mean}}$ is the mean daily temperature ($^{\circ}$C), $T_{\max}$ and $T_{\min}$ are the daily maximum and estimated minimum temperatures ($^{\circ}$C), and $R_a$ is the extraterrestrial radiation (expressed in equivalent evaporation, mm/day).
+
+\textbf{FAO Penman-Monteith}:
+\begin{equation}
+    \text{ET}_0^{PM} = \frac{0.408 \,\Delta\,(R_n - G) + \gamma \,\frac{900}{T+273}\, u_2\, (e_s - e_a)}{\Delta + \gamma\,(1 + 0.34\, u_2)}
+\end{equation}
+
+where $\Delta$ is the slope of the vapor pressure curve (kPa/$^{\circ}$C), $R_n$ is the net radiation at the crop surface (MJ/m$^2$/day), $G$ is the soil heat flux density (MJ/m$^2$/day), $\gamma$ is the psychrometric constant (kPa/$^{\circ}$C), $T$ is the mean daily air temperature at 2~m height ($^{\circ}$C), $u_2$ is the wind speed at 2~m height (m/s), $e_s$ is the saturation vapor pressure (kPa), $e_a$ is the actual vapor pressure (kPa), $(e_s - e_a)$ is the saturation vapor pressure deficit (kPa).
+
+Over the 25-year rice season, the Hargreaves method yielded an average ET$_0$ of 4.59~mm/day, compared to 5.02~mm/day for the Penman-Monteith method ($r = 0.940$). Although the models are strongly correlated, the Hargreaves equation systematically underestimates evaporative demand by approximately 8.6\%. This underestimation occurs because the Hargreaves formulation relies on the diurnal temperature range ($T_{\max} - T_{\min}$) as a proxy for atmospheric demand. In Gilan's coastal microclimate, the moderated temperature differential ($\Delta T \approx 9.4^{\circ}$C) artificially attenuates the Hargreaves estimate. Therefore, the Penman-Monteith method, which explicitly incorporates solar radiation, relative humidity, and aerodynamic conductances, 
+
+is selected as the standard to ensure high-fidelity calculation of the evaporative disturbances in the control environment.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_et0_new.png}
+\caption{Comparison of Hargreaves and Penman-Monteith ET$_0$. Left: seasonal pattern. Right: scatter plot with regression.}
+\label{fig:et0}
+\end{figure}
+
+\subsection{25-Year Climatology and Scenario Selection}
+
+The 25-year climatology reveals mean temperatures ranging from $12^{\circ}$C in early April to $26^{\circ}$C in mid-July. Precipitation exhibits a dry mid-season between June and August (0.5--1.5~mm/day) flanked by wetter months, while solar radiation peaks at 26~MJ/m$^{2}$/day in June. Relative humidity remains consistently between 60\% and 75\% throughout the season, which is a defining feature of Gilan's Caspian climate. Additional climate figures are provided in Appendix ~\ref{apdx:plots}. 
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{figures/fig_temperature.png}
+    \caption{25-year daily average temperature (April--October, 2000--2025).}
+    \label{fig:temperature}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{figures/fig_rainfall.png}
+    \caption{25-year daily average rainfall (April--October, 2000--2025).}
+    \label{fig:rainfall}
+\end{figure}
+
+To evaluate the irrigation controllers under varying weather conditions, three representative years were selected from the 25-year record to serve as distinct climate scenarios:
+
+
+\begin{itemize}
+    \item \textbf{Moderate Scenario (2020):} Represents baseline conditions.
+    \item \textbf{Dry Scenario (2022):} Evaluates controller performance under severe water constraints.
+    \item \textbf{Wet Scenario (2024):} Tests the controller's ability to capitalize on natural rainfall and mitigate waterlogging risks in low-elevation agents.
+\end{itemize}
+
+\begin{table}[H]
+\centering
+\caption{Selected climate scenarios.}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Scenario} & \textbf{Year} & \textbf{Rice (mm)} & \textbf{Tobacco (mm)} \\
+\midrule
+Dry & 2022 & 39.7 & 54.0 \\
+Moderate & 2020 & 42.1 & 73.3 \\
+Wet & 2024 & 176.8 & 163.2 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\input{ABM_model4}
+
+\section{Water Budget and Scenario Selection}
+\label{sec:water_budget}
+
+\subsection{Water Budget Formulation}
+
+To establish the baseline irrigation requirements for both crops, a seasonal water budget was formulated using the 25-year climatological averages. The total crop water demand ($\text{ET}_c$) is calculated as the product of the average reference evapotranspiration, the crop coefficient, and the season duration:
+\begin{equation}
+    \text{ET}_c = \overline{\text{ET}_0^{PM}} \cdot K_c \cdot N_{\text{days}}
+\end{equation}
+
+The full irrigation requirement ($I_{\text{full}}$) represents the water deficit that must be met by the controller, computed by subtracting the 25-year average seasonal rainfall ($\overline{P}$) from the crop demand:
+\begin{equation}
+    I_{\text{full}} = \max\!\big(\text{ET}_c - \overline{P},\; 0\big)
+\end{equation}
+
+Additionally, constrained irrigation budgets representing 70\% and 50\% of the full requirement were calculated to establish deficit scenarios for evaluating controller robustness under strict water rationing.
+
+\begin{table}[H]
+\centering
+\caption{Agronomic water budget summary based on 25-year climatology.}
+\label{tab:budget}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Parameter} & \textbf{Rice} & \textbf{Tobacco} \\
+\midrule
+Season duration ($N_{\text{days}}$) & 93 days & 104 days \\
+Average ET$_0$ (PM) & 5.02 mm/day & 4.95 mm/day \\
+Total crop demand ($\text{ET}_c$) & 537.0 mm & 463.4 mm \\
+Average season rainfall ($\overline{P}$) & 53.3 mm & 74.5 mm \\
+Full irrigation need ($I_{\text{full}}$) & 483.7 mm & 389.0 mm \\
+Deficit budget (70\% of $I_{\text{full}}$) & 338.6 mm & 272.3 mm \\
+Deficit budget (50\% of $I_{\text{full}}$) & 241.8 mm & 194.5 mm \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The calculated rice water demand of 537.0~mm aligns strongly with local Hashemi field measurements, which range from 534~mm under System of Rice Intensification (SRI) management to 632~mm under traditional continuous flooding~\cite{jalali2021}. Similarly, the calculated tobacco demand of 463.4~mm falls perfectly within the expected range of 400--600~mm~\cite{fao_tobacco}. Notably, despite having a longer field season, tobacco requires less total irrigation than rice. This is due to its lower crop coefficient ($K_c$) and the higher average rainfall that occurs during its extended late-summer season.
+
+\subsection{Scenario Selection}
+
+To evaluate controller performance under varying climatic extremes, three specific years were selected from the 25-year dataset to serve as distinct testing scenarios: Dry, Moderate, and Wet. These scenarios are defined by their total seasonal rainfall relative to the historical average.
+
+\begin{table}[H]
+\centering
+\caption{Selected climate scenarios for controller evaluation.}
+\label{tab:scenarios}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Scenario} & \textbf{Year} & \textbf{Rice Rainfall (mm)} & \textbf{Tobacco Rainfall (mm)} \\
+\midrule
+Dry & 2022 & 39.7 & 54.0 \\
+Moderate & 2020 & 42.1 & 73.3 \\
+Wet & 2024 & 176.8 & 163.2 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Model Validation}
+\label{sec:validation}
+
+\subsection{GWETROOT Cross-Validation}
+
+To verify the physical fidelity of the Agent-Based Model's hydrological dynamics, the simulated soil water state ($x_1$) was cross-validated against independent satellite observations. Specifically, the ABM output was compared to the NASA MERRA-2 Root Zone Soil Wetness (GWETROOT) product for the three selected scenario years.
+
+Because the two systems employ different scales and physical boundary conditions, direct absolute comparison is not feasible. Instead, the data were normalized to evaluate the agreement in temporal wetting and drying patterns. The ABM soil water was normalized to a fractional saturation index using the permanent wilting point (WP) and saturation (SAT):
+\begin{equation}
+    \hat{x}_1(k) = \frac{x_1(k) - \text{WP}}{\text{SAT} - \text{WP}}
+\end{equation}
+The GWETROOT data is natively provided as a dimensionless 0--1 fraction and was used without modification. Pearson correlation coefficients were computed to assess the temporal alignment between the simulated and observed series.
+
+\begin{table}[H]
+\centering
+\caption{Cross-validation of ABM soil moisture against NASA GWETROOT.}
+\label{tab:crossval}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Scenario} & \textbf{Year} & \textbf{Pearson $r$} & \textbf{$p$-value} \\
+\midrule
+Dry & 2022 & 0.738 & $3.1 \times 10^{-17}$ \\
+Moderate & 2020 & 0.534 & $3.4 \times 10^{-8}$ \\
+Wet & 2024 & 0.338 & $9.2 \times 10^{-4}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_gwetroot_timeseries_pearson.png}
+\caption{Normalized soil moisture time series: ABM (blue) vs. NASA GWETROOT (brown).}
+\label{fig:gwetroot}
+\end{figure}
+
+As shown in Table~\ref{tab:crossval}, the dry-year scenario exhibits a strong positive correlation ($r = 0.738$, $p < 0.001$), confirming that the ABM accurately captures fundamental soil drying and recharge dynamics driven by evapotranspiration and intermittent rainfall. The correlation predictably decreases in the moderate and wet years. This attenuation is expected because frequent rainfall events saturate the soil, reducing the signal contrast and making the correlation metric highly sensitive to minor timing discrepancies in the meteorological data.
+
+While the temporal patterns align, there is a consistent offset in the absolute levels; the normalized ABM baseline fluctuates near 0.07, whereas the GWETROOT average sits higher at approximately 0.47. This discrepancy is attributable to three distinct structural differences between the datasets:
+\begin{enumerate}
+    \item \textbf{Observation Depth:} NASA MERRA-2 models a deep root zone of roughly 1000~mm, which retains moisture significantly longer than the ABM's shallow 400~mm rice root zone.
+    \item \textbf{Irrigation Status:} The GWETROOT satellite product observes actual field conditions in Gilan, which includes widespread anthropogenic irrigation. Conversely, this specific ABM validation run simulates an unirrigated, rain-fed control scenario to establish a zero-control baseline.
+    \item \textbf{Soil Parameterization:} The standardized MERRA-2 global soil grid relies on generalized hydraulic parameters that differ from the highly specific silty loam parameters calibrated for this local model.
+\end{enumerate}
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+This chapter established a high-fidelity, mathematically rigorous virtual environment for simulating agricultural dynamics in Gilan Province. By building upon an existing topographical agent-based framework, several critical extensions were introduced to ensure the model's suitability for advanced control engineering applications. 
+
+Most notably, the hydrological dynamics were decoupled into distinct surface and subsurface layers. This architectural correction eliminated mass-balance violations present in the baseline literature, ensuring strict conservation of water fluxes and physically realistic surface pooling. Furthermore, the direct integration of drought stress penalties into the biomass accumulation equation established a necessary, responsive cost function, ensuring that simulated crop yields dynamically reflect the success or failure of applied irrigation strategies.
+
+The environment was successfully parameterized for two commercially significant local crops, the highly water, sensitive Hashemi rice and the more resilient tobacco, using a 25-year localized climatology. Finally, the baseline temporal dynamics of the model were successfully cross-validated against independent NASA MERRA-2 satellite observations.
+
+With the physical, biological, and mathematical boundaries of the virtual plant now validated, this environment satisfies its dual objective. It serves both as the dynamic plant for the Model Predictive Controller and as the episodic training environment for the Reinforcement Learning agent. The subsequent works will detail the formulation, training, and comparative evaluation of these control algorithms across the established dry, moderate, and wet climatic scenarios.
