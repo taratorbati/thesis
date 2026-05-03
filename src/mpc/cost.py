@@ -1,12 +1,13 @@
 # =============================================================================
 # src/mpc/cost.py
-# Five-term normalized cost function for the MPC.
+# Six-term normalized cost function for the MPC.
 #
 # J = -α₁ · terminal_biomass / x4_ref
 #   + α₂ · Σ_k (Σ_n u^n(k)) / W_daily_ref
 #   + α₃ · Σ_k (1/N) Σ_n max(ST - x1^n(k), 0) / (ST - WP)
 #   + α₄ · Σ_k (1/N) Σ_n x5^n(k) / x5_ref
 #   + α₅ · Σ_k ||u(k+1) - u(k)||² / (u_max² · N)
+#   + α₆ · Σ_k (1/N) Σ_n [max(x1^n(k) - FC, 0) / FC]²    ← NEW (v2.3)
 #
 # All terms are O(1) per time step when properly normalized.
 #
@@ -22,6 +23,34 @@
 #   Reference for waterlogging tolerance: Setter et al. (1997) "Review of
 #   prospects for germplasm improvement for waterlogging tolerance in wheat,
 #   barley and oats" — rice tolerates 1-2 days of shallow ponding.
+#
+# v2.3: Added Term 6 — soft penalty on x1 above field capacity (α₆).
+#   Motivation: under cheap-water price tiers (e.g. Iranian agricultural
+#   subsidy → α₂ ≈ 0.0004), the optimizer has almost no economic resistance
+#   against pre-irrigating to near-saturation. The implicit waterlog
+#   penalty embedded in h6 (which multiplies x4_increment) is too weak
+#   relative to a near-zero water cost. The α₂ price-tier sweep would
+#   therefore produce pathological "drown the field" policies in scenarios
+#   without rainfall (where α₄ ponding is inactive because x5 = 0).
+#
+#   Term 6 directly penalizes x1 > FC with a quadratic shape:
+#     - Near-zero penalty for x1 ≤ FC (the soft constraint is inactive)
+#     - Grows quadratically as x1 approaches saturation (~220 mm)
+#     - At x1 = 200 mm: penalty contribution per agent per step ≈ (60/140)² ≈ 0.184
+#     - At x1 = 160 mm: penalty contribution per agent per step ≈ (20/140)² ≈ 0.020
+#   This is fully C2-smooth via the existing _max0 operator.
+#
+#   Default α₆ = 0.0 (term inactive) — preserves backward compatibility
+#   with all 27 existing MPC runs at the nominal weight configuration.
+#   The term is activated explicitly in weight-sensitivity sweeps.
+#
+#   Physical motivation: rice tolerates moderate ponding when actively
+#   managed (paddy flooding), but x1 > FC accompanied by no surface ponding
+#   means the soil is at hydraulic conductivity limit and the rooting zone
+#   is hypoxic. The h6 stress term in the ABM partially captures this,
+#   but its multiplicative effect on x4_increment is delayed and easily
+#   offset by improved transpiration. A direct quadratic penalty on x1 > FC
+#   provides the optimizer with an immediate, monotonic disincentive.
 # =============================================================================
 
 import casadi as ca
@@ -34,6 +63,9 @@ DEFAULT_WEIGHTS = {
     'alpha3': 0.1,     # drought stress regularization
     'alpha4': 0.5,     # ponding penalty (all agents)
     'alpha5': 0.005,   # Δu regularization
+    'alpha6': 0.0,     # x1 > FC soft penalty (OFF by default — preserves
+                       # backward compatibility with all existing runs;
+                       # activated via weight-sensitivity sweeps only)
 }
 
 # Default reference values for normalization
@@ -42,6 +74,7 @@ DEFAULT_REFS = {
     'W_daily_ref':  None,    # computed as 5.0 * N at build time
     'ST':           None,    # stress threshold, computed from crop at build time
     'WP':           None,    # wilting point total, computed from crop at build time
+    'FC':           None,    # field capacity total (mm), computed from crop at build time
     'x5_ref':       50.0,    # mm, ponding reference (raised from 10 to match
                              # realistic storm ponding; see terrain.py v2.0)
     'u_max':        12.0,    # mm/day, actuator cap
@@ -79,6 +112,8 @@ def build_cost_components(N, crop, sink_agents, weights=None, refs=None):
         r['ST'] = st
     if r['WP'] is None:
         r['WP'] = wp_total
+    if r['FC'] is None:
+        r['FC'] = fc_total
 
     n_sinks = max(len(sink_agents), 1)
 
@@ -160,16 +195,34 @@ def compute_cost(u_trajectory, x1_trajectory, x5_trajectory, x4_terminal_mean,
         J_delta_u += ca.dot(diff, diff) / u_max_sq_N
     J_delta_u *= w['alpha5']
 
+    # ── Term 6: x1 > FC soft penalty (path) ───────────────────────────────
+    # Quadratic in the normalized excess (max(x1 - FC, 0) / FC).
+    # Inactive when x1 ≤ FC (smoothing produces a contribution of order
+    # ε²/FC² ≈ 5e-9, negligible).
+    # When x1 > FC, the squared term grows monotonically and provides a
+    # direct disincentive against parking water above field capacity.
+    # Constructed via _max0 to remain C² for IPOPT.
+    J_overfc = ca.SX(0)
+    fc = r['FC']
+    if w['alpha6'] != 0.0:
+        for k in range(Hp):
+            excess = _max0(x1_trajectory[k] - fc)
+            normalized_sq = (excess / fc) ** 2
+            J_overfc += ca.sum1(normalized_sq) / N
+        J_overfc *= w['alpha6']
+
     # ── Total ─────────────────────────────────────────────────────────────
-    J_total = J_biomass + J_water + J_drought + J_ponding + J_delta_u
+    J_total = (J_biomass + J_water + J_drought + J_ponding
+               + J_delta_u + J_overfc)
 
     terms = {
         'biomass': J_biomass,
-        'water': J_water,
+        'water':   J_water,
         'drought': J_drought,
         'ponding': J_ponding,
         'delta_u': J_delta_u,
-        'total': J_total,
+        'overfc':  J_overfc,
+        'total':   J_total,
     }
 
     return J_total, terms
