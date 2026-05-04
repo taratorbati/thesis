@@ -85,6 +85,11 @@
 #   python -m scripts.experiments.exp_weight_sensitivity --force
 # =============================================================================
 
+from src.terrain import load_terrain
+from src.runner import run_season
+from src.mpc.controller import MPCController
+from soil_data import get_crop
+from climate_data import load_cleaned_data, extract_scenario_by_name, SCENARIO_YEARS
 import argparse
 import sys
 from pathlib import Path
@@ -92,11 +97,6 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from climate_data import load_cleaned_data, extract_scenario_by_name, SCENARIO_YEARS
-from soil_data import get_crop
-from src.mpc.controller import MPCController
-from src.runner import run_season
-from src.terrain import load_terrain
 
 DEM_PATH = PROJECT_ROOT / 'gilan_farm.tif'
 OUTPUT_DIR = PROJECT_ROOT / 'results' / 'runs'
@@ -130,15 +130,15 @@ SWEEP_GROUPS = {
         'weight_grid': [
             {'name': 'a2_agri_0p0004',     'alpha2': 0.0004},
             {'name': 'a2_domestic_0p016', 'alpha2': 0.016},
-            {'name': 'a2_domesticD_0p044','alpha2': 0.044},
-            {'name': 'a2_industrial_0p265','alpha2': 0.265},
+            {'name': 'a2_domesticD_0p044', 'alpha2': 0.044},
+            {'name': 'a2_industrial_0p265', 'alpha2': 0.265},
         ],
     },
 
     # Group B — α₃ drought regularizer ±1 decade on dry/100%/Hp=8 (2 runs)
     'a3': {
         'scenario':   'dry',
-        'budget_pct': 100,
+        'budget_pct': 70,
         'Hp':         8,
         'weight_grid': [
             {'name': 'a3_0p03', 'alpha3': 0.03},
@@ -187,11 +187,11 @@ SWEEP_GROUPS = {
 
 def run_sweep_group(group_key, group_spec, args, terrain, df_climate):
     """Run all configs within a single sweep group."""
-    scenario   = group_spec['scenario']
+    scenario = group_spec['scenario']
     budget_pct = group_spec['budget_pct']
-    Hp         = group_spec['Hp']
+    Hp = group_spec['Hp']
 
-    crop    = get_crop('rice')
+    crop = get_crop('rice')
     climate = extract_scenario_by_name(df_climate, scenario, crop)
     climate['year'] = SCENARIO_YEARS[scenario]
     budget_total = 484.0 * (budget_pct / 100.0)
@@ -273,7 +273,7 @@ def main():
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # Load shared resources once
-    terrain    = load_terrain(str(DEM_PATH))
+    terrain = load_terrain(str(DEM_PATH))
     df_climate = load_cleaned_data()
 
     if args.sweep == 'all':
