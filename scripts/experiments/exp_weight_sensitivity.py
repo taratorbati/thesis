@@ -72,10 +72,52 @@
 #   ~7.6-hour run definitively proves whether α₆ resolves Issue 1 at the
 #   horizon length where it manifests.
 #
+# Group F — α₄ × α₆ joint factorial on wet/100%/Hp=14  [9 runs]
+#   Tests whether α₄ is redundant once α₆ is active. The wet/Hp=14
+#   operating point is the worst case for chronic waterlogging
+#   (61.1 mean wlog-days at the nominal α₄=0.5, α₆=0; x5_max=40.8 mm,
+#   mean x1_max=205.5 mm). Group C established that α₄ alone is
+#   insufficient: at α₄=2.0 wlog-days actually rose to 68.1 because
+#   the controller pushed water from the surface into the root zone
+#   without anything to catch it. α₆ targets the subsurface state
+#   directly, raising the question of whether α₄ contributes any
+#   independent benefit when α₆ is present.
+#
+#   Factorial design (α₄ rows × α₆ columns):
+#                 α₆=0    α₆=2    α₆=4    α₆=8
+#       α₄=0      NEW     NEW     NEW     NEW    ← α₆-only column
+#       α₄=0.5    exists   —      NEW      —
+#       α₄=2      exists  NEW     NEW      —
+#       α₄=5      exists  NEW     NEW      —
+#
+#   The α₄=0 column directly tests the removal hypothesis: if (α₄=0,
+#   α₆=k) tracks (α₄>0, α₆=k) for k∈{4,8}, then α₄ provides no
+#   independent benefit and Term 4 can be dropped from cost.py.
+#   Two diagnostic baselines are added to anchor the comparison:
+#     - (α₄=0, α₆=0) — both waterlogging penalties off, isolates
+#       the controller's natural behavior in wet/Hp=14.
+#     - (α₄=0, α₆=2) — completes the α₆=2 row, allowing isolation of
+#       α₄ effect at the same α₆ level previously tested in Group E
+#       (Hp=14 dry).
+#
+#   References:
+#     - Setter et al. (1997), Field Crops Research 51(1-2): 85-104.
+#       Rice waterlogging tolerance: shallow ponding ≤2 days before
+#       yield loss accelerates.
+#     - Pampana et al. (2016), Italian Journal of Agronomy 11(1):
+#       97-104. Subsurface oversaturation (x1 > FC) causes root
+#       hypoxia within 24-48 h regardless of surface ponding state.
+#
+#   Compute: each run ~3-5 h at wet/Hp=14 (existing α₄=5.0 took
+#   3.2 h; strong α₆ sharpens the NLP). Expect ~36 h total wall
+#   time. IPOPT Maximum_Iterations_Exceeded events are likely on
+#   high-α₆ configs; the existing zero-irrigation fallback handles
+#   them safely.
+#
 # ── Total compute ─────────────────────────────────────────────────────────
 #   Hp=8  runs:   4 (Group A) + 2 (Group B) + 3 (Group D) = 9 runs ≈ 9 h
-#   Hp=14 runs:   2 (Group C) + 1 (Group E)               = 3 runs ≈ 9 h
-#   Total: 12 runs / ~18 hours (split across multiple sessions if needed).
+#   Hp=14 runs:   2 (Group C) + 1 (Group E) + 9 (Group F) = 12 runs ≈ 45 h
+#   Total: 21 runs / ~54 hours (split across multiple sessions).
 #
 # ── Usage ─────────────────────────────────────────────────────────────────
 #   python -m scripts.experiments.exp_weight_sensitivity              # all
@@ -180,6 +222,30 @@ SWEEP_GROUPS = {
         'Hp':         14,
         'weight_grid': [
             {'name': 'a6_2p0_Hp14val', 'alpha6': 2.0},
+            {'name': 'a6_4p0_Hp14val', 'alpha6': 4.0},
+            {'name': 'a6_8p0_Hp14val', 'alpha6': 8.0},
+        ],
+    },
+
+    # Group F — α₄ × α₆ joint factorial on wet/100%/Hp=14 (9 runs)
+    # Tests whether α₄ becomes redundant once α₆ is active. The α₄=0
+    # column directly tests the removal hypothesis. See header docstring.
+    'a46_wet': {
+        'scenario':   'wet',
+        'budget_pct': 100,
+        'Hp':         14,
+        'weight_grid': [
+            # α₄=0 column — α₆-only configurations
+            {'name': 'a46_a4_0p0_a6_0p0', 'alpha4': 0.0, 'alpha6': 0.0},
+            {'name': 'a46_a4_0p0_a6_2p0', 'alpha4': 0.0, 'alpha6': 2.0},
+            {'name': 'a46_a4_0p0_a6_4p0', 'alpha4': 0.0, 'alpha6': 4.0},
+            {'name': 'a46_a4_0p0_a6_8p0', 'alpha4': 0.0, 'alpha6': 8.0},
+            # Joint α₄+α₆ configurations
+            {'name': 'a46_a4_0p5_a6_4p0', 'alpha4': 0.5, 'alpha6': 4.0},
+            {'name': 'a46_a4_2p0_a6_2p0', 'alpha4': 2.0, 'alpha6': 2.0},
+            {'name': 'a46_a4_2p0_a6_4p0', 'alpha4': 2.0, 'alpha6': 4.0},
+            {'name': 'a46_a4_5p0_a6_2p0', 'alpha4': 5.0, 'alpha6': 2.0},
+            {'name': 'a46_a4_5p0_a6_4p0', 'alpha4': 5.0, 'alpha6': 4.0},
         ],
     },
 }
