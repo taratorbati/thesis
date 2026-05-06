@@ -114,10 +114,49 @@
 #   high-α₆ configs; the existing zero-irrigation fallback handles
 #   them safely.
 #
+# Group G — Cross-scenario validation of α* recommendations  [10 runs]
+#   The Group F factorial at wet/100%/Hp=14 produced two competing
+#   recommended operating points:
+#     Option A:  α₄ = 0,  α₆ = 8   — α₆-only solution, simpler
+#                                    (5-term cost function)
+#     Option B:  α₄ = 2,  α₆ = 4   — joint solution, both terms retained
+#                                    (6-term cost function)
+#   Both achieve sev_wlog_d = 0 and yield ~3760 kg/ha at the wet/Hp=14
+#   stress-test point. This group validates that the chosen α*
+#   generalizes across operating points before locking it in for the
+#   methodology chapter and downstream RL training.
+#
+#   Operating points covered (head-to-head A vs B at each):
+#     dry / 100% / Hp=14    — both options (configs 1, 2)
+#     dry / 100% / Hp=8     — both options (configs 5, 6)
+#     wet / 100% / Hp=8     — both options (configs 7, 8)
+#     moderate / 100% / Hp=14 — both options (configs 9, 10)
+#     wet /  85% / Hp=14    — Option A only (config 3)
+#     wet /  70% / Hp=14    — Option A only (config 4)
+#
+#   Rationale per row:
+#     - dry/Hp=14: α₆ was previously validated only at α₆=2.0 in dry/Hp=14
+#       (Group E). This confirms α₆=8 doesn't over-penalize in scenarios
+#       where x₁ > FC is rare.
+#     - dry/Hp=8 and wet/Hp=8: the Group D α₆ sweep on dry/Hp=8 showed
+#       null effect at α₆ ≤ 2.0; α₆=8 has not yet been tested at Hp=8.
+#       Confirms recommended weights do not perturb shorter-horizon
+#       performance.
+#     - wet/85% and wet/70%: budget-constrained robustness check for
+#       Option A. The binding budget already reduces water application,
+#       so α₆ has progressively less to do — these runs verify the
+#       recommendation does not destabilize under budget pressure.
+#     - moderate/Hp=14: moderate is the most representative climate
+#       scenario in the dataset. Both options are tested here as the
+#       primary anchor for the thesis-wide recommendation.
+#
+#   Compute: ~21 hours total. Hp=14 wet runs ~3-4 h each; Hp=14 dry
+#   ~2 h each; Hp=8 runs ~30-60 min each. Ma
+#
 # ── Total compute ─────────────────────────────────────────────────────────
-#   Hp=8  runs:   4 (Group A) + 2 (Group B) + 3 (Group D) = 9 runs ≈ 9 h
-#   Hp=14 runs:   2 (Group C) + 1 (Group E) + 9 (Group F) = 12 runs ≈ 45 h
-#   Total: 21 runs / ~54 hours (split across multiple sessions).
+#   Hp=8  runs:   4 (Group A) + 2 (Group B) + 3 (Group D) + 4 (Group G) = 13 runs ≈ 12 h
+#   Hp=14 runs:   2 (Group C) + 1 (Group E) + 9 (Group F) + 6 (Group G) = 18 runs ≈ 60 h
+#   Total: 31 runs / ~72 hours (split across multiple sessions).
 #
 # ── Usage ─────────────────────────────────────────────────────────────────
 #   python -m scripts.experiments.exp_weight_sensitivity              # all
@@ -248,6 +287,50 @@ SWEEP_GROUPS = {
             {'name': 'a46_a4_5p0_a6_4p0', 'alpha4': 5.0, 'alpha6': 4.0},
         ],
     },
+
+    # Group G — Cross-scenario validation of α* recommendations (10 runs)
+    # Tests Option A (α₄=0, α₆=8) and Option B (α₄=2, α₆=4) across
+    # operating points outside the wet/100%/Hp=14 stress-test point
+    # that established them. See header docstring.
+    #
+    # NOTE: This group has heterogeneous (scenario, budget, Hp) per config,
+    # unlike groups A-F which fix all three at the group level. Each config
+    # carries its own scenario/budget/Hp, dispatched via run_heterogeneous_group.
+    'aG_validate': {
+        'heterogeneous': True,
+        'configs': [
+            # 1. dry/100%/Hp=14 — Option A
+            {'name': 'aG_dry_100pct_Hp14_optA', 'scenario': 'dry', 'budget_pct': 100, 'Hp': 14,
+             'alpha4': 0.0, 'alpha6': 8.0},
+            # 2. dry/100%/Hp=14 — Option B
+            {'name': 'aG_dry_100pct_Hp14_optB', 'scenario': 'dry', 'budget_pct': 100, 'Hp': 14,
+             'alpha4': 2.0, 'alpha6': 4.0},
+            # 3. wet/85%/Hp=14 — Option A
+            {'name': 'aG_wet_85pct_Hp14_optA', 'scenario': 'wet', 'budget_pct': 85, 'Hp': 14,
+             'alpha4': 0.0, 'alpha6': 8.0},
+            # 4. wet/70%/Hp=14 — Option A
+            {'name': 'aG_wet_70pct_Hp14_optA', 'scenario': 'wet', 'budget_pct': 70, 'Hp': 14,
+             'alpha4': 0.0, 'alpha6': 8.0},
+            # 5. dry/100%/Hp=8 — Option A
+            {'name': 'aG_dry_100pct_Hp8_optA', 'scenario': 'dry', 'budget_pct': 100, 'Hp': 8,
+             'alpha4': 0.0, 'alpha6': 8.0},
+            # 6. dry/100%/Hp=8 — Option B
+            {'name': 'aG_dry_100pct_Hp8_optB', 'scenario': 'dry', 'budget_pct': 100, 'Hp': 8,
+             'alpha4': 2.0, 'alpha6': 4.0},
+            # 7. wet/100%/Hp=8 — Option A
+            {'name': 'aG_wet_100pct_Hp8_optA', 'scenario': 'wet', 'budget_pct': 100, 'Hp': 8,
+             'alpha4': 0.0, 'alpha6': 8.0},
+            # 8. wet/100%/Hp=8 — Option B
+            {'name': 'aG_wet_100pct_Hp8_optB', 'scenario': 'wet', 'budget_pct': 100, 'Hp': 8,
+             'alpha4': 2.0, 'alpha6': 4.0},
+            # 9. moderate/100%/Hp=14 — Option B
+            {'name': 'aG_moderate_100pct_Hp14_optB', 'scenario': 'moderate', 'budget_pct': 100, 'Hp': 14,
+             'alpha4': 2.0, 'alpha6': 4.0},
+            # 10. moderate/100%/Hp=14 — Option A
+            {'name': 'aG_moderate_100pct_Hp14_optA', 'scenario': 'moderate', 'budget_pct': 100, 'Hp': 14,
+             'alpha4': 0.0, 'alpha6': 8.0},
+        ],
+    },
 }
 
 
@@ -272,7 +355,7 @@ def run_sweep_group(group_key, group_spec, args, terrain, df_climate):
     for config in group_spec['weight_grid']:
         name = config['name']
 
-        # Build the weight dict by overriding NOMINAL with the active sweep parameter
+        # Build the weight dict by overriding NOMINAL with theactive sweep parameter
         weights = dict(NOMINAL)
         for k, v in config.items():
             if k != 'name':
@@ -289,6 +372,73 @@ def run_sweep_group(group_key, group_spec, args, terrain, df_climate):
                 f'{k}={v}' for k, v in config.items() if k != 'name'
             )
             print(f"\n  → Config '{name}' ({override_str})")
+            print(f"    Output: {output_filename}")
+
+        controller = MPCController(
+            Hp=Hp,
+            weights=weights,
+            use_smooth=True,
+            forecast_mode='perfect',
+            verbose=not args.quiet,
+        )
+
+        run_season(
+            controller=controller,
+            terrain=terrain,
+            crop=crop,
+            climate=climate,
+            budget_total=budget_total,
+            output_path=output_path,
+            scenario_name=scenario,
+            seed=0,
+            force=args.force,
+            verbose=not args.quiet,
+        )
+
+
+def run_heterogeneous_group(group_key, group_spec, args, terrain, df_climate):
+    """Run a sweep group where each config has its own scenario/budget/Hp.
+
+    Used for Group G (cross-scenario validation), where the operating
+    point varies per config. Each config dict must contain keys:
+        'name', 'scenario', 'budget_pct', 'Hp', and weight overrides.
+    """
+    if not args.quiet:
+        print(f"\n{'='*72}")
+        print(f"  SWEEP GROUP: {group_key.upper()} (heterogeneous)")
+        print(f"  Configs: {len(group_spec['configs'])}")
+        print(f"{'='*72}")
+
+    crop = get_crop('rice')
+
+    for config in group_spec['configs']:
+        name = config['name']
+        scenario = config['scenario']
+        budget_pct = config['budget_pct']
+        Hp = config['Hp']
+
+        # Build the weight dict: NOMINAL overridden by per-config weight keys
+        weights = dict(NOMINAL)
+        for k, v in config.items():
+            if k not in ('name', 'scenario', 'budget_pct', 'Hp'):
+                weights[k] = v
+
+        # Per-config climate slicing (cheap)
+        climate = extract_scenario_by_name(df_climate, scenario, crop)
+        climate['year'] = SCENARIO_YEARS[scenario]
+        budget_total = 484.0 * (budget_pct / 100.0)
+
+        output_filename = (f"mpc_perfect_{scenario}_rice_{budget_pct}pct"
+                           f"_Hp{Hp}_wsens_{name}.parquet")
+        output_path = OUTPUT_DIR / output_filename
+
+        if not args.quiet:
+            override_str = ', '.join(
+                f'{k}={v}' for k, v in config.items()
+                if k not in ('name', 'scenario', 'budget_pct', 'Hp')
+            )
+            print(f"\n  → Config '{name}' "
+                  f"(scenario={scenario}, budget={budget_pct}%, Hp={Hp}, {override_str})")
             print(f"    Output: {output_filename}")
 
         controller = MPCController(
@@ -352,8 +502,13 @@ def main():
     print(f"Sweep groups to execute: {groups_to_run}")
 
     for group_key in groups_to_run:
-        run_sweep_group(group_key, SWEEP_GROUPS[group_key],
-                        args, terrain, df_climate)
+        group_spec = SWEEP_GROUPS[group_key]
+        if group_spec.get('heterogeneous', False):
+            run_heterogeneous_group(group_key, group_spec,
+                                    args, terrain, df_climate)
+        else:
+            run_sweep_group(group_key, group_spec,
+                            args, terrain, df_climate)
 
     print(f"\n{'='*72}")
     print(f"  All requested sweeps completed.")
