@@ -279,12 +279,24 @@ SWEEP_GROUPS = {
             {'name': 'a46_a4_0p0_a6_2p0', 'alpha4': 0.0, 'alpha6': 2.0},
             {'name': 'a46_a4_0p0_a6_4p0', 'alpha4': 0.0, 'alpha6': 4.0},
             {'name': 'a46_a4_0p0_a6_8p0', 'alpha4': 0.0, 'alpha6': 8.0},
+            {'name': 'a46_a4_0p0_a6_10p0', 'alpha4': 0.0, 'alpha6': 10.0},
+            {'name': 'a46_a4_0p0_a6_16p0', 'alpha4': 0.0, 'alpha6': 16.0},
             # Joint α₄+α₆ configurations
             {'name': 'a46_a4_0p5_a6_4p0', 'alpha4': 0.5, 'alpha6': 4.0},
             {'name': 'a46_a4_2p0_a6_2p0', 'alpha4': 2.0, 'alpha6': 2.0},
             {'name': 'a46_a4_2p0_a6_4p0', 'alpha4': 2.0, 'alpha6': 4.0},
             {'name': 'a46_a4_5p0_a6_2p0', 'alpha4': 5.0, 'alpha6': 2.0},
             {'name': 'a46_a4_5p0_a6_4p0', 'alpha4': 5.0, 'alpha6': 4.0},
+        ],
+    },
+
+    'a46_dry': {
+        'scenario':   'wet',
+        'budget_pct': 100,
+        'Hp':         14,
+        'weight_grid': [
+            {'name': 'a46_a4_0p0_a6_10p0', 'alpha4': 0.0, 'alpha6': 10.0},
+            {'name': 'a46_a4_0p0_a6_16p0', 'alpha4': 0.0, 'alpha6': 16.0},
         ],
     },
 
@@ -331,6 +343,17 @@ SWEEP_GROUPS = {
              'alpha4': 0.0, 'alpha6': 8.0},
         ],
     },
+
+    'a46_wet_validate': {
+        'scenario':   'dry',
+        'budget_pct': 100,
+        'Hp':         14,
+        'weight_grid': [
+            {'name': 'a6_4p0_Hp14val', 'alpha6': 10.0},
+            {'name': 'a6_8p0_Hp14val', 'alpha6': 16.0},
+        ],
+    },
+
 }
 
 
