@@ -1,0 +1,32 @@
+# =============================================================================
+# scripts/experiments/exp_weight_sensitivity.py — TWO-SCENARIO PATCH
+#
+# Two surgical edits to remove the moderate-scenario configs from Group G.
+# The Group G ceiling-test runs and Group F factorial runs all remain
+# unchanged — only the two `aG_moderate_*` entries are deleted.
+# =============================================================================
+
+# ── EDIT: Remove configs 9 and 10 from Group G (the cross-scenario validation)
+#
+# Locate this block in the GROUPS dict, key 'aG_cross_scenario_validation':
+#
+#   # 9. moderate/100%/Hp=14 — Option B
+#   {'name': 'aG_moderate_100pct_Hp14_optB', 'scenario': 'moderate',
+#    'budget_pct': 100, 'Hp': 14, 'alpha4': 2.0, 'alpha6': 4.0},
+#   # 10. moderate/100%/Hp=14 — Option A
+#   {'name': 'aG_moderate_100pct_Hp14_optA', 'scenario': 'moderate',
+#    'budget_pct': 100, 'Hp': 14, 'alpha4': 0.0, 'alpha6': 8.0},
+#
+# Delete both entries. Group G shrinks from 10 configs to 8 configs
+# (all of which are already complete in results/runs/).
+#
+# The narrative comments at the top of the file (lines 133, 149) that
+# reference "moderate / 100% / Hp=14 — both options (configs 9, 10)"
+# and "moderate is the most representative climate" can either be
+# kept (as historical record of what was originally planned) or
+# trimmed. Either is fine.
+#
+# Existing parquet files in results/runs/ for the two moderate Group G
+# runs can be archived or deleted — they are no longer referenced by
+# any analysis script after the figures.py patch.
+# =============================================================================

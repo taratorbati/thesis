@@ -1,0 +1,90 @@
+\documentclass[11pt, a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath, amssymb, amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{float}
+\usepackage{cite}
+
+\geometry{margin=1in}
+
+\title{\textbf{Graph-Structured Approximate Model Predictive Control for Topologically Coupled Agro-Systems}}
+\author{} % Add authors here
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This report formulates a Model Predictive Control (MPC) architecture for a large-scale, topographically coupled agricultural environment. The 130-agent system routes surface water via an explicit feedforward topological cascade, creating a Directed Acyclic Graph (DAG). We formally define the system as a constrained non-convex trajectory optimization problem. By evaluating structural architectures, we justify the selection of Differentiable Simulation via Projected Gradient Descent (PGD). We explicitly frame this solution class as a deterministic open-loop optimized rolling trajectory with surrogate state feasibility. In summary, this architecture solves a non-convex finite-horizon optimal control problem via projected first-order methods, converging at best to first-order stationary points, without guarantees of recursive feasibility or asymptotic stability, under certainty-equivalent disturbance forecasts.
+\end{abstract}
+
+\section{System Dynamics and State Formulation}
+\label{sec:dynamics}
+The agricultural environment consists of $N = 130$ spatially distributed agents. At discrete time step $k$, the state of agent $i$ is a 5-dimensional vector:
+\begin{equation}
+    x_{i}^k = [x_{1,i}^k,\; x_{2,i}^k,\; x_{3,i}^k,\; x_{4,i}^k,\; x_{5,i}^k]^\top
+\end{equation}
+The system is driven by exogenous, spatially heterogeneous disturbances $d^k_i = [R^k_i, ET^k_i]^\top$. Within the prediction horizon, these disturbances are treated deterministically. This strong Certainty Equivalence assumption yields a deterministic open-loop MPC approximation, providing no worst-case guarantees or stochastic optimal control interpretations.
+
+The physical topography dictates a directed flow network $\mathcal{G} = (\mathcal{V}, \mathcal{E})$. Assuming no implicit coupling variables exist (e.g., shared hydraulic pressure fields), surface runoff is evaluated as an explicitly feedforward sequential operator. This replaces implicit elliptic PDE coupling with a causal discrete network flow model . Following a topological sort, local dynamics update sequentially:
+\begin{equation}
+    x_i^{k+1} = g_i\left(x_i^k, u_i^k, d_i^k, \sum_{j \in \text{upstream}(i)} h_{ji}(x_j^k, u_j^k)\right)
+\end{equation}
+
+\section{Exploiting DAG Structure for Efficient Optimization}
+\label{sec:dag_structure}
+Because the hydrological routing is modeled strictly feedforward, the intra-step Jacobian is structurally block lower-triangular . The computational complexity of evaluating the dynamics over the prediction horizon $H_p$ is $\Theta(H_p \cdot |\mathcal{E}|)$ for both the forward pass and gradient backpropagation. 
+
+However, differentiable simulation requires storing intermediate activations to construct the reverse-mode automatic differentiation graph. Consequently, the memory scaling is bounded by $\mathcal{O}(c \cdot H_p \cdot N)$, shifting the primary computational bottleneck to memory bandwidth. The scalar $c$ is algorithmically tunable depending on the selected autodiff strategy, representing a core design axis where gradient checkpointing can be utilized to trade computational compute for a reduced memory footprint.
+
+\section{The Optimal Control Problem Formulation}
+\label{sec:ocp}
+We define a finite-dimensional, non-convex constrained optimal control problem in $\mathbb{R}^{N \cdot H_p}$. 
+
+\subsection{Objective Function}
+The objective relies on an explicit rollout operator $x^{H_p} = F(x^0, u_{0:H_p-1}, d_{0:H_p-1})$ to map the control sequence to the terminal state:
+\begin{equation}
+    \min_{u_{0:H_p-1}} J(u) = \sum_{k=0}^{H_p-1} \left( \lambda_w \frac{\sum_{i=1}^N u_i^k}{W_{\text{norm}}} + \lambda_{\Delta} \|u_k - u_{k-1}\|^2 \right) - \lambda_b \frac{\sum_{i=1}^N x_{4, i}^{H_p}}{B_{\text{norm}}}
+\end{equation}
+The regularization term ($\lambda_{\Delta}$) introduces a smoothing prior equivalent to Tikhonov regularization in the control space . This discrete approximation of an $|\dot{u}|^2$ penalty acts as an implicit low-pass filter, structurally biasing the optimizer toward low-frequency actions. This inherently reduces the control bandwidth and the system's responsiveness to high-frequency disturbances, such as sudden rain spikes.
+
+\subsection{System Constraints}
+\begin{enumerate}
+    \item \textbf{Actuator Box Constraints:} $0 \leq u_i^k \leq u_{\text{max}} \quad \forall i, \forall k$
+    \item \textbf{Global Water Budget:} $\sum_{k=0}^{H_p-1} \sum_{i=1}^N u_i^k \leq W_{\text{total}}$. Combined with the box constraints, the feasible region is geometrically defined as a convex polytope (the intersection of a hypercube and a half-space). Crucially, this coupled set is not separable.
+    \item \textbf{State Feasibility:} $0 \leq x_{1, i}^k \leq \theta_{\text{sat}} \theta_5$. Because real soil moisture retention curves exhibit hysteresis and nonlinearity, this multiplicative bound acts purely as a linearized surrogate safety envelope. Mathematically, it is omitted from the formal feasibility set and instead treated as a soft constraint.
+\end{enumerate}
+
+\section{Evaluation of Control Architectures}
+\label{sec:architectures}
+
+\subsection{Architecture 1: Centralized Sparse Nonlinear MPC}
+Formulated in CasADi/IPOPT, this leverages KKT structure-exploiting solvers and partial condensing. However, managing highly nonlinear boundaries over long horizons restricts real-time viability.
+
+\subsection{Architecture 2: Distributed MPC (ADMM)}
+While spatial coarse-graining reduces dimensionality, the dense global water constraint introduces a global dual variable that destroys separability. This creates ill-conditioned saddle-point dynamics in the primal-dual iterations, rendering the system structurally stiff and leading to sublinear convergence under tight budgets .
+
+\subsection{Architecture 3: Constrained Neural Policy}
+Trained via dataset aggregation (DAgger), a Deep Neural Network achieves millisecond inference. To provide formal guarantees, such policies must be augmented with Control Barrier Functions (CBFs). This effectively converts the architecture into a hybrid learning and constrained optimization pipeline, where inference complexity becomes a neural forward pass followed by a Quadratic Program (QP) solve.
+
+\subsection{Architecture 4: Differentiable Simulation (Approximate MPC)}
+The control trajectory $u_{0:H_p-1}$ is treated as the explicit decision variable within a differentiable tensor library. While leveraging automatic differentiation, unconstrained gradient descent cannot satisfy the coupled non-separable geometry of the water budget constraint.
+
+\section{Unifying Framework: Non-Convex Projected Gradient Solver}
+\label{sec:selected}
+We select \textbf{Architecture 4}. Formally, this framework operates as a soft-constrained MPC with barrier regularization and projected action feasibility.
+
+\subsection{Exact Solution to Convex Projection Subproblem}
+To guarantee action feasibility, Projected Gradient Descent (PGD) is employed. After an unconstrained gradient step, the trajectory is mapped onto the convex polytope constraint set. Because the projection couples all time steps globally, its computational complexity scales as $\mathcal{O}(N \cdot H_p \log(N \cdot H_p))$. This requires the exact solution of the convex projection subproblem (up to numerical precision) via iterative root-finding on the Lagrange multiplier. While implemented in floating-point arithmetic, this dual-optimality strategy rigorously enforces hardware limits within machine precision.
+
+\subsection{Surrogate Feasibility and Formal Problem Classification}
+State feasibility is enforced strictly via soft interior-point barriers in the differentiable loss function; thus, constraint violation is heavily penalized rather than strictly prohibited. 
+
+This method lacks a terminal set or explicit invariance properties. In formal terms, \textbf{this architecture solves a non-convex finite-horizon optimal control problem via projected first-order methods, converging at best to first-order stationary points under mild smoothness assumptions. It operates without guarantees of recursive feasibility, global optimality, or asymptotic stability, under certainty-equivalent disturbance forecasts.}
+
+\end{document}

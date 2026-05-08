@@ -1,0 +1,29 @@
+# =============================================================================
+# scripts/analysis/figures.py — TWO-SCENARIO PATCH
+#
+# This file requires only two surgical edits, not a full rewrite.
+# Apply the changes below to your existing scripts/analysis/figures.py.
+# =============================================================================
+
+# ── EDIT 1: Add a module-level SCENARIOS constant after the imports ────────
+# After line 41 (RUNS_DIR = PROJECT_ROOT / 'results' / 'runs'), insert:
+
+# Single source of truth for the scenario list. Pulled from climate_data
+# so that any future change to SCENARIO_YEARS automatically propagates.
+from climate_data import SCENARIO_YEARS
+SCENARIOS = list(SCENARIO_YEARS.keys())  # ['dry', 'wet']
+
+
+# ── EDIT 2: Replace the two hardcoded lists ────────────────────────────────
+# Line 91 (inside fig_yield_comparison):
+#   OLD:  scenarios = ['dry', 'moderate', 'wet']
+#   NEW:  scenarios = SCENARIOS
+#
+# Line 170 (inside fig_yield_heatmap):
+#   OLD:  scenarios = ['dry', 'moderate', 'wet']
+#   NEW:  scenarios = SCENARIOS
+#
+# That's it. No other lines in figures.py refer to scenario names
+# explicitly — all other functions iterate over df['scenario'].unique()
+# or otherwise read the scenario list from the comparison table.
+# =============================================================================

@@ -4,9 +4,15 @@
 # Reads from climate_apr_oct_cleaned.csv (produced by preprocess.py).
 # Uses Penman-Monteith ET0.
 #
-# extract_scenario() now takes the crop dict as an explicit parameter rather
+# extract_scenario() takes the crop dict as an explicit parameter rather
 # than importing it at module load time. This means the same Python process
 # can load rice and tobacco scenarios without conflicting state.
+#
+# Scenarios: thesis uses two contrasting scenarios chosen from the 25-year
+# climatological record. The intermediate-rainfall year 2020 (P38) is omitted
+# because it is climatologically too close to the dry year 2022 (P35) to
+# produce meaningfully different controller behaviour. See thesis Section
+# 3.3 (Climatology and Scenario Selection) for the empirical justification.
 # =============================================================================
 
 import pandas as pd
@@ -16,9 +22,8 @@ import numpy as np
 DATA_CSV = 'results/preprocessing/climate_apr_oct_cleaned.csv'
 
 SCENARIO_YEARS = {
-    'dry':      2022,
-    'moderate': 2020,
-    'wet':      2024,
+    'dry': 2022,   # P35 — 39.7 mm rice-season rainfall
+    'wet': 2024,   # P96 — 176.8 mm rice-season rainfall (3 R20 events)
 }
 
 
@@ -97,7 +102,7 @@ def extract_scenario(df, year, crop, start_doy=None, n_days=None):
 
 
 def extract_scenario_by_name(df, scenario_name, crop, **kwargs):
-    """Extract a named scenario ('dry', 'moderate', 'wet') for a crop.
+    """Extract a named scenario ('dry' or 'wet') for a crop.
 
     Convenience wrapper around extract_scenario() that maps scenario names
     to their canonical years.
@@ -107,7 +112,7 @@ def extract_scenario_by_name(df, scenario_name, crop, **kwargs):
     df : pd.DataFrame
         Output of load_cleaned_data().
     scenario_name : str
-        One of 'dry' (2022), 'moderate' (2020), 'wet' (2024).
+        One of 'dry' (2022) or 'wet' (2024).
     crop : dict
         Crop parameter dict.
     **kwargs
@@ -139,7 +144,7 @@ if __name__ == '__main__':
           f"{crop['season_end_doy']} ({crop['season_days']} days)")
     print()
 
-    for scenario_name in ('dry', 'moderate', 'wet'):
+    for scenario_name in ('dry', 'wet'):
         clim = extract_scenario_by_name(df, scenario_name, crop)
         year = SCENARIO_YEARS[scenario_name]
         print(f"{scenario_name.capitalize()} ({year}):")

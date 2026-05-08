@@ -1,0 +1,453 @@
+\documentclass[12pt, a4paper]{article}
+
+% --- PREAMBLE ---
+\usepackage{graphicx} % Required for inserting images
+\usepackage[utf8]{inputenc}
+\usepackage[T1, T2A]{fontenc} 
+%\usepackage[margin=2.5cm]{geometry}
+\usepackage{geometry}
+\geometry{a4paper, margin=2cm}
+\usepackage{csquotes}
+\usepackage[english]{babel} % Russian is optional, but T2A is mandatory
+\usepackage{setspace}
+\setstretch{1.15} % This is roughly "1.5 line spacing"
+\usepackage[skip=10pt plus 1pt, indent=0pt]{parskip}
+\usepackage[T1]{fontenc} % Helps LaTeX understand where to break words
+\usepackage[english]{babel} % Tells LaTeX which language's hyphenation rules to use
+\usepackage{tikz}
+\usepackage{amsmath, amssymb}
+\usepackage{booktabs}
+\usetikzlibrary{arrows.meta, positioning, shapes.geometric, shapes.symbols, calc}
+\sloppy % Tells LaTeX it's okay to have slightly more space between words to avoid margin overflow
+
+\usepackage{caption}
+\usepackage{hyperref}
+\usepackage{float}
+\usepackage{enumitem}
+
+\begin{document}
+
+\input{title}
+
+\tableofcontents
+
+\newpage
+
+\section{Introduction}
+
+This chapter presents the complete mathematical and physical description of the agricultural
+system studied in this thesis. The objective is to construct a high-fidelity simulation environ
+ment that serves a dual purpose: first, as the virtual plant on which the Model Predictive
+Controller operates, and second, as the training environment for the Reinforcement Learning
+agent developed in Chapter ??. The modeling framework builds upon the agent-based model
+(ABM) proposed by Lopez-Jimenez et al. [1], which couples soil water dynamics with crop
+growth on a topographically heterogeneous field. However, several critical modifications and
+extensions are introduced to adapt the model to the specific agronomic conditions of rice cul
+tivation in Gilan Province, Iran, and to correct certain mass-balance inconsistencies identified
+in the original formulation.
+
+
+The chapter is organized as follows. Section 2 describes the physical field site and the digital
+elevation model used to define the agent grid. Section 3 presents the complete ABM equations.
+Section 4 details the mass conservation correction applied to the original water exchange for
+mulation. Section 5 describes the climate data sources and the two contrasting scenarios used
+throughout this thesis. Section 6 specifies the soil and crop parameters. Section 7 derives the
+agronomically grounded water budget. Finally, Section 8 presents the ABM validation results,
+including cross-validation against satellite soil wetness observations.
+
+\section{Study Site Description}
+
+The study site is a 6-hectare agricultural field located in Gilan Province, Iran (38.298$^{\circ}$N, 48.847$^{\circ}$E), in the humid subtropical coastal zone south of the Caspian Sea. Gilan is Iran's primary rice-producing province, accounting for over 238,000 hectares of paddy fields~[1]. The field exhibits a bowl-shaped topography with elevations ranging from 74~m to 181~m above sea level. A digital elevation model (DEM) was obtained from USGS Earth Explorer and processed in QGIS to extract a $10 \times 13$ grid of 130 computational agents, each representing approximately 462~m$^{2}$.
+
+\subsection{Topological Graph Construction}
+
+The DEM was used to construct a directed graph encoding water flow topology. For each agent~$n$, the normalized elevation was computed as $\gamma_n = (z_n - z_{\min})/(z_{\max} - z_{\min})$. Each agent sends lateral water flow to all eight-connected neighbors with strictly lower normalized elevation. The number of lower neighbors $N_r(n)$ determines the agent's drainage capacity. Agents with $N_r = 0$ are classified as \emph{sink agents}---local minima where water accumulates. On this bowl-shaped field, sink agents are concentrated near the center and represent areas at risk of waterlogging.
+
+
+\section{Climate Data}
+
+\subsection{Data Source and Period}
+
+Daily meteorological data were obtained from the NASA POWER database for 2000--2025 at coordinates (38.30$^{\circ}$N, 48.85$^{\circ}$E), providing satellite-derived and reanalysis-based parameters at $\sim$50$\times$60~km resolution. Thirteen variables were extracted: T2M, T2M\_MAX, T2M\_MIN, PRECTOTCORR, RH2M, WS2M, PS, T2MDEW, ALLSKY\_SFC\_SW\_DWN, GWETROOT, and GWETTOP.
+
+\subsection{Preprocessing}
+
+The dataset was filtered to April--October for each year, yielding 5,564 daily records. No missing values were found. One rainfall anomaly was identified (April~7, 2022: 375~mm) and replaced with the calendar-day average (1.2~mm). Two reference evapotranspiration values were computed for each day (Section~\ref{sec:et0}).
+
+\subsection{Reference Evapotranspiration}
+\label{sec:et0}
+
+Two methods were compared:
+
+\textbf{Hargreaves equation}~[2]: $\text{ET}_0^{H} = 0.0023 \cdot (T_{\text{mean}} + 17.8) \cdot (T_{\text{max}} - T_{\text{min}})^{0.5} \cdot R_s$
+
+\textbf{FAO Penman-Monteith}~[2]:
+\begin{equation}
+\text{ET}_0^{PM} = \frac{0.408 \,\Delta\,(R_n - G) + \gamma \,\frac{900}{T+273}\, u_2\, (e_s - e_a)}{\Delta + \gamma\,(1 + 0.34\, u_2)}
+\end{equation}
+
+Over the 25-year rice season, Hargreaves overestimated ET$_0$ by 34\% (6.78 vs 5.02~mm/day, $r = 0.965$). This is due to Gilan's high humidity ($\sim$64\%) and low wind ($\sim$1.40~m/s), which suppress evapotranspiration but are not captured by Hargreaves. Penman-Monteith was selected as the standard~[2].
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_et0.png}
+\caption{Comparison of Hargreaves and Penman-Monteith ET$_0$. Left: seasonal pattern. Right: scatter plot with regression.}
+\label{fig:et0}
+\end{figure}
+
+\subsection{25-Year Climatology}
+
+Mean temperature ranges from 12$^{\circ}$C in early April to 26$^{\circ}$C in mid-July. Precipitation shows a dry mid-season (June--August, 0.5--1.5~mm/day) flanked by wetter months. Solar radiation peaks at 26~MJ/m$^{2}$/day in June. Relative humidity remains 60--75\% throughout---a defining feature of Gilan's Caspian climate. Additional climate figures are provided in Appendix~A.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_temperature.png}
+\caption{25-year daily average temperature (April--October, 2000--2025).}
+\label{fig:temperature}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_rainfall.png}
+\caption{25-year daily average rainfall (April--October, 2000--2025).}
+\label{fig:rainfall}
+\end{figure}
+
+
+\section{Crop Parameterization}
+
+Two crops were selected: rice (Hashemi cultivar) and tobacco (\emph{Nicotiana tabacum}). Both are commercially significant in Gilan~[1,~3]. Their contrasting characteristics---high $K_c$/shallow roots/drought-sensitive rice versus moderate $K_c$/deep roots/drought-tolerant tobacco---enable evaluation of control algorithms under different agronomic conditions.
+
+\subsection{Rice (Hashemi Cultivar)}
+
+\subsubsection{Base Temperature and Thermal Time}
+
+The base temperature $T_{\text{base}} = 10^{\circ}$C follows the standard GDD convention~[4,~5] and the baseline model~[6]. The AquaCrop convention of 8$^{\circ}$C~[20] produces proportionally higher GDD values without changing maturity dates.
+
+The maturity threshold $\theta_{18} = 1250$~$^{\circ}$C$\cdot$day was calibrated from the 25-year dataset and validated against Sadidi Shal et al.\ (2021), who measured 1216--1352~GDD for Hashemi rice in Gilan~[7]. With a 20-day nursery contributing $\sim$210~GDD (+5$^{\circ}$C greenhouse boost), 20/26 years reach maturity by August~20.
+
+\subsubsection{Season Window}
+
+Transplanting: May~20 (DOY~141), when 7-day rolling $T_{\text{mean}} \geq 18^{\circ}$C and $T_{\min} \geq 12^{\circ}$C~[8,~9].
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_temperature_may_years.png}
+\caption{25-year average May temperature with transplanting thresholds.}
+\label{fig:temp_may}
+\end{figure}
+
+Harvest: August~20 (DOY~233). WMO R20mm events ($\geq$20~mm/day)~[10] increase sharply after this date, causing lodging~[10] and harvest disruption~[11].
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_rain_extremes_august.png}
+\caption{Extreme rainfall events ($\geq$20~mm/day) per day of August, 2000--2025.}
+\label{fig:rain_august}
+\end{figure}
+
+Field season: 93 days. Nursery provides $x_{2,\text{init}} = 210$~GDD. Other parameters: $K_c = 1.15$, $p = 0.20$~[2], $\theta_5 = 400$~mm, $\theta_{13} = 0.65$~g/MJ~[12,~13], HI = 0.42~[14]. Expected yield: 3500--4000~kg/ha (optimized) or $\sim$2000~kg/ha (traditional flooding, consistent with local farmer reports).
+
+\subsection{Tobacco (\emph{Nicotiana tabacum})}
+
+\subsubsection{Base Temperature and Thermal Time}
+
+$T_{\text{base}} = 10^{\circ}$C, within the 10--13$^{\circ}$C restriction range~[15]. $\theta_{18} = 1200$~GDD (field only), calibrated to match the 104-day season. Duration consistent with FAO (90--120 days)~[16] and Britannica (100--130 days)~[17]. $x_{2,\text{init}} = 0$ (nursery conditions unknown---seedlings delivered by company).
+
+\subsubsection{Season Window}
+
+Transplanting: May~25 (DOY~146). Harvest: September~5 (DOY~249). 104 field days.
+
+\subsubsection{Other Parameters}
+
+$\theta_5 = 700$~mm (FAO: 500--1000~mm)~[16]. $K_c = 0.90$, $p = 0.50$~[16]. $\theta_9 = 30^{\circ}$C (FAO optimal ceiling)~[15,~16]. $\theta_{13} = 0.30$~g/MJ~[18], HI = 0.55. Expected yield: 2000--2500~kg/ha~[16].
+
+\subsection{Parameter Summary}
+
+\begin{table}[H]
+\centering
+\caption{Complete crop and soil parameters.}
+\label{tab:params}
+\small
+\begin{tabular}{llccl}
+\toprule
+\textbf{Parameter} & \textbf{Symbol} & \textbf{Rice} & \textbf{Tobacco} & \textbf{Source} \\
+\midrule
+\multicolumn{5}{l}{\emph{Shared soil parameters (silty loam)}} \\
+Water uptake coeff. & $\theta_1$ & 0.096 & 0.096 & [6] \\
+Wilting point (vol.) & $\theta_2$ & 0.15 & 0.15 & [2] \\
+SCS threshold & $\theta_3$ & 10 mm & 10 mm & [6] \\
+Drainage coeff. & $\theta_4$ & 0.05 & 0.05 & [6] \\
+Field capacity (vol.) & $\theta_6$ & 0.35 & 0.35 & [2] \\
+\midrule
+\multicolumn{5}{l}{\emph{Crop-specific parameters}} \\
+Root depth & $\theta_5$ & 400 mm & 700 mm & [2], [16] \\
+Base temperature & $\theta_7$ & 10$^{\circ}$C & 10$^{\circ}$C & [5], [15] \\
+Heat stress onset & $\theta_9$ & 35$^{\circ}$C & 30$^{\circ}$C & [16] \\
+Extreme heat & $\theta_{10}$ & 42$^{\circ}$C & 38$^{\circ}$C & -- \\
+RUE & $\theta_{13}$ & 0.65 & 0.30 & [12], [18] \\
+Drought sensitivity & $\theta_{14}$ & 0.80 & 0.60 & [6] \\
+Maturity GDD & $\theta_{18}$ & 1250 & 1200 & [7], calib. \\
+Max interception & $\theta_{19}$ & 0.95 & 0.90 & [6] \\
+50\% intercept. GDD & $\theta_{20}$ & 417 & 450 & [19] \\
+Crop coefficient & $K_c$ & 1.15 & 0.90 & [2], [16] \\
+Depletion fraction & $p$ & 0.20 & 0.50 & [2], [16] \\
+Harvest index & HI & 0.42 & 0.55 & [14], [16] \\
+Nursery GDD & $x_{2,\text{init}}$ & 210 & 0 & Calib. \\
+Initial biomass & $x_{4,\text{init}}$ & 60 g/m$^2$ & 8 g/m$^2$ & Est. \\
+Season & -- & DOY 141--233 & DOY 146--249 & This study \\
+Field days & -- & 93 & 104 & -- \\
+FC & -- & 140 mm & 245 mm & $\theta_6 \times \theta_5$ \\
+WP & -- & 60 mm & 105 mm & $\theta_2 \times \theta_5$ \\
+TAW & -- & 80 mm & 140 mm & FC $-$ WP \\
+RAW & -- & 16 mm & 70 mm & $p \times$ TAW \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\section{Water Budget and Scenario Selection}
+
+\subsection{Water Budget Formulation}
+
+Crop water demand: $\text{ET}_c = \overline{\text{ET}_0^{PM}} \cdot K_c \cdot N_{\text{days}}$. Full irrigation need: $I_{\text{full}} = \max(\text{ET}_c - \overline{P}, 0)$, using 25-year average rainfall (Method~B).
+
+\begin{table}[H]
+\centering
+\caption{Water budget summary.}
+\label{tab:budget}
+\begin{tabular}{lcc}
+\toprule
+& \textbf{Rice} & \textbf{Tobacco} \\
+\midrule
+Season duration & 93 days & 104 days \\
+Avg ET$_0$ (PM) & 5.02 mm/day & 4.95 mm/day \\
+Crop demand & 537.0 mm & 463.4 mm \\
+Avg season rainfall & 53.3 mm & 74.5 mm \\
+Full irrigation need & 483.7 mm & 389.0 mm \\
+Budget at 70\% & 338.6 mm & 272.3 mm \\
+Budget at 50\% & 241.8 mm & 194.5 mm \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Rice demand (537~mm) is consistent with Hashemi field measurements: 534~mm (SRI) to 632~mm (traditional flooding)~[14]. Tobacco demand (463~mm) falls within the FAO range of 400--600~mm~[16]. Despite a longer season, tobacco needs less irrigation due to lower $K_c$ and higher rainfall.
+
+\subsection{Scenario Selection}
+
+\begin{table}[H]
+\centering
+\caption{Selected climate scenarios.}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Scenario} & \textbf{Year} & \textbf{Rice (mm)} & \textbf{Tobacco (mm)} \\
+\midrule
+Dry & 2022 & 39.7 & 54.0 \\
+Moderate & 2020 & 42.1 & 73.3 \\
+Wet & 2024 & 176.8 & 163.2 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\section{Agent-Based Model}
+
+The ABM follows L\'{o}pez-Jim\'{e}nez et al.~[6]. Each of $N = 130$ agents maintains: $x_1$ (soil water, mm), $x_2$ (thermal time, $^{\circ}$C$\cdot$day), $x_3$ (maturity stress), $x_4$ (biomass, g/m$^2$).
+
+\subsection{State Equations}
+
+\textbf{Water balance:}
+\begin{equation}
+x_1^n(k\!+\!1) = x_1^n(k) - \varphi_1^n - \varphi_2^n - \varphi_3^n - \varphi_{4,\text{out}}^n + \varphi_{4,\text{in}}^n + \varphi_{2,\text{in}}^n + P(k) + u^n(k)
+\label{eq:water}
+\end{equation}
+
+\textbf{Thermal time:} $x_2^n(k+1) = x_2^n(k) + \max(T_{\text{mean}} - \theta_7, 0)$
+
+\textbf{Maturity stress:} $x_3^n(k+1) = x_3^n(k) + \theta_{11}(1-h_2) + \theta_{12}(1-h_3^n)$
+
+\textbf{Biomass:}
+\begin{equation}
+x_4^n(k\!+\!1) = x_4^n(k) + \theta_{13} \cdot h_3^n \cdot h_6^n \cdot h_7 \cdot g(x_2^n) \cdot R_s(k)
+\label{eq:biomass}
+\end{equation}
+
+\subsection{Water Fluxes}
+
+$\varphi_1^n = \min(\max(\theta_1(x_1^n - \theta_2\theta_5), 0), \text{ET}_0)$ (transpiration)
+
+$\varphi_2 = (P-\theta_3)^2/(P+4\theta_3)$ if $P > \theta_3$, else 0 (SCS runoff)
+
+$\varphi_3^n = \theta_4 \cdot \max(x_1^n + P - \varphi_2 - \theta_6\theta_5, 0)$ (deep drainage)
+
+$\varphi_{4,\text{out}}^n = \max(x_1^n - \theta_6\theta_5, 0)$; $\varphi_{4,\text{in}}^m = \sum_{n \in \mathcal{U}(m)} \varphi_{4,\text{out}}^n / N_r(n)$ (lateral flow)
+
+\subsection{Stress and Growth Functions}
+
+$h_1 = \max(T_{\text{mean}} - \theta_7, 0)$; $h_2$: linear between $\theta_9$ (no stress) and $\theta_{10}$ (full stress); $h_3^n = 1 - \theta_{14} \cdot \max(1 - \varphi_1^n/\text{ET}_0, 0)$ (drought); $h_6^n = \text{clip}(1 - (x_1^n - \theta_6\theta_5)/(\theta_6\theta_5), 0, 1)$ (waterlogging); $h_7 = 1$ if $T_{\text{mean}} > \theta_7$, else 0.
+
+\textbf{Growth function:}
+\begin{equation}
+g(x_2^n) = \begin{cases}
+\theta_{19}/(1 + e^{-0.01(x_2^n - \theta_{20})}) & x_2^n \leq \theta_{18}/2 \\
+\theta_{19}/(1 + e^{0.01(x_2^n + x_3^n - \theta_{18})}) & x_2^n > \theta_{18}/2
+\end{cases}
+\end{equation}
+
+
+\section{Model Corrections and Extensions}
+
+Three corrections to the baseline~[6] were implemented.
+
+\subsection{Mass Conservation}
+
+The original water balance includes $\varphi_{4,\text{in}}$ but omits $\varphi_{4,\text{out}}$, violating mass conservation. The corrected Eq.~\ref{eq:water} includes $-\varphi_{4,\text{out}}^n$.
+
+\subsection{Drought Stress on Biomass}
+
+The original biomass equation lacks $h_3$, so drought does not reduce biomass. The corrected Eq.~\ref{eq:biomass} includes $h_3^n$, reducing biomass by up to $\theta_{14} \times 100\%$ under maximum drought (80\% for rice, 60\% for tobacco). This is essential for irrigation optimization: without it, the controller has no incentive to irrigate.
+
+\subsection{Surface Runoff Redistribution}
+\label{sec:runoff}
+
+Originally, $\varphi_2$ leaves the system. A simple redistribution was implemented: each agent's runoff flows to lower neighbors with immediate infiltration ($\varphi_{2,\text{in}}^n$). A cascading alternative (top-to-bottom SCS re-application) was also tested.
+
+\begin{table}[H]
+\centering
+\caption{Runoff redistribution comparison, no irrigation, wet scenario (2024).}
+\label{tab:runoff}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Mode} & \textbf{Yield (kg/ha)} & \textbf{$x_1$ sinks (mm)} & \textbf{$x_1$ hills (mm)} \\
+\midrule
+None (original) & 2135 & 71.2 & 71.2 \\
+Simple (A) & 2273 & 74.8 & 72.0 \\
+Cascade (B) & 2278 & 79.5 & 72.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Simple redistribution captures the first-order effect (6.5\% yield improvement) with negligible difference from cascade (0.2\%). Simple was adopted.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_runoff_comparison.png}
+\caption{No-irrigation runoff mode comparison, wet scenario (2024).}
+\label{fig:runoff}
+\end{figure}
+
+\subsection{Biomass Calibration}
+
+$\theta_{13}$ was calibrated so $x_4$ represents g/m$^2$ dry matter. Yield: $Y = x_4 \times \text{HI} \times 10$ (kg/ha). Rice: validated against $\sim$2000~kg/ha (farmer reports) and 3500--4000~kg/ha (optimized)~[14]. Initial conditions: rice $x_{2,\text{init}} = 210$, $x_{4,\text{init}} = 60$; tobacco $x_{2,\text{init}} = 0$, $x_{4,\text{init}} = 8$.
+
+
+\section{Model Validation}
+
+\subsection{GWETROOT Cross-Validation}
+
+ABM soil water was compared to NASA MERRA-2 GWETROOT. Both normalized: ABM as $(x_1 - \text{WP})/(\text{FC} - \text{WP})$; GWETROOT as native 0--1 fraction. Pearson correlation assessed temporal pattern agreement.
+
+\begin{table}[H]
+\centering
+\caption{Cross-validation: ABM vs NASA GWETROOT.}
+\label{tab:crossval}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Scenario} & \textbf{Year} & \textbf{Pearson $r$} & \textbf{$p$-value} \\
+\midrule
+Dry & 2022 & 0.738 & $3.1 \times 10^{-17}$ \\
+Moderate & 2020 & 0.534 & $3.4 \times 10^{-8}$ \\
+Wet & 2024 & 0.337 & $9.6 \times 10^{-4}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_gwetroot_timeseries.png}
+\caption{Normalized soil moisture: ABM (blue) vs NASA GWETROOT (brown).}
+\label{fig:gwetroot}
+\end{figure}
+
+The dry-year $r = 0.74$ ($p < 0.001$) confirms the ABM captures wetting/drying dynamics. Decreasing correlation with increasing rainfall is expected (reduced signal contrast in wet conditions). The absolute level difference (ABM $\sim$0.08 vs GWETROOT $\sim$0.46) reflects: (1) NASA's deeper root zone ($\sim$1000~mm vs 400~mm); (2) GWETROOT observes irrigated fields while the ABM simulates rain-fed conditions; (3) different soil parameterizations.
+
+
+\section*{References}
+
+\begin{enumerate}[label={[\arabic*]}, leftmargin=*]
+\item SurfIran, ``Gilan's rice fields,'' 2025. Available: \url{https://surfiran.com/mag/rice-transplantation-in-gilan-province/}
+\item R.~G.~Allen et al., ``Crop evapotranspiration,'' FAO Irrig. Drain. Paper 56, 1998.
+\item ``Tobacco,'' \emph{Encyclopaedia Iranica}. Available: \url{https://www.iranicaonline.org/articles/tobacco/}
+\item G.~S.~McMaster and W.~W.~Wilhelm, ``Growing degree-days,'' \emph{Agric.\ For.\ Meteorol.}, vol.~87, pp.~291--300, 1997.
+\item S.~Laohasiriwong et al., ``High temperature alters phenology in rice,'' \emph{Plants}, vol.~12, no.~3, p.~666, 2023.
+\item A.~L\'{o}pez-Jim\'{e}nez et al., ``Agent-based MPC of soil-crop irrigation,'' \emph{Control Eng.\ Pract.}, vol.~150, 2024.
+\item S.~M.~T.~Sadidi Shal et al., ``GDD of Hashemi rice in Guilan,'' \emph{J.\ Climate Res.}, vol.~1400(45), pp.~143--152, 2021.
+\item P.~Paredes et al., ``Base and upper temperature thresholds for GDD,'' \emph{Agric.\ Water Manag.}, vol.~319, 2025.
+\item R.~Faghani et al., ``Planting date and seedling age effects on rice yield,'' \emph{Afr.\ J.\ Biotechnol.}, 2011.
+\item A.~A.~Sarma et al., ``Adaptation of wetland rice to extreme weather,'' 2018.
+\item S.~Nayak et al., ``Extreme rainfall indices and rice productivity,'' 2011.
+\item S.~R.~Patel et al., ``RUE in irrigated rice,'' \emph{Paddy Water Environ.}, vol.~11, pp.~477--486, 2013.
+\item V.~O.~Sadras and R.~Trenchero, ``Radiation use efficiency,'' in \emph{Crop Physiology}, Elsevier, 2021.
+\item N.~Jalali et al., ``Water requirement of Hashemi rice,'' \emph{Water Res.\ Agric.}, 2021.
+\item Y.~Y.~Li et al., ``Cold stress effects on tobacco,'' \emph{BMC Plant Biol.}, vol.~21, p.~131, 2021.
+\item FAO, ``Crop information: Tobacco.'' Available: \url{https://www.fao.org/land-water/databases-and-software/crop-information/tobacco/en/}
+\item ``Tobacco,'' \emph{Encyclopaedia Britannica}, 1999.
+\item R.~Ferrara, ``RUE in flue-cured tobacco,'' \emph{Field Crops Res.}, 2002.
+\item Y.~Zhang et al., ``LAI simulation of tobacco,'' \emph{Chin.\ J.\ Eco-Agric.}, 2017.
+\item R.~S.~Raoufi et al., ``Climate changes and rice cultivation,'' \emph{Int.\ J.\ Plant Prod.}, 2025.
+\item TasteIran, ``Iran rice harvesting.'' Available: \url{https://www.tasteiran.net/stories/10/iran-rice-harvesting}
+\end{enumerate}
+
+
+\appendix
+\section{Supplementary Climate Figures}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_radiation.png}
+\caption{25-year daily average solar radiation, April--October.}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_humidity.png}
+\caption{25-year daily average relative humidity, April--October.}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_wind.png}
+\caption{25-year daily average wind speed, April--October.}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_pressure.png}
+\caption{25-year daily average surface pressure, April--October.}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_soil_moisture.png}
+\caption{25-year daily average NASA MERRA-2 soil wetness, April--October.}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_temperature_may_years.png}
+\caption{Daily temperature in May for 2021--2025.}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_runoff_spatial.png}
+\caption{Spatial distribution of $x_1$ at harvest, three runoff modes, wet scenario (2024).}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/fig_gwetroot_scatter.png}
+\caption{Scatter plots: ABM vs NASA GWETROOT for three scenarios.}
+\end{figure}
+
+\end{document}

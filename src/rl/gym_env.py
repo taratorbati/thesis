@@ -1,25 +1,33 @@
 # =============================================================================
 # src/rl/gym_env.py
-# Gymnasium wrapper for the 130-agent crop-soil ABM.
+# Gymnasium wrapper for the 130-agent crop-soil ABM, configured at the
+# recommended operating point alpha* (Chapter 4 of the thesis).
 #
 # Observation (660 dims):
 #   Per-agent (5 × 130 = 650):
 #     x1_norm, x5_norm, x4_norm, x3, elevation
 #   Scalars (10):
-#     day_frac, budget_frac, burn_rate, rain_today, rain_forecast_3d,
-#     ETc_today, ETc_forecast_3d, h2_today, h7_today, g_base_today
+#     day_frac, budget_frac, burn_rate, rain_today, rain_forecast,
+#     ETc_today, ETc_forecast, h2_today, h7_today, g_base_today
 #
-# Action: Box(0, 1, shape=(130,)) → scaled to [0, UB] mm/day.
+# Action: Box(0, 1, shape=(130,)) → scaled to [0, UB_MM] mm/day.
 #
-# Reward (dense, mirrors MPC cost):
-#   r(t) = α₁·Δx4_mean/x4_ref - α₂·Σu/W_daily_ref
-#        - α₃·mean(max(ST-x1,0))/(ST-WP)
-#        - α₄·mean(x5)/x5_ref               ← all agents, X5_REF=50
-#        - α₅·||u-u_prev||²/(UB²·N)
-#        - λ_budget·max(burn_rate-1, 0)²
-#   Terminal: + α₁·final_x4_mean/x4_ref
+# Reward (dense, exact negation of the MPC path cost at alpha*):
+#   r(t) = +alpha1 * Δx4_mean / x4_ref           (biomass progress)
+#        - alpha2 * Σu / W_daily_ref              (water cost — domestic tier)
+#        - alpha3 * mean(max(ST-x1, 0)) / (ST-WP) (drought)
+#        - alpha4 * mean(x5) / x5_ref             (ponding — INACTIVE at alpha4=0)
+#        - alpha5 * ||u-u_prev||² / (UB² · N)     (delta-u)
+#        - alpha6 * mean([max(x1-FC, 0)/FC]²)     (FC overshoot — ACTIVATED)
+#        - λ_budget * max(burn_rate-1, 0)²        (budget soft penalty)
+#   Terminal: + TERMINAL_BONUS_MULT * alpha1 * final_x4_mean / x4_ref
 #
-# v2.2: Ponding penalty matches cost.py v2.2 — all N agents, X5_REF=50mm.
+# CRITICAL: Reward construction matches src/mpc/cost.py at alpha* exactly,
+# enabling the policy-equivalence comparison claimed in Chapter 4 §4.6.
+#
+# Scenarios: 'dry' or 'wet'. The thesis omits the 2020 moderate scenario
+# because it is climatologically too close to 2022 (dry) to produce
+# distinguishable controller behaviour.
 # =============================================================================
 
 import gymnasium as gym
@@ -33,13 +41,35 @@ from soil_data import get_crop
 from climate_data import load_cleaned_data, extract_scenario_by_name
 
 
-# Normalization references (same as MPC cost)
-X4_REF = 900.0      # g/m²
-X5_REF = 50.0        # mm (raised from 10 to match cost.py v2.2)
-UB_MM = 12.0         # mm/day actuator cap
+# ── Normalization references — must match src/mpc/cost.py DEFAULT_REFS ───
+X4_REF = 900.0       # g/m², biomass normalization (~3800 kg/ha target)
+X5_REF = 50.0        # mm, ponding normalization (only used if alpha4 != 0)
+UB_MM = 12.0         # mm/day, actuator cap
 
-# Budget violation penalty weight
+# ── Recommended operating point alpha* (Chapter 4) ───────────────────────
+# These match src/mpc/cost.py DEFAULT_WEIGHTS exactly. Do not modify
+# without updating the MPC cost as well, otherwise the SAC reward will
+# no longer be the negation of the MPC cost.
+ALPHA1 = 1.0      # terminal biomass anchor
+ALPHA2 = 0.016    # water cost — domestic-base Iranian tariff
+ALPHA3 = 0.1      # drought stress regularizer
+ALPHA4 = 0.0      # surface ponding — INACTIVE (subsumed by alpha6 per Group F)
+ALPHA5 = 0.005    # delta-u regularizer
+ALPHA6 = 8.0      # x1 > FC soft penalty — recommended ceiling-confirmed value
+
+# Budget violation penalty weight (RL-only soft constraint)
 LAMBDA_BUDGET = 5.0
+
+# Terminal biomass reward multiplier.
+# The path-reward contribution from the per-step Δx4 term accumulates to
+# roughly +0.93 over a successful season (full biomass reached), and the
+# accumulated path penalties at alpha* sum to roughly -1.7 for a good
+# policy. A terminal bonus of 1.0× would leave a successful policy at
+# net reward ~+0.2, with weak gradient signal. Using a 5× multiplier
+# scales the terminal bonus to +5.0 for full yield, producing a clear
+# net-positive return for successful policies and a strong learning
+# signal for the sparse end-of-episode reward.
+TERMINAL_BONUS_MULT = 5.0
 
 
 class IrrigationEnv(gym.Env):
@@ -48,7 +78,7 @@ class IrrigationEnv(gym.Env):
     Parameters
     ----------
     scenario : str
-        'dry', 'moderate', or 'wet'.
+        'dry' or 'wet'.
     budget_pct : int
         Budget percentage: 100, 85, or 70.
     crop_name : str
@@ -56,7 +86,7 @@ class IrrigationEnv(gym.Env):
     dem_path : str
         Path to the GeoTIFF DEM file.
     forecast_horizon : int
-        Days of forecast to include in observation. Default 3.
+        Days of forecast to include in observation. Default 8 to match Hp*=8.
     seed : int or None
         Random seed for reproducibility.
     """
@@ -64,7 +94,7 @@ class IrrigationEnv(gym.Env):
     metadata = {'render_modes': []}
 
     def __init__(self, scenario='dry', budget_pct=100, crop_name='rice',
-                 dem_path='gilan_farm.tif', forecast_horizon=3, seed=None):
+                 dem_path='gilan_farm.tif', forecast_horizon=8, seed=None):
         super().__init__()
 
         self.scenario = scenario
@@ -79,7 +109,7 @@ class IrrigationEnv(gym.Env):
         self.N = self.terrain['N']
         self.season_days = self.crop['season_days']
 
-        # Derived constants
+        # Derived agronomic constants
         self.fc_total = self.crop['theta6'] * self.crop['theta5']
         self.wp_total = self.crop['theta2'] * self.crop['theta5']
         p = self.crop.get('p', 0.20)
@@ -108,12 +138,13 @@ class IrrigationEnv(gym.Env):
             low=0.0, high=1.0, shape=(self.N,), dtype=np.float32
         )
 
-        # Cost weights (same as MPC default)
-        self.alpha1 = 1.0
-        self.alpha2 = 0.01
-        self.alpha3 = 0.1
-        self.alpha4 = 0.5
-        self.alpha5 = 0.005
+        # Cost weights at recommended alpha* (must match src/mpc/cost.py)
+        self.alpha1 = ALPHA1
+        self.alpha2 = ALPHA2
+        self.alpha3 = ALPHA3
+        self.alpha4 = ALPHA4
+        self.alpha5 = ALPHA5
+        self.alpha6 = ALPHA6
         self.W_daily_ref = 5.0 * self.N
 
         # Will be set in reset()
@@ -160,7 +191,7 @@ class IrrigationEnv(gym.Env):
         action = np.asarray(action, dtype=float).clip(0, 1)
         u = action * UB_MM
 
-        # Budget clip
+        # Budget clip (hard constraint enforcement at the RL boundary)
         if u.mean() > self.budget_remaining:
             scale = self.budget_remaining / max(u.mean(), 1e-12)
             u = u * scale
@@ -179,11 +210,11 @@ class IrrigationEnv(gym.Env):
         self.budget_remaining = max(self.budget_remaining - daily_spend, 0.0)
         self.water_used += daily_spend
 
-        # ── Compute reward ────────────────────────────────────────────────
+        # ── Compute reward (negation of MPC path cost at alpha*) ─────────
 
         x4_mean = float(self.abm.x4.mean())
 
-        # Term 1: biomass gain
+        # Term 1: biomass progress (positive contribution)
         r_biomass = self.alpha1 * (x4_mean - self.x4_prev_mean) / X4_REF
 
         # Term 2: water cost
@@ -194,19 +225,33 @@ class IrrigationEnv(gym.Env):
         r_drought = -self.alpha3 * deficit.sum() / (
             self.N * max(self.stress_threshold - self.wp_total, 1e-6))
 
-        # Term 4: ponding penalty — ALL agents, field-mean, X5_REF=50
-        r_ponding = -self.alpha4 * self.abm.x5.sum() / (self.N * X5_REF)
+        # Term 4: ponding penalty (inactive at alpha4 = 0; computed for logging)
+        if self.alpha4 != 0.0:
+            r_ponding = -self.alpha4 * self.abm.x5.sum() / (self.N * X5_REF)
+        else:
+            r_ponding = 0.0
 
-        # Term 5: Δu penalty
+        # Term 5: delta-u penalty
         du = u - self.u_prev
-        r_delta_u = -self.alpha5 * np.dot(du, du) / (UB_MM**2 * self.N)
+        r_delta_u = -self.alpha5 * np.dot(du, du) / (UB_MM ** 2 * self.N)
 
-        # Budget soft penalty
+        # Term 6: FC overshoot penalty (NEW — matches MPC J_overFC at alpha6=8)
+        # Quadratic in normalized excess: max(x1 - FC, 0) / FC, squared.
+        # Inactive when x1 ≤ FC (excess = 0 → contribution = 0).
+        if self.alpha6 != 0.0:
+            excess = np.maximum(self.abm.x1 - self.fc_total, 0.0)
+            normalized_sq = (excess / self.fc_total) ** 2
+            r_overfc = -self.alpha6 * normalized_sq.sum() / self.N
+        else:
+            r_overfc = 0.0
+
+        # Budget soft penalty (RL-only — MPC enforces this as hard constraint)
         daily_budget = self.budget_total / self.season_days
         burn_rate = self.water_used / max(self.day + 1, 1) / max(daily_budget, 1e-6)
-        r_budget = -LAMBDA_BUDGET * max(burn_rate - 1.0, 0.0)**2
+        r_budget = -LAMBDA_BUDGET * max(burn_rate - 1.0, 0.0) ** 2
 
-        reward = r_biomass + r_water + r_drought + r_ponding + r_delta_u + r_budget
+        reward = (r_biomass + r_water + r_drought + r_ponding
+                  + r_delta_u + r_overfc + r_budget)
 
         self.u_prev = u.copy()
         self.x4_prev_mean = x4_mean
@@ -222,7 +267,10 @@ class IrrigationEnv(gym.Env):
 
         if self.day >= self.season_days:
             truncated = True
-            reward += self.alpha1 * x4_mean / X4_REF
+            # Terminal bonus on harvested biomass.
+            # Multiplier > 1 ensures successful policies achieve
+            # net-positive return relative to the do-nothing baseline.
+            reward += TERMINAL_BONUS_MULT * self.alpha1 * x4_mean / X4_REF
 
         obs = self._get_obs()
 
@@ -231,12 +279,13 @@ class IrrigationEnv(gym.Env):
             'yield_kg_ha': x4_mean * self.crop.get('HI', 0.42) * 10.0,
             'water_used_mm': self.water_used,
             'budget_remaining': self.budget_remaining,
-            'r_biomass': r_biomass,
-            'r_water': r_water,
-            'r_drought': r_drought,
-            'r_ponding': r_ponding,
-            'r_delta_u': r_delta_u,
-            'r_budget': r_budget,
+            'r_biomass':  r_biomass,
+            'r_water':    r_water,
+            'r_drought':  r_drought,
+            'r_ponding':  r_ponding,
+            'r_delta_u':  r_delta_u,
+            'r_overfc':   r_overfc,
+            'r_budget':   r_budget,
         }
 
         return obs, float(reward), terminated, truncated, info

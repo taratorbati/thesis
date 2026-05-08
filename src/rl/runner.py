@@ -2,12 +2,17 @@
 # src/rl/runner.py
 # Inference runner for trained SAC models.
 #
-# Loads a trained SB3 SAC model, runs it through the full ABM season, and
-# saves results in the same parquet + JSON sidecar format as MPC and
-# baseline controllers. This enables direct comparison in Step F.
+# Loads a trained SB3 SAC model (CTDESACPolicy), runs it through the full
+# ABM season, and saves results in the same parquet + JSON sidecar format
+# as the MPC and baseline controllers. This enables direct comparison.
 #
-# The runner wraps the trained model as a Controller subclass so it can
-# be used with the standard run_season() loop.
+# IMPORTANT: All normalization constants (X4_REF, X5_REF, UB_MM) and the
+# default forecast horizon are imported from src.rl.gym_env to guarantee
+# consistency between training-time observations and inference-time
+# observations. A previous version of this file hardcoded X5_REF=10 here
+# while the gym_env used X5_REF=50, producing a silent training/inference
+# mismatch on the surface-ponding feature. This is now eliminated by
+# single-sourcing the constants.
 # =============================================================================
 
 import time
@@ -17,55 +22,79 @@ import numpy as np
 from stable_baselines3 import SAC
 
 from src.controllers.base import Controller
-from src.rl.gym_env import IrrigationEnv, UB_MM
+# Single-source the normalization constants and forecast horizon from the
+# training environment so that train-time and inference-time observations
+# are guaranteed to match.
+from src.rl.gym_env import (
+    IrrigationEnv,
+    UB_MM,
+    X4_REF,
+    X5_REF,
+)
+# Default forecast horizon for SAC inference. Must match the value used
+# during training (see IrrigationEnv.__init__ default).
+DEFAULT_FORECAST_HORIZON = 8
+
+# Make sure the CTDESACPolicy class is importable so SAC.load() can
+# deserialize the policy object that was pickled during training.
+from src.rl.networks import CTDESACPolicy  # noqa: F401  (registration side-effect)
 
 
 class RLController(Controller):
-    """Controller that wraps a trained SAC model for inference.
+    """Controller wrapping a trained SAC model for inference.
 
     Parameters
     ----------
     model_path : str or Path
         Path to the saved SB3 model (.zip).
     deterministic : bool
-        If True, use the mean action (no sampling). Default True.
+        If True, use the policy mean (no sampling). Default True.
+    forecast_horizon : int
+        Days of forecast included in the observation. Must match the
+        value used during training. Default 8 (= Hp* of the MPC).
     verbose : bool
-        Print per-step info. Default True.
+        Print per-step info every 10 days. Default True.
     """
 
-    def __init__(self, model_path, deterministic=True, verbose=True):
+    def __init__(
+        self,
+        model_path,
+        deterministic=True,
+        forecast_horizon=DEFAULT_FORECAST_HORIZON,
+        verbose=True,
+    ):
         self.model_path = Path(model_path)
         self.deterministic = deterministic
+        self.forecast_horizon = forecast_horizon
         self.verbose = verbose
 
-        # Load the model (CPU for inference — no GPU needed)
+        # Load the model (CPU for inference — no GPU needed).
+        # The CTDESACPolicy import above registers the class for
+        # SB3's deserialization machinery.
         self.model = SAC.load(str(self.model_path), device='cpu')
 
         # Will be set in reset()
-        self._env_helper = None
         self._inference_times = []
 
         name = f"sac_{'det' if deterministic else 'stoch'}"
         super().__init__(name=name)
 
     def reset(self, terrain, crop, season_days, budget_total, scenario_name=None):
-        """Initialize the internal env helper for observation construction."""
+        """Initialize internal state for observation construction."""
         self._inference_times = []
 
-        # We need an IrrigationEnv instance to build observations.
-        # We don't actually step this env — we only use _get_obs().
-        # The real ABM is managed by run_season().
         self._terrain = terrain
         self._crop = crop
         self._N = terrain['N']
 
-        # Precomputed data and climate are needed for observations
+        # Precomputed climate-only quantities (same as gym_env)
         from src.precompute import get_precomputed
         from climate_data import load_cleaned_data, extract_scenario_by_name
 
-        self._precomputed = get_precomputed(scenario_name or 'dry', crop['name'].lower())
+        scenario = scenario_name or 'dry'
+        self._precomputed = get_precomputed(scenario, crop['name'].lower())
         df = load_cleaned_data()
-        self._climate = extract_scenario_by_name(df, scenario_name or 'dry', crop)
+        self._climate = extract_scenario_by_name(df, scenario, crop)
 
         # Normalization constants
         self._fc_total = crop['theta6'] * crop['theta5']
@@ -78,7 +107,7 @@ class RLController(Controller):
         self._day_counter = 0
 
     def set_climate(self, climate):
-        """Accept full-season climate (for compatibility with runner)."""
+        """Accept full-season climate (for compatibility with the runner)."""
         self._climate = climate
 
     def step(self, day, state, climate_today, budget_remaining, forecast=None):
@@ -90,7 +119,8 @@ class RLController(Controller):
         state : dict with x1, x2, x3, x4, x5
         climate_today : dict
         budget_remaining : float
-        forecast : ignored
+        forecast : ignored (the SAC policy reads its forecast from
+            self._climate via the precomputed window in _build_obs)
 
         Returns
         -------
@@ -99,13 +129,10 @@ class RLController(Controller):
         """
         t0 = time.time()
 
-        # Build observation (same structure as gym_env.py)
         obs = self._build_obs(day, state, budget_remaining)
-
-        # Get action from trained model
         action, _ = self.model.predict(obs, deterministic=self.deterministic)
 
-        # Scale [0,1] → [0, UB] mm/day
+        # Scale [0, 1] → [0, UB_MM] mm/day
         u = np.asarray(action, dtype=float).clip(0, 1) * UB_MM
 
         inference_ms = (time.time() - t0) * 1000
@@ -123,26 +150,34 @@ class RLController(Controller):
         return u
 
     def _build_obs(self, day, state, budget_remaining):
-        """Construct the 660-dim observation vector."""
+        """Construct the 660-dim observation vector.
+
+        This MUST produce the same layout and normalization as
+        IrrigationEnv._get_obs() in src/rl/gym_env.py. All normalization
+        constants are imported from gym_env to guarantee consistency.
+        """
         N = self._N
         fc = self._fc_total
 
         x1_norm = state['x1'] / fc
-        x5_norm = state['x5'] / 10.0  # X5_REF
-        x4_norm = state['x4'] / 900.0  # X4_REF
+        x5_norm = state['x5'] / X5_REF
+        x4_norm = state['x4'] / X4_REF
         x3 = state['x3']
         elev = self._elev_norm
 
         day_frac = day / self._season_days
         budget_frac = budget_remaining / max(self._budget_total, 1e-6)
         daily_budget = self._budget_total / self._season_days
-        burn_rate = (self._water_used / max(day, 1)) / max(daily_budget, 1e-6) if day > 0 else 0.0
+        burn_rate = (
+            (self._water_used / max(day, 1)) / max(daily_budget, 1e-6)
+            if day > 0 else 0.0
+        )
 
         d = min(day, self._season_days - 1)
         rain_today = float(self._climate['rainfall'][d])
         ETc_today = float(self._precomputed.Kc_ET[d])
 
-        end = min(d + 3, self._season_days)
+        end = min(d + self.forecast_horizon, self._season_days)
         rain_forecast = float(self._climate['rainfall'][d:end].sum()) if end > d else 0.0
         ETc_forecast = float(self._precomputed.Kc_ET[d:end].sum()) if end > d else 0.0
 

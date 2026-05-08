@@ -1,0 +1,101 @@
+\documentclass[11pt, a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath, amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{float}
+
+\geometry{margin=1in}
+
+\title{\textbf{Graph-Structured Model Predictive Control for Topologically Coupled Agro-Systems: Architectural Evaluation}}
+\author{} % Add your name here
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This report outlines the formulation and architectural design of a Model Predictive Control (MPC) system for a large-scale, topographically coupled agricultural environment. The 130-agent system routes surface water via a single-day cascade, creating a Directed Acyclic Graph (DAG) with strict intra-step dependencies. This spatial coupling renders standard sequential quadratic programming (SQP) computationally intractable over a 14-day horizon due to cubic scaling $\mathcal{O}(n^3)$. This document formalizes the optimal control problem, evaluates four distinct control architectures to mitigate this computational bottleneck, and justifies the selection of Differentiable Simulation via Projected Gradient Descent to achieve scalable, real-time closed-loop control.
+\end{abstract}
+
+\section{System Dynamics and Graph Structure}
+\label{sec:dynamics}
+The agricultural environment is composed of $N = 130$ spatially distributed agents. Let the global state and control vectors at discrete time step $k$ be $x_k \in \mathbb{R}^N$ and $u_k \in \mathbb{R}^N$. The system evolves according to the discrete-time dynamics:
+\begin{equation}
+    x_{k+1} = f(x_k, u_k)
+\end{equation}
+
+The unique complexity of this system lies in the surface water routing. Let the topography be defined as a Directed Acyclic Graph $\mathcal{G} = (\mathcal{V}, \mathcal{E})$ with adjacency matrix $A$. Because water propagates downstream within the exact same time step $k$, the local dynamics at node $i$ are a function of both its local inputs and the instantaneous runoff from upstream neighbors:
+\begin{equation}
+    x_i^{k+1} = g_i\left(x_i^k, u_i^k, \sum_{j \in \text{upstream}(i)} h_{ji}(x_j^k, u_j^k)\right)
+\end{equation}
+
+This topological ordering induces a structured, block lower-triangular dependency within the system's Jacobian. While dense solvers struggle with this formulation, the DAG structure allows forward simulation to be executed sequentially in $\mathcal{O}(N)$ time.
+
+\section{The Optimal Control Problem: Cost and Constraints}
+\label{sec:ocp}
+To optimize the irrigation schedule over a prediction horizon $H_p$, we formulate a finite-horizon optimal control problem.
+
+\subsection{Objective Function (Cost)}
+The objective function $J(u)$ is designed to maximize the final accumulated biomass ($x_4$) at the end of the horizon, while applying a linear penalty to the total volume of irrigation water used:
+\begin{equation}
+    \min_{u_{0:H_p-1}} J(u) = \sum_{k=0}^{H_p-1} \left( \lambda_w \sum_{i=1}^N u_i^k \right) - \lambda_b \sum_{i=1}^N x_{4, i}^{H_p}
+\end{equation}
+where $\lambda_w$ and $\lambda_b$ are tunable weighting parameters.
+
+\subsection{System Constraints}
+The optimization is strictly bounded by three primary physical and operational constraints:
+\begin{enumerate}
+    \item \textbf{Actuator Limits:} $0 \leq u_i^k \leq u_{\text{max}} \quad \forall i, \forall k$
+    \item \textbf{Global Water Budget:} $\sum_{k=0}^{H_p-1} \sum_{i=1}^N u_i^k \leq W_{\text{total}}$
+    \item \textbf{State Feasibility:} $0 \leq x_{1, i}^k \leq \theta_{\text{sat}} \theta_5 \quad \forall i, \forall k$
+\end{enumerate}
+
+\section{Evaluation of Control Architectures}
+\label{sec:architectures}
+Given the 1,820 decision variables ($130 \text{ agents} \times 14 \text{ days}$) and the block lower-triangular DAG structure, standard dense NLP solvers fail. Four alternative architectures were evaluated to handle the structured spatial coupling and operational constraints.
+
+\subsection{Architecture 1: Centralized Sparse Nonlinear MPC}
+\begin{itemize}
+    \item \textbf{Methodology:} The problem is formulated symbolically in \textbf{CasADi} and solved using \textbf{IPOPT}, explicitly exploiting the structured sparsity of the topological graph. 
+    \item \textbf{Assessment:} While this provides the mathematical ``ground truth'' and seamlessly handles hard linear constraints, resolving the nonlinearities over a long horizon remains computationally heavy. Practical implementation of this architecture necessitates advanced numerical techniques—such as multiple shooting formulations, Real-Time Iteration (RTI) schemes, and robust warm-starting from previous solutions—to achieve tractable execution times.
+\end{itemize}
+
+\subsection{Architecture 2: Hierarchical and Distributed MPC}
+\begin{itemize}
+    \item \textbf{Methodology:} This approach performs spatial coarse-graining (analogous to domain decomposition). An upper-level solver allocates the total budget across macro-zones (e.g., Highlands, Sinks), while a lower-level controller distributes the water to individual agents.
+    
+    \item \textbf{Assessment:} While dimensionality is exponentially reduced, the primary limitation is the loss of inter-zone coupling fidelity, where downstream flooding effects are heavily approximated. To resolve this without reverting to a centralized NLP, this architecture must be augmented with the Alternating Direction Method of Multipliers (ADMM) to enforce iterative coordination and consensus between the isolated zone solvers.
+\end{itemize}
+
+\subsection{Architecture 3: Imitation / Neural Policy Approximation}
+\begin{itemize}
+    \item \textbf{Methodology:} A heavy centralized MPC is executed offline. A Deep Neural Network is trained via policy distillation to map state observations to optimal irrigation commands for edge deployment.
+    \item \textbf{Assessment:} Achieves millisecond inference times. However, standard supervised learning provides absolutely no mathematical guarantees on safety-critical constraint satisfaction (e.g., budget limits or flooding thresholds). Deployment in this domain requires modern hybrid frameworks, such as constrained safe policy learning, using neural networks strictly to generate warm-starts for a classical solver, or learning residual corrections to the physical model.
+\end{itemize}
+
+\subsection{Architecture 4: Differentiable Simulation (Direct Shooting)}
+\begin{itemize}
+    \item \textbf{Methodology:} The ABM is ported into a differentiable tensor library (\textbf{JAX}). Framed as direct shooting, the control inputs are treated as network weights and optimized via first-order automatic differentiation through the physical DAG dynamics.
+    \item \textbf{Assessment:} This bypasses manual Jacobian derivation and leverages massive GPU acceleration. However, gradient descent is fundamentally mismatched with hard feasibility regions. Pure penalty methods introduce severe ill-conditioning. To be viable, this architecture requires Augmented Lagrangian formulations, differentiable optimization layers (e.g., OptNet), or Projected Gradient methods to enforce physical boundaries.
+\end{itemize}
+
+\subsection{Architecture 4: Differentiable Simulation (Direct Shooting)}
+\begin{itemize}
+    \item \textbf{Methodology:} The ABM is ported into a differentiable tensor library (\textbf{JAX}). The control inputs are treated as network weights, optimized via backpropagation through the physical DAG dynamics.
+    \item \textbf{Assessment:} Avoids manual Jacobian derivation, leverages GPU acceleration, and seamlessly aligns with modern AI infrastructure. The primary weakness is that standard gradient descent struggles with the hard boundary of the global water budget.
+\end{itemize}
+
+\section{Selected Architecture: Differentiable Simulation via Projected Gradients}
+\label{sec:selected}
+Following the evaluation, \textbf{Architecture 4 (Differentiable Simulation)} was selected as the optimal path for this thesis, bridging classical optimal control with modern machine learning toolchains. 
+
+To resolve its primary weakness—the inability of standard gradient optimizers (like Adam) to strictly enforce the global water budget ($W_{\text{total}}$)—this system employs \textbf{Projected Gradient Descent (PGD)}. 
+
+At each iteration of the backward pass, after the gradient update is applied to the irrigation vector $u$, the entire sequence is mathematically projected back onto the feasible simplex defined by the constraints. If the optimizer attempts to allocate $W_{\text{used}} > W_{\text{total}}$, the projection step linearly scales the actions such that the global budget is strictly conserved. This guarantees that the controller benefits from the $\mathcal{O}(N)$ forward simulation speed of JAX without violating the safety-critical constraints of the physical system.
+
+\end{document}

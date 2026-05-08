@@ -3,17 +3,27 @@
 # Train and/or evaluate SAC agents for the irrigation task.
 #
 # Usage:
-#   # Train on dry/100% with seed 0:
-#   python -m scripts.experiments.exp_rl --mode train --scenario dry --budget 100 --seed 0
+#   # Local CPU dry-run (validates the environment + CTDE policy wiring):
+#   python -m scripts.experiments.exp_rl --mode train --scenario dry --budget 100 --seed 0 --timesteps 10000
 #
-#   # Train all 5 seeds on dry/100%:
+#   # Train all 3 seeds on dry/100% (typical Kaggle session):
 #   python -m scripts.experiments.exp_rl --mode train --scenario dry --budget 100 --seed all
 #
-#   # Evaluate a trained model:
-#   python -m scripts.experiments.exp_rl --mode eval --model results/rl/sac_dry_100pct_seed0/sac_dry_100pct_seed0_final.zip --scenario dry --budget 100
+#   # Resume a Kaggle session that was killed at hour 9:
+#   python -m scripts.experiments.exp_rl --mode train --scenario dry --budget 100 --seed 0 \
+#       --resume results/rl/sac_dry_100pct_seed0/checkpoints/sac_dry_100pct_seed0_900000_steps.zip
 #
-#   # Evaluate across all scenarios/budgets:
-#   python -m scripts.experiments.exp_rl --mode eval --model results/rl/sac_dry_100pct_seed0/best_model/best_model.zip --scenario all --budget all
+#   # Evaluate a trained model across the (scenario × budget) grid:
+#   python -m scripts.experiments.exp_rl --mode eval \
+#       --model results/rl/sac_dry_100pct_seed0/best_model/best_model.zip \
+#       --scenario all --budget all
+#
+# Scenarios available: 'dry' or 'wet' (the moderate-2020 scenario was removed
+# in the two-scenario thesis design — see thesis Section 3.3).
+#
+# Seeds: SEEDS=[0,1,2] by default. Three seeds is the minimum for credible
+# variance reporting in RL. Scaling to five seeds requires either reducing
+# total_timesteps proportionally or splitting across multiple Kaggle weeks.
 # =============================================================================
 
 import argparse
@@ -27,10 +37,13 @@ from climate_data import SCENARIO_YEARS
 from soil_data import get_crop
 from src.terrain import load_terrain
 
-SCENARIOS_ALL = list(SCENARIO_YEARS.keys())
+SCENARIOS_ALL = list(SCENARIO_YEARS.keys())              # ['dry', 'wet']
 BUDGET_LEVELS = {100: 1.00, 85: 0.85, 70: 0.70}
 CROP_FULL_BUDGET_MM = {'rice': 484.0}
-SEEDS = [0, 1, 2, 3, 4]
+
+# Three seeds for the headline comparison. Reduce to 2 if Kaggle quota is
+# tight, or extend to 5 if running across multiple weeks.
+SEEDS = [0, 1, 2]
 
 DEM_PATH = PROJECT_ROOT / 'gilan_farm.tif'
 RL_OUTPUT_DIR = PROJECT_ROOT / 'results' / 'rl'
@@ -63,7 +76,7 @@ def run_training(args):
 
 
 def run_evaluation(args):
-    """Evaluate a trained model across scenario×budget grid."""
+    """Evaluate a trained model across the (scenario × budget) grid."""
     from src.rl.runner import RLController
     from src.runner import run_season
     from climate_data import load_cleaned_data, extract_scenario_by_name
@@ -97,8 +110,10 @@ def run_evaluation(args):
                     seed_str = part.split('seed')[-1].split('_')[0]
                     break
 
-            output_filename = (f"sac_{'det' if args.deterministic else 'stoch'}"
-                              f"_{scenario}_rice_{budget_pct}pct_seed{seed_str}.parquet")
+            output_filename = (
+                f"sac_{'det' if args.deterministic else 'stoch'}"
+                f"_{scenario}_rice_{budget_pct}pct_seed{seed_str}.parquet"
+            )
             output_path = RUNS_OUTPUT_DIR / output_filename
 
             controller = RLController(
@@ -129,13 +144,16 @@ def main():
     parser.add_argument('--scenario', choices=SCENARIOS_ALL + ['all'], default='dry')
     parser.add_argument('--budget', choices=[str(b) for b in BUDGET_LEVELS] + ['all'], default='100')
     parser.add_argument('--seed', default='0',
-                        help="Seed (int) or 'all' for all 5 seeds.")
+                        help="Seed (int) or 'all' for SEEDS=[0,1,2].")
     parser.add_argument('--timesteps', type=int, default=500_000,
-                        help='Total training timesteps. Default 500k.')
+                        help='Total training timesteps. Default 500k. '
+                             'Use 10_000 for a local CPU dry-run.')
     parser.add_argument('--checkpoint-freq', type=int, default=10_000)
     parser.add_argument('--eval-freq', type=int, default=10_000)
     parser.add_argument('--resume', default=None,
-                        help='Path to .zip checkpoint to resume from.')
+                        help='Path to .zip checkpoint to resume from. The '
+                             'matching <name>_replay_buffer.pkl is loaded '
+                             'automatically if present.')
     parser.add_argument('--model', default=None,
                         help='Path to trained model .zip (for eval mode).')
     parser.add_argument('--deterministic', action='store_true', default=True,

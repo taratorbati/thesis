@@ -1,0 +1,244 @@
+% =============================================================================
+% Chapter 1 — Introduction (REVISED)
+% Tara Torbati — Master's Thesis
+%
+% Revisions in this version:
+%   - §1.1 rewritten to restore the argumentative arc from water_scarcity:
+%       supply paradox → rebound effect → governance failure → technical opening
+%   - §1.4 (Scope and Limitations) compressed from 5-bullet list to 1 paragraph
+%   - §1.2 and §1.3 tightened for consistency with the new §1.1 framing
+%   - Sentence-length pass throughout: shorter sentences, fewer em-dash chains
+%   - Rhetorical intensifiers stripped where they shaded into advocacy
+% =============================================================================
+
+\chapter{Introduction}
+\label{chap:intro}
+
+\section{Motivation and Context}
+\label{sec:intro-motivation}
+
+Iran's water-management system displays a counterintuitive pattern that
+has become known as the supply paradox. Between 1990 and 2015, national
+dam capacity tripled, while groundwater withdrawal simultaneously rose
+from approximately 60 to 90~billion cubic meters per
+year~\cite{Mesgaran2018,Behling2022}. Each new reservoir was, in
+isolation, a defensible response to recurrent drought. In aggregate,
+they failed to reduce extraction pressure on aquifers. The reason is
+that supply-side infrastructure increases availability without
+disciplining demand. As long as agricultural producers face no
+volumetric cost for the water they use, additional supply is absorbed
+by additional consumption rather than by storage or
+conservation~\cite{Mesgaran2018,Nouri2023}.
+
+Two structural features make this dynamic difficult to reverse through
+demand-side policy. The first is the decoupling of price from use.
+Iranian agricultural water tariffs are set at levels two to three
+orders of magnitude below domestic and industrial tariffs, and energy
+for groundwater pumping is heavily subsidized. The marginal cost of
+water at the farmgate is therefore close to zero, and the price signal
+that would otherwise discipline consumption is absent. The second is
+the proliferation of informal wells. A significant share of
+agricultural extraction occurs through wells that are unregistered,
+unmetered, or only weakly monitored. Without reliable measurement,
+volumetric quotas and extraction limits cannot be
+enforced~\cite{Mesgaran2018,PourgholamAmiji2024}.
+
+A natural intuition is that improving irrigation efficiency at the
+field level would reduce aggregate demand. Empirically, this has not
+occurred. The phenomenon has been studied under the name of the
+rebound effect: when farmers adopt sprinkler or drip systems that
+deliver more water to the crop per unit applied, they typically
+respond by expanding cultivated area, intensifying cropping, or
+shifting to more water-demanding crops. The result is that total
+basin-level water consumption rises rather than
+falls~\cite{PerezBlanco2020,Hesabi2023}. The mechanism is not
+behavioral irrationality. It is a predictable response to volumetric
+scarcity that is not bound at the system level: efficiency gains
+relax the local constraint on yield, and the released capacity flows
+into expansion. Conventional policy instruments intended to constrain
+expansion --- volumetric quotas, withdrawal limits, regulatory
+restrictions --- run into the governance limitations described
+above~\cite{PerezBlanco2020,Hajirad2025}.
+
+The combination of these dynamics defines the operational regime in
+which any technical intervention must function. Supply expansion does
+not discipline demand. Price signals do not reach the user.
+Efficiency improvements rebound into expansion. Policy reform alone
+has been observed to be insufficient. Technology adoption alone has
+been observed to be insufficient. What remains viable is a
+combination: setting volumetric allocations externally, through
+aquifer-level monitoring or regional allocation policy, and enforcing
+those allocations at the field level through a controller that
+respects them as hard constraints. The technical question this thesis
+addresses is whether such a controller can deliver agronomically
+acceptable yields under hard volumetric scarcity, and how the
+available water should be allocated across space and time on a
+topographically heterogeneous field.
+
+This question is examined in the specific context of Hashemi rice
+cultivation in Gilan Province on Iran's Caspian coast. Gilan is the
+country's principal rice-producing region, and rice is among the most
+water-intensive crops grown
+nationally~\cite{jalali2021,sadidi2021,surfiran2025}. The province
+exemplifies the supply-paradox dynamics described
+above~\cite{Mesgaran2018,PourgholamAmiji2024}. A controller that
+performs well in this setting --- under deficit allocations, on
+realistic topography, on a high-fidelity crop-soil model ---
+demonstrates the feasibility of the more general proposition that
+constrained technical control can substitute for the missing economic
+and policy constraints on water use.
+
+\section{Problem Statement}
+\label{sec:intro-problem}
+
+This thesis develops and compares constrained optimal-control and
+reinforcement-learning approaches to irrigation on a 130-agent
+topographically heterogeneous Hashemi rice field in Gilan Province,
+Iran. The field is represented as a discrete grid of cells with a
+non-trivial elevation gradient (111~m of vertical relief over the
+field extent). Each cell maintains its own coupled soil-moisture,
+phenological, and biomass states. Cells exchange water laterally
+through topographically driven surface runoff. Each cell admits an
+independent irrigation control input bounded by the physical actuator
+capacity. The joint control vector is subject to a global
+season-cumulative water budget representing the realistic deficit
+allocations issued under regional water-management
+schemes~\cite{Mesgaran2018,Nouri2023}.
+
+Within this setting, the thesis investigates four questions:
+
+\begin{enumerate}
+\item \textbf{Cost-function design.} How should the multi-objective
+cost function of a constrained MPC controller be structured and
+weighted to balance terminal biomass, water consumption, drought
+risk, and waterlogging avoidance? How should those weights be
+calibrated against real economic price signals?
+
+\item \textbf{Pathology characterization.} What dynamic pathologies
+arise in the controller-plant interaction at long prediction
+horizons, in saturated-soil regimes, and under cheap water? Can
+these be resolved through cost-function design rather than through
+ad-hoc heuristic correction?
+
+\item \textbf{MPC versus RL comparison.} Under a fair, exact-equivalent
+reward formulation, does a Soft Actor-Critic agent trained on the
+ABM reproduce the policy quality of constrained MPC? At what
+trade-off between training cost and deployment latency?
+
+\item \textbf{Robustness to scenario and budget.} How do both
+controllers respond to climatic scenario variation (dry, moderate,
+wet) and to deficit budget allocations (100\%, 85\%, 70\% of the
+climatologically derived full requirement)?
+\end{enumerate}
+
+The answers to these questions are intended to inform two distinct
+audiences. For control-systems researchers, the thesis offers a
+concrete case study in constrained distributed-parameter control
+under economic anchoring. For water-management practitioners
+considering technical deployment options under volumetric
+deficit-irrigation policy, the thesis quantifies the agronomic
+performance achievable under different scarcity regimes.
+
+\section{Contributions}
+\label{sec:intro-contributions}
+
+The principal contributions of this thesis are as follows.
+
+\paragraph{A topographical agent-based virtual plant.}
+A 130-agent ABM of a Gilan rice field is developed, parameterized from
+the FAO Irrigation and Drainage Paper No.~56~\cite{allen1998},
+regional agronomic literature~\cite{jalali2021,sadidi2021}, and the
+soil-hydraulic database of Rawls et al.~\cite{rawls1982}. The model
+extends the topographical irrigation framework of Lopez-Jimenez
+et~al.~\cite{Lopezjimenez2024,LopezJimenez2022} with three
+modifications required for closed-loop optimal control: explicit
+two-layer hydrological decoupling between surface ponding and
+root-zone moisture, a padded digital-elevation-model boundary
+condition that resolves a degenerate sink behavior in the original
+formulation, and a coupling of drought stress directly to biomass
+accumulation. The plant constitutes the shared simulation environment
+on which both predictive and learning-based controllers are evaluated.
+
+\paragraph{A constrained MPC controller with economically anchored
+cost weights.} A nonlinear MPC formulation is developed for the ABM,
+solved via the IPOPT interior-point method~\cite{wachter2006ipopt}
+within the CasADi symbolic optimization
+framework~\cite{andersson2019casadi}. The cost function is calibrated
+to the four-tier Iranian water-pricing schedule. This calibration
+allows the controller's behavior to be interpreted as a response to
+real economic price signals rather than to abstract regularization
+constants.
+
+\paragraph{A systematic weight-sensitivity analysis identifying and
+resolving three controller pathologies.} A thirty-three-configuration
+sensitivity sweep is conducted across one-at-a-time, joint factorial,
+cross-scenario validation, and ceiling phases. The sweep characterizes
+three pathologies of the original cost-function formulation: silent
+over-irrigation under cheap water, field-capacity overshoot at long
+prediction horizons, and chronic waterlogging in wet-year scenarios.
+The analysis further demonstrates that two of the originally proposed
+penalty terms (surface ponding and field-capacity overshoot) are
+dynamically redundant once one of them is sufficiently strong,
+motivating a parsimonious five-term cost function. The recommended
+operating point is identified and validated across all combinations
+of climate scenario, budget allocation, and prediction horizon.
+
+\paragraph{A direct MPC--SAC comparison under exact reward equivalence.}
+A Soft Actor-Critic
+agent~\cite{haarnoja2018sac,haarnoja2019sac} is trained against a
+reward function constructed as the exact mathematical negation of
+the MPC path cost. This design eliminates the common confound in
+AI-versus-control benchmarking, in which differences in the objective
+function obscure differences in the optimization mechanism. The SAC
+architecture employs Centralized Training with Decentralized
+Execution~\cite{amato2024ctde}, with parameter sharing across the 130
+spatial agents.
+
+\paragraph{Comparative results across scenario, budget, and horizon.}
+All four controllers (no-irrigation baseline, fixed-schedule
+heuristic, constrained MPC, and SAC) are evaluated on a 9-cell
+factorial grid spanning three climate scenarios (dry 2022, moderate
+2020, wet 2024) and three budget allocations (100\%, 85\%, 70\% of
+the climatological full demand). The results identify the operational
+regimes in which each architecture excels and quantify the
+yield-versus-water-versus-latency trade-off as a function of
+deployment context.
+
+\section{Scope and Limitations}
+\label{sec:intro-scope}
+
+The thesis operates within a deliberately bounded scope. The
+contribution is methodological: a comparative study of constrained
+MPC and SAC on a physics-grounded, parameter-validated test bed in
+a representative water-scarce setting. Empirical validation against
+direct field observations in Gilan and the practical realization of
+cell-level variable-rate irrigation through commercial hardware are
+not undertaken; both are identified as natural directions for
+future work in Chapter~\ref{chap:conclusion}.
+
+\section{Thesis Structure}
+\label{sec:intro-structure}
+
+The remainder of this thesis is organized as follows.
+Chapter~\ref{chap:lit} reviews the literature on irrigation control,
+optimal and predictive control, reinforcement learning, spatial flow
+modeling, and the supporting sensing and communication infrastructure;
+the chapter concludes by identifying the specific research gap
+addressed by the thesis. Chapter~\ref{chap:system} presents the
+agent-based virtual plant: the study site and digital elevation model,
+the directed flow graph governing lateral water exchange, the climate
+data and scenario selection, the soil and crop parameterization, the
+state-space dynamics, the action space and water-budget constraint,
+and the unified software framework that ensures fair comparison
+across controllers. Chapter~\ref{chap:controllers} introduces the four
+controller architectures and develops the constrained MPC formulation
+in detail, including the multi-objective cost function with economic
+anchoring, the symbolic control-oriented model, the systematic
+weight-sensitivity analysis, and the SAC architecture with its CTDE
+training procedure. Chapter~\ref{chap:results} presents the
+comparative results across the 9-cell factorial grid of climate
+scenario and budget allocation. Chapter~\ref{chap:implementation}
+addresses the considerations relevant to physical deployment.
+Chapter~\ref{chap:conclusion} summarizes the principal findings,
+identifies the limitations of the present work, and proposes
+directions for future research.
