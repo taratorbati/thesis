@@ -1,0 +1,275 @@
+\documentclass[11pt, a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath, amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{float}
+
+\geometry{margin=1in}
+
+\title{\textbf{Control Architecture and Multi-Agent Evaluation Framework}}
+\author{} % Add authors here
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{Problem Formulation and System Constraints}
+
+The intelligent irrigation management of the 130-agent topographical grid is formally defined as a constrained, finite-horizon optimal control problem. Over the $K = 93$ day cultivation season for Hashemi rice, the control architecture must dynamically balance the conflicting objectives of maximizing terminal crop yield against the cost of water consumption, while strictly adhering to the physical limitations of the irrigation hardware. To ensure a standardized comparative evaluation across both traditional heuristics and advanced learning-based algorithms, the system state, action space, and transition dynamics must be rigorously defined.
+
+\subsection{State Space Representation}
+
+The discrete-time system state at day $k$, denoted as $\mathbf{X}_k$, aggregates the physical and biological conditions of all $N = 130$ spatial agents. The state space $\mathcal{X}$ is a multi-dimensional continuous space where each agent $n \in \{1, 2, \dots, N\}$ is described by a state vector $x^n_k$ encompassing both hydrological and phenological variables:
+
+\begin{equation}
+    \mathbf{X}_k = \{x_k^1, x_k^2, \dots, x_k^N\} \in \mathcal{X}
+\end{equation}
+Where each $x^n_k$ consists of:
+\begin{itemize}
+    \item $x_1^n$: Root-zone soil moisture (mm).
+    \item $x_2^n$: Accumulated thermal time ($^\circ$C-days).
+    \item $x_3^n$: Crop maturity index (dimensionless, $\in [0, 1]$).
+    \item $x_4^n$: Accumulated dry biomass ($\text{g/m}^2$).
+    \item $x_5^n$: Surface ponding depth (mm).
+\end{itemize}
+
+To accurately simulate the initial flooded condition required for freshly puddled rice fields, the system enforces a strict state initialization constraint across the entire spatial grid. At $k = 0$, the root-zone soil moisture is uniformly initialized to 100\% field capacity:
+
+\begin{equation}
+    x_1^n(0) = 140 \text{ mm} \quad \forall n \in N
+\end{equation}
+
+\subsection{Action Space and Actuator Constraints}
+
+The control action at day $k$, denoted as $\mathbf{U}_k$, dictates the daily irrigation depth applied to the field. The action space $\mathcal{U}$ is bounded by the physical realities of the pumping and distribution infrastructure. Let $u^n_k$ represent the irrigation command dispatched to agent $n$ on day $k$. The controller is strictly constrained by a maximum daily actuator limit, $u_{max}$, establishing a bounded continuous action space:
+
+\begin{equation}
+    \mathcal{U} = \left\{ \mathbf{U}_k \in \mathbb{R}^N \mid 0 \le u^n_k \le u_{max} \quad \forall n \in N \right\}
+\end{equation}
+
+Based on the physical capacities of the edge-computing hardware and drip infrastructure, the actuator cap is defined as $u_{max} = 12.0$ mm/day. Any policy $\pi$ or optimization solver must ensure $\mathbf{U}_k \in \mathcal{U}$ at every discrete time step.
+
+\subsection{The Optimal Control Objective}
+
+The system transitions from state $\mathbf{X}_k$ to $\mathbf{X}_{k+1}$ via the nonlinear system dynamics $f_{system}$, which encompass both the topographical cascade routing and the biological growth models:
+
+\begin{equation}
+    \mathbf{X}_{k+1} = f_{system}(\mathbf{X}_k, \mathbf{U}_k, \mathbf{W}_k)
+\end{equation}
+
+where $\mathbf{W}_k$ represents the stochastic meteorological disturbance at day $k$ (e.g., rainfall, evapotranspiration, and solar radiation). The overarching objective for any deployed controller is to find a policy $\pi(\mathbf{X}_k) \to \mathbf{U}_k$ that minimizes an expected cumulative cost function $J$ over the finite horizon $K$:
+
+\begin{equation}
+    \min_{\pi} \mathbb{E}_{\mathbf{W}} \left[ \Phi(\mathbf{X}_K) + \sum_{k=0}^{K-1} L(\mathbf{X}_k, \mathbf{U}_k) \right]
+\end{equation}
+
+where $\Phi(\mathbf{X}_K)$ represents the terminal Mayer cost (maximizing the terminal biomass $x_4$ at harvest), and $L(\mathbf{X}_k, \mathbf{U}_k)$ represents the intermediate path costs, penalizing cumulative water expenditure, localized sink ponding ($x_5$), and soil moisture deficits below the stress threshold. This general optimal control formulation serves as the architectural foundation. The subsequent sections detail how this objective is uniquely approximated and solved by the baseline heuristics, the predictive optimizer (MPC), and the reinforcement learning agent (SAC).
+
+\section{Baseline and Heuristic Controllers}
+
+To rigorously evaluate the performance of the advanced closed-loop predictive (MPC) and learning-based (SAC) algorithms, two open-loop baseline controllers were implemented. These baselines represent the lower bound of crop survival and the standard agricultural heuristic currently deployed in the Gilan province, respectively. Since these are open-loop heuristics, they calculate the irrigation trajectory strictly as a function of time and total seasonal water budget, remaining blind to both the daily topographical field state ($\mathbf{X}_k$) and the meteorological forecast.
+
+\subsection{The No-Irrigation Baseline}
+
+The No-Irrigation controller ($C_1$) serves as the absolute lower-bound performance metric (the rainfed benchmark). It strictly enforces a zero-action policy throughout the 93-day season:
+
+\begin{equation}
+    u^n_k = 0 \quad \forall n \in N, \quad \forall k \in K
+\end{equation}
+
+Evaluating the field dynamics under $C_1$ isolates the natural hydrological capacity of the Gilan terrain, establishing a baseline terminal biomass and baseline stress duration against which the value-add of active irrigation can be quantified.
+
+\subsection{The Fixed-Schedule Heuristic}
+
+Traditional rice cultivation in the Gilan region relies on a front-loaded irrigation strategy, providing heavy water application during the immediate post-transplanting establishment phase, and linearly tapering off as the crop approaches maturity and harvest. To formalize this heuristic into a repeatable mathematical baseline, the Fixed-Schedule controller ($C_2$) distributes the total seasonal water budget ($W_{total}$) across $K = 19$ discrete irrigation events. The events are uniformly spaced at an interval of 5 days. To achieve the front-loaded distribution, a linear-decay weight $w_j$ is assigned to each event $j \in \{1, 2, \dots, K\}$:
+
+\begin{equation}
+    w_j = \frac{2(K - j + 1)}{K(K+1)}
+\end{equation}
+
+By definition, $\sum_{j=1}^{K} w_j = 1$. The total volumetric allocation for event $j$ is computed as $w_j \times W_{total}$. Rather than applying this volume in a single daily deluge---which would violate physical infrastructure limits and generate massive uncaptured runoff---the volume is distributed evenly across the days within the event interval. Crucially, this traditional heuristic is spatially uniform; it is entirely unaware of the topographical cascade routing. The calculated daily rate is dispatched identically to all agents $n$, strictly bounded by the physical actuator cap $u_{max}$:
+
+\begin{equation}
+    u^n_k = \min \left( \frac{w_j \cdot W_{total}}{\text{interval}}, \ u_{max} \right) \quad \forall n \in N
+\end{equation}
+
+Furthermore, a strict accounting mechanism ensures the cumulative applied irrigation does not exceed $W_{total}$ in instances where a truncated season or floating-point drift alters the total sum. By comparing the spatially aware MPC and SAC against this spatially blind $C_2$ baseline, the exact agronomic value of topographical awareness can be isolated and quantified.
+
+\section{Model Predictive Control (MPC) Architecture}
+
+\subsection{The Multi-Objective Cost Function}
+The MPC optimization problem is formulated to maximize crop yield while minimizing resource expenditure and environmental stress over a prediction horizon $H_p$. To ensure stable convergence within the interior-point solver (IPOPT), the cost function $J$ is heavily normalized. Each term is scaled to $\mathcal{O}(1)$ using agronomically and economically derived reference values. The total objective function is defined as a sum of five normalized terms:
+
+\begin{equation}
+    J = J_{biomass} + J_{water} + J_{drought} + J_{ponding} + J_{\Delta u}
+\end{equation}
+
+\textbf{1. Terminal Biomass (Mayer Cost)} \\
+To incentivize crop growth without requiring the solver to look ahead to the end of the 93-day season, the controller maximizes the field-mean biomass $x_4$ at the end of the horizon. This is formulated as a negative cost:
+
+\begin{equation}
+    J_{biomass} = -\alpha_1 \frac{\bar{x}_4(k+H_p)}{x_{4,ref}}
+\end{equation}
+
+where $x_{4,ref} = 900 \text{ g/m}^2$ represents the target yield threshold for Hashemi rice, and $\alpha_1 = 1.0$ serves as the primary economic anchor, representing the high market revenue of the crop.
+
+\textbf{2. Water Consumption Penalty} \\
+The cost of irrigation is penalized over the prediction horizon to enforce water conservation:
+
+\begin{equation}
+    J_{water} = \alpha_2 \sum_{j=0}^{H_p-1} \frac{\sum_{n=1}^{N} u^n(k+j)}{W_{daily,ref}}
+\end{equation}
+
+where $W_{daily,ref} = 5.0 \cdot N$ mm represents the theoretical baseline daily demand for the $N=130$ agents. The weight $\alpha_2 = 0.01$ is rigorously anchored to the domestic water pricing tier in Iran, establishing a realistic economic tradeoff against the biomass revenue.
+
+\textbf{3. Drought Stress Regularization} \\
+While the biological model penalizes growth during dry periods, an explicit penalty is added to the controller to aggressively prevent soil moisture ($x_1$) from dropping below the stress threshold ($ST$):
+
+\begin{equation}
+    J_{drought} = \alpha_3 \sum_{j=0}^{H_p-1} \frac{1}{N} \sum_{n=1}^{N} \frac{\max(0, ST - x_1^n(k+j))}{ST - WP}
+\end{equation}
+
+where $WP$ is the wilting point total. This term ensures the controller proactively irrigates before severe deficit occurs.
+
+\textbf{4. Topographical Sink Ponding Penalty} \\
+Due to the topographical cascade routing, excessive rainfall can cause temporary localized flooding. To prevent crop asphyxiation and excessive runoff pooling, a penalty is applied to the field-average surface ponding ($x_5$):
+
+\begin{equation}
+    J_{ponding} = \alpha_4 \sum_{j=0}^{H_p-1} \frac{1}{N} \sum_{n=1}^{N} \frac{x_5^n(k+j)}{x_{5,ref}}
+\end{equation}
+
+where $x_{5,ref} = 50.0$ mm serves as the normalization reference for acute storm accumulation, and $\alpha_4 = 0.5$ places a high priority on preventing persistent waterlogging across the active agents.
+
+\textbf{5. Actuator Smoothing} \\
+To prevent erratic, high-frequency oscillatory irrigation commands across consecutive days, a standard control-rate regularization term is included:
+
+\begin{equation}
+    J_{\Delta u} = \alpha_5 \sum_{j=1}^{H_p-1} \frac{||u(k+j) - u(k+j-1)||^2}{u_{max}^2 \cdot N}
+\end{equation}
+
+where $u_{max} = 12.0$ mm/day is the strict physical actuator cap.
+
+\subsection{Control-Oriented Model (COM) and Symbolic Formulation}
+
+To enable real-time numerical optimization within the receding horizon framework, the high-fidelity Agent-Based Model (ABM) described in Chapter 3 must be translated into a Control-Oriented Model (COM). The COM is implemented as a CasADi symbolic computational graph, defining the explicit mapping $f: (\mathcal{X}_k, \mathcal{U}_k, \mathcal{P}_k) \to \mathcal{X}_{k+1}$, where $\mathcal{P}_k$ represents exogenous parameters. To ensure tractability for the IPOPT interior-point solver, several rigorous dimensionality reduction and linearization strategies are applied.
+
+\textbf{1. Dimensionality Reduction of the State Space} \\
+While the complete biological system tracks multiple state variables per agent (including soil moisture $x_1$, thermal time $x_2$, maturity index $x_3$, biomass $x_4$, and ponding $x_5$), maintaining all variables as shooting states in the Non-Linear Programming (NLP) formulation would result in massive Jacobian matrices. Because thermal time ($x_2$) is purely driven by exogenous climate data, and maturity ($x_3$) acts as a slow-moving, monotonic biological clock, the COM restricts the formal shooting states exclusively to the fast-moving hydrological variables:
+
+\begin{equation}
+    \mathcal{X}_{shoot} = \{x_1, x_5\}
+\end{equation}
+
+The maturity index $x_3$ is tracked externally via the plant's true state at each discrete daily step to prevent open-loop drift, while the biomass $x_4$ is accumulated inline strictly to evaluate the terminal Mayer cost.
+
+\textbf{2. Deterministic Caching of Biological Nonlinearities} \\
+The biological penalty functions for heat stress ($h_2$), cold stress ($h_7$), and the base growth scalar ($g_{base}$) rely on highly non-linear sigmoid formulations. Because these functions depend strictly on deterministic meteorological variables (temperature and radiation) and are entirely decoupled from the control action ($u$), they are precomputed offline for the duration of the season. By injecting these precomputed arrays into the CasADi graph as time-varying parameters rather than calculating them inline, the NLP solver bypasses the expensive evaluation of sigmoidal gradients, significantly accelerating the per-step solve time.
+
+\textbf{3. Static Embedding of Topographical Cascade Routing} \\
+A primary challenge in agricultural MPC is simulating spatial water routing without relying on computationally prohibitive coupled Partial Differential Equations (PDEs). The COM resolves this by statically baking the field's directed topographical graph into the symbolic formulation. At initialization, the 130 agents are sorted into a strict topological order (from maximum elevation to terminal sinks). During the symbolic forward pass, surface hydrology is unrolled element-by-element. For a given agent $n$ with a number of lower-elevation receivers $N_r^{(n)}$, the runoff $\phi_2^{(n)}$ is computed via the Soil Conservation Service (SCS) curve method:
+\begin{equation}
+    \phi_2^{(n)} = 
+    \begin{cases} 
+        \frac{(W_{surf}^{(n)} - \theta_3)^2}{W_{surf}^{(n)} + 4\theta_3} & \text{if } W_{surf}^{(n)} > \theta_3 \\
+        0 & \text{otherwise}
+    \end{cases}
+\end{equation}
+To resolve the closed-basin "bathtub effect" common in gridded simulations, the COM implements a fractional routing boundary condition using a padded Digital Elevation Model (DEM). The total number of downhill neighbors ($N_r^{(n)}$) is calculated including the unsimulated external pad. Runoff is distributed as $\frac{\phi_2^{(n)}}{N_r^{(n)}}$ to downstream internal neighbors within the same time step. For perimeter agents bordering the external terrain, the fraction of $\phi_2^{(n)}$ directed toward the pad is implicitly removed from the mass balance, accurately simulating off-farm drainage without introducing dummy variables to the solver.
+
+\textbf{4. Exact Non-Smooth Operations and Solver Fallbacks} \\
+To preserve strict mass conservation, the COM utilizes exact, non-smooth $\max(0, x)$ and $\min(a,b)$ operators inherent to the CasADi framework rather than employing $C^2$-continuous approximations, which are prone to artificial mass leaks. In instances where the strict topological constraints or severe weather forecasts render the local NLP step mathematically infeasible, the controller defaults to a zero-irrigation fail-safe ($u = 0$), allowing the physical crop to survive on natural rainfall until the receding horizon re-establishes a feasible trajectory on the subsequent day.
+
+\section{Soft Actor-Critic (SAC) Architecture}
+
+While Model Predictive Control provides a mathematically rigorous, constraint-aware optimization framework, the requirement to solve a massive Non-Linear Program (NLP) at each time step poses significant latency challenges for low-power edge computing devices deployed in agricultural Cyber-Physical Systems (CPS). To investigate a low-latency alternative, a Reinforcement Learning (RL) agent was trained to approximate the optimal control policy. The problem is formulated as a Markov Decision Process (MDP) and solved using the Soft Actor-Critic (SAC) algorithm.
+
+\subsection{Markov Decision Process (MDP) Formulation}
+The irrigation control problem is defined by the MDP tuple $\langle \mathcal{S}, \mathcal{A}, \mathcal{P}, \mathcal{R}, \gamma \rangle$.
+
+\textbf{1. Observation Space ($\mathcal{S}$)} \\
+To provide the RL agent with sufficient information to manage both spatial topographical heterogeneity and the global seasonal water budget, the state observation is defined as a flat, continuous vector of 660 dimensions. The vector concatenates 10 global field features with 5 local features for each of the $N=130$ agents:
+\begin{itemize}
+    \item \textbf{Global Features (10 dimensions):} Normalized remaining budget, normalized current day, daily rainfall, reference evapotranspiration ($ET_0$), field-mean soil moisture, field-moisture standard deviation, field-mean biomass, fraction of agents in drought, fraction of agents in waterlogging, and the cumulative 7-day rainfall forecast.
+    \item \textbf{Local Features (650 dimensions):} For each agent $n$, the network observes its normalized soil moisture ($x_1/FC$), thermal time ($x_2/\theta_{18}$), biomass ($x_4/x_{4,ref}$), surface ponding ($x_5/x_{5,ref}$), and its normalized topographical elevation ($\gamma^n$).
+\end{itemize}
+
+\textbf{2. Action Space ($\mathcal{A}$)} \\
+The continuous action space mirrors the MPC actuator constraints. The RL agent outputs a bounded vector $\mathbf{a}_k \in [0, 1]^N$. During the environment step, this output is linearly scaled by the physical actuator cap ($u_{max} = 12.0$ mm/day) such that $u^n_k = a^n_k \cdot u_{max}$, matching the exact decision space of the MPC baseline.
+
+\textbf{3. Reward Formulation ($\mathcal{R}$)} \\
+To ensure a fair and direct comparison between the learned policy and the computed MPC policy, the dense per-step reward $r_k$ is engineered as the exact mathematical negation of the MPC path cost function (defined in Section 4.3.1):
+\begin{equation}
+    r_k = -\left( J_{water}(k) + J_{drought}(k) + J_{ponding}(k) \right)
+\end{equation}
+At the terminal time step $K = 93$, a sparse positive bonus is awarded based on the normalized terminal biomass:
+\begin{equation}
+    r_K = +5 \cdot \frac{\bar{x}_4(K)}{x_{4,ref}}
+\end{equation}
+This structure forces the agent to learn the exact same agronomical and economic tradeoffs as the predictive optimizer.
+
+\subsection{Centralized Training with Decentralized Execution (CTDE)}
+A naive multi-agent implementation---where a single monolithic policy network directly outputs 130 independent actions from the 660-dimensional state---would fail to exploit the spatial symmetry of the field and require an intractable number of parameters to train effectively. To overcome this, the architecture employs Centralized Training with Decentralized Execution (CTDE).
+
+\begin{itemize}
+    \item \textbf{The Decentralized Actor:} The actor network operates on the principle of parameter sharing. Instead of one massive network, a smaller Multi-Layer Perceptron (MLP) with hidden layers of [256, 256] is instantiated. During the forward pass, this single network is applied identically across all 130 agents. For agent $n$, the actor concatenates the 10 global features with the 5 local features of agent $n$ (totaling 15 inputs) to output a parameterized Gaussian distribution (mean and log standard deviation) for that specific agent's irrigation action. This forces the network to learn a generalized policy: \textit{how to irrigate any agent given its specific elevation and moisture state, conditioned on the global budget.}
+    \item \textbf{The Centralized Critic:} Unlike the actor, the critic network evaluates the joint action value $Q(\mathbf{S}_k, \mathbf{A}_k)$. It takes the full 660-dimensional state and the 130-dimensional joint action vector as input (790 dimensions), passing through hidden layers of [512, 512, 256]. By observing the entire state-action space during offline training, the centralized critic successfully learns the shadow price of the global water budget and the cascading runoff effects, guiding the decentralized actor toward a globally optimal cooperative policy.
+\end{itemize}
+
+\subsection{Budget Constraint Handling}
+
+While IPOPT natively handles the global water budget $\sum u \le W_{total}$ via hard linear inequality constraints, standard RL algorithms lack native constrained-optimization mechanisms. The SAC environment enforces the budget via a three-tier soft penalty system:
+
+\begin{enumerate}
+    \item \textbf{Action Clipping:} As a hard safety net, the environment clips the daily action array so that the total requested volume never mathematically exceeds the remaining budget.
+    \item \textbf{Burn-Rate Shaping:} To prevent the agent from dumping its entire budget in the first few weeks, a negative reward shaped by the normalized season progression is applied if the expenditure rate significantly outpaces the seasonal timeline.
+    \item \textbf{Early Termination:} If the agent triggers the hard clip limit by attempting to exceed the total budget, a severe penalty ($r = -100$) is applied, and the episode is immediately truncated.
+\end{enumerate}
+
+\section{Uncertainty Modeling and Unified Evaluation}
+
+To guarantee the validity of the comparative analysis, the experimental framework must ensure that all controllers are subjected to identical environmental conditions, constraints, and standardized evaluation metrics. Furthermore, to evaluate the real-world robustness of the predictive models (MPC and SAC), a formal mathematical model for meteorological forecast uncertainty must be established.
+
+\subsection{Meteorological Forecast Uncertainty}
+
+While the baseline controllers ($C_1$, $C_2$) and the ``No-Forecast'' SAC ($C_5$) operate without future weather information, the predictive controllers---the Perfect MPC ($C_3$), Noisy MPC ($C_4$), and Forecast SAC ($C_6$)---rely on a prediction horizon. To benchmark the theoretical upper bound of the predictive architecture against a realistic deployment scenario, two distinct forecast modes are formalized.
+
+\textbf{1. Perfect Forecast Mode} \\
+In the perfect information scenario, the forecast vector provided to the controller exactly matches the true future weather realization generated by the environment simulation. For any meteorological variable $w$ at a future day $k+j$ predicted from the current day $k$:
+
+\begin{equation}
+    \hat{w}(k+j|k) = w(k+j) \quad \forall j \in \{0, \dots, H_p-1\}
+\end{equation}
+
+This mode establishes the absolute performance ceiling for the predictive controllers.
+
+\textbf{2. Noisy Forecast Mode} \\
+To simulate the decaying accuracy of real-world meteorological forecasts over time, a stochastically degrading noise model is applied to the rainfall and reference evapotranspiration ($ET_0$) vectors. Temperature forecasts are left unperturbed, reflecting the high operational accuracy of thermal forecasting. The multiplicative noise injection is defined as:
+\begin{equation}
+    \hat{w}(k+j|k) = w(k+j) \cdot (1 + \epsilon_j)
+\end{equation}
+
+where the error term $\epsilon_j$ is drawn from a Gaussian distribution with a mean of zero and a variance that grows proportionally to the square root of the look-ahead horizon $j$:
+\begin{equation}
+    \epsilon_j \sim \mathcal{N}(0, \sigma_j^2), \quad \sigma_j = 0.15 \cdot \sqrt{j}
+\end{equation}
+
+This formulation ensures that tomorrow's forecast ($j=1$) retains high fidelity ($\sigma_1 = 0.15$), while forecasts extending toward the end of a 14-day horizon exhibit severe uncertainty, rigorously testing the stability of the receding-horizon control loop.
+
+\subsection{Unified Software Evaluation Architecture}
+To eliminate implementation bias during the comparative evaluation, the control loop is strictly abstracted into three separated software layers:
+
+
+\begin{enumerate}
+    \item \textbf{The Environment Layer:} Maintains the true physical state of the field ($\mathbf{X}_k$), executes the topographical cascade routing, and calculates true biological growth.
+    \item \textbf{The Controller Layer:} All six controllers ($C_1$ through $C_6$) inherit from an identical abstract interface, requiring them to convert a state observation and (optional) forecast into an action vector $\mathbf{U}_k$.
+    \item \textbf{The Runner Layer:} A centralized simulation runner orchestrates the day-by-day transition. It queries the instantiated controller for an action, applies the action to the environment, deducts the applied volume from the global seasonal budget, and advances the climate data to the next step. 
+\end{enumerate}
+
+This architecture guarantees that the heavy IPOPT Non-Linear Program and the trivial zero-action baseline are subjected to the exact same simulator dynamics, initial state conditions, stochastic weather realizations, and budget accounting constraints. Variations in final agronomic metrics are therefore strictly attributable to the intrinsic quality of the underlying control policy.
+
+\end{document}

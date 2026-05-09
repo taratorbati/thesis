@@ -1,0 +1,533 @@
+% =============================================================================
+% Chapter 2 — Literature Review
+% Tara Torbati — Master's Thesis
+% =============================================================================
+
+\chapter{Literature Review}
+\label{chap:lit}
+
+This chapter surveys the technical literature relevant to constrained
+optimal irrigation control on topographically heterogeneous agricultural
+fields. Section~\ref{sec:lit-context} situates the problem within the
+broader landscape of agricultural water management. Sections
+\ref{sec:lit-classical} through \ref{sec:lit-rl} review the principal
+control architectures that have been proposed for irrigation, in
+roughly increasing order of mathematical sophistication and
+computational demand: classical and heuristic controllers, Model
+Predictive Control with its modern variants, and Reinforcement
+Learning. Section~\ref{sec:lit-spatial} addresses the specific question
+of spatially distributed control and topographic flow modeling, which
+is central to the present work but treated only obliquely in most of
+the irrigation-control literature. Section~\ref{sec:lit-sensing}
+briefly reviews the sensing and communication infrastructure that
+supports field deployment. Section~\ref{sec:lit-deficit} comments on
+deficit-irrigation strategies for completeness. Section~\ref{sec:lit-gap}
+synthesizes the surveyed work and identifies the specific research
+gap that this thesis addresses.
+
+\section{Context: Agricultural Water Management Under Scarcity}
+\label{sec:lit-context}
+
+Agriculture is the largest consumer of freshwater globally, accounting
+for approximately 70\% of human withdrawals~\cite{Sharma2025,Bayar2025}.
+Under demographic pressure projected to push global food demand sharply
+upward by mid-century, alongside the deepening effects of regional
+water scarcity, the agricultural sector is undergoing a transition from
+volume-driven, heuristically managed irrigation toward data-driven
+precision systems that match water application to crop demand at
+spatial and temporal scales finer than any human operator can
+manually achieve~\cite{Sharma2025,LopezJimenez2022,Mgana2026}.
+
+This transition is particularly acute in Iran, where surface water and
+groundwater resources have been pushed beyond sustainable yield by a
+combination of supply-side infrastructure expansion, subsidized energy
+for groundwater pumping, and weak volumetric controls on agricultural
+extraction~\cite{Mesgaran2018,Nouri2023,Behling2022}. In Gilan
+Province, the principal rice-producing region, the combination of
+heavily subsidized water tariffs and informal extraction practices has
+removed economic constraints on use, with documented consequences for
+land subsidence, stream desiccation, and aquifer
+collapse~\cite{Mesgaran2018,PourgholamAmiji2024}. The resulting
+governance asymmetry --- where price signals fail to discipline
+demand and where conservation measures alone produce systemic rebound
+effects --- has been argued to make purely policy-based
+demand-management approaches insufficient, and to motivate technical
+controls that operate on the field directly through water-budget
+constraints~\cite{PerezBlanco2020,Hajirad2025,Hesabi2023}.
+
+Within this technical-control framing, the irrigation problem becomes a
+constrained finite-horizon optimal control problem: allocate a finite
+volumetric water budget over a fixed agricultural season to maximize
+crop yield (or some economic equivalent) while respecting per-day
+actuator capacities, soil-physical constraints, and crop-physiological
+tolerances. The remainder of this chapter reviews the control
+architectures that have been proposed to solve this problem.
+
+\section{Classical and Heuristic Controllers}
+\label{sec:lit-classical}
+
+The dominant irrigation control regime in deployed agricultural systems
+remains heuristic: fixed schedules calibrated to long-run climatic
+norms, threshold-based on/off control triggered by a single soil
+moisture sensor, or open-loop time-based timers~\cite{Sharma2025,Bayar2025}.
+These approaches are simple to implement, robust to sensor failure,
+and operationally familiar; they are rightly the first option for
+small-scale and resource-constrained deployments. They are also,
+however, fundamentally reactive. They cannot anticipate impending
+drought or rainfall, cannot exploit weather forecasts, and cannot
+optimize against a global seasonal water budget --- the controller
+sees only present state, not future demand.
+
+A more sophisticated heuristic class is fuzzy-logic control, in which
+linguistic rules over input ranges (e.g.\ ``IF soil moisture is LOW
+AND temperature is HIGH THEN irrigation is HIGH'') are compiled into
+crisp control actions through a defuzzification step. Fuzzy systems
+have been integrated with PID feedback to handle the nonlinear,
+delayed dynamics of soil-water response in fertigation systems and in
+canal-gate control~\cite{Sharma2025,Mahmud2026}. Variants that
+incorporate online self-correction have been demonstrated to improve
+transient response in nonlinear nutrient regulation tasks. While
+fuzzy-PID architectures partially address the nonlinearity limitation
+of pure PID, they share with all rule-based methods the inability to
+optimize systematically over time or to enforce strict resource
+constraints --- a fuzzy controller has no native mechanism to
+guarantee that cumulative seasonal water use stays below a fixed
+budget.
+
+These limitations become operationally consequential in water-scarce
+contexts where the binding constraint is not the per-day soil
+moisture target but the season-cumulative water allocation. In such
+regimes, the central question shifts from ``how much water does the
+crop need today'' to ``how should a finite seasonal water budget be
+allocated across 90+ days of varying demand to maximize terminal
+yield,'' a question that classical and heuristic controllers cannot
+formally address. This motivates the transition to optimization-based
+control, taken up in the next section.
+
+\section{Optimal and Predictive Control}
+\label{sec:lit-mpc}
+
+\subsection{The Optimal Control Formulation of Irrigation}
+
+The transition from heuristic to optimal control begins with the
+formal recognition that irrigation is a constrained finite-horizon
+optimal control problem. Following the formulation in
+\cite{LopezJimenez2022,Lopezjimenez2024}, the discrete-time problem
+is to determine a control sequence
+$\mathbf{u}^*(\cdot) = \arg\min_{\mathbf{u}(\cdot)} J(\mathbf{x}(\cdot), \mathbf{u}(\cdot))$
+subject to dynamics
+$\mathbf{x}(k+1) = f(\mathbf{x}(k), \mathbf{u}(k), \mathbf{w}(k))$,
+state constraints (soil moisture remains above the wilting point),
+input constraints (per-day actuator capacity), and a season-cumulative
+budget constraint
+$\sum_k \sum_n u^{(n)}(k) \leq W_{\mathrm{total}}$.
+The cost $J$ typically combines a terminal-state reward (terminal
+biomass) with running penalties on water consumption, soil moisture
+deficit, and surface ponding.
+
+This formulation captures three features that heuristic controllers
+cannot: (i) an explicit forecast horizon over which future weather and
+crop development are anticipated; (ii) a global resource constraint
+that couples decisions across the entire season; and (iii) a
+multi-objective cost function with weights that admit economic
+calibration. The optimization itself is generally a non-convex
+nonlinear program due to crop-physiology nonlinearities and to the
+saturation regime of soil drainage, requiring interior-point or
+sequential-quadratic-programming methods for solution.
+
+\subsection{Receding-Horizon Implementation: Model Predictive Control}
+
+The standard approach to applying optimal control online is Model
+Predictive Control (MPC). At each timestep, MPC solves the optimal
+control problem over a finite prediction horizon $H_p$, applies only
+the first-step control action, advances the state by one timestep,
+and re-solves the problem with updated state and forecast information.
+The receding-horizon mechanism transforms an open-loop optimization
+into a feedback control law and provides a degree of robustness to
+modeling errors and disturbances~\cite{LopezJimenez2022,Sharma2025}.
+
+For irrigation, MPC has been demonstrated to improve water-use
+efficiency by 8--29\% relative to heuristic and open-loop schedulers
+in greenhouse and open-field studies~\cite{LopezJimenez2022,Mahmud2026}.
+The key technical challenges are (i) constructing a control-oriented
+model that is faithful enough to predict the principal hydrological
+and biological responses while remaining computationally tractable
+within the receding-horizon loop, (ii) handling the non-smoothness of
+crop and soil dynamics (saturation thresholds, $\max$ and $\min$
+operators) within smooth-gradient solvers, and (iii) calibrating the
+multi-term cost function to reflect the agronomic and economic
+priorities of the application context.
+
+\subsection{Recent Variants and Architectural Extensions}
+
+Several recent variants of irrigation MPC address specific limitations
+of the standard formulation. \emph{Economic MPC} formulations replace
+the conventional setpoint-tracking objective with a direct economic
+cost that incorporates real-time price signals for water and energy,
+enabling controllers to respond to time-varying tariff
+structures~\cite{Sharma2025}. \emph{Rainfall-Intensity-and-Soil-Properties
+MPC (RISPMPC)} extends standard MPC by integrating the Mein--Larson
+infiltration model to anticipate runoff and percolation losses under
+predicted rainfall, allowing the controller to deliberately undershoot
+soil moisture targets in advance of an incoming storm so that the
+soil matrix has capacity to absorb the rainfall productively. Reported
+water savings against conventional MPC reach 30+\% on heavy-clay
+soils, where infiltration capacity is the binding constraint~\cite{Sharma2025}.
+
+Distributed MPC architectures address the scalability of the
+optimization to large field domains and irrigation networks. Negenborn
+et al.~\cite{negenborn2009distmpc} formalized distributed MPC for
+multi-reach canal networks, decomposing a single large optimization
+into per-subsystem optimizations coupled through inter-subsystem
+communication. Subsequent work extended this paradigm to hierarchical
+distributed MPC for basin-scale canal networks under water scarcity,
+enabling tractable real-time optimization across irrigation districts
+spanning thousands of hectares~\cite{LopezJimenez2022}. These
+distributed approaches share with the present work the recognition
+that single-monolithic-NLP MPC scales poorly with the number of
+controlled subsystems.
+
+Data-driven MPC variants substitute the physics-based predictive model
+with learned surrogates, most prominently Long Short-Term Memory
+(LSTM) networks trained on offline simulation data. These approaches
+trade physical interpretability for adaptability across heterogeneous
+field conditions, and they have been integrated with mixed-integer
+formulations to handle discrete actuator levels in spatially variable
+fields~\cite{Maniam2026}.
+
+\section{Reinforcement Learning for Irrigation}
+\label{sec:lit-rl}
+
+\subsection{Why Reinforcement Learning}
+
+The principal limitation of MPC is the per-step computational burden
+of solving the nonlinear program online. Even with warm-starting and
+smooth approximations, MPC solve times on field-scale problems range
+from seconds at short horizons to minutes or hours at long
+horizons~\cite{Lopezjimenez2024}. This places MPC out of reach for
+deployment on edge computing devices, low-power embedded controllers,
+or systems requiring sub-second control updates.
+
+Reinforcement Learning (RL) addresses this latency limitation
+structurally. After offline training in a simulated environment, an
+RL policy is a fixed-parameter neural network whose forward-pass
+inference is deterministic and bounded by the network's
+fixed-architecture compute requirement --- typically sub-millisecond
+on commodity hardware regardless of the underlying problem
+dimensionality. The training cost is amortized over many millions of
+environment interactions but pays off at every deployment step.
+
+\subsection{Applications of RL to Irrigation Scheduling}
+
+RL has been applied to irrigation across crop types, geographies, and
+algorithm classes. Q-learning agents trained against the AquaCrop
+crop-soil simulator have produced policies that outperform heuristic
+schedules on lettuce production in Brazil~\cite{Sharma2025}. Deep
+RL agents trained with high-dimensional state observations (soil
+moisture across multiple depths, leaf-area index, accumulated rainfall
+and irrigation, phenological stage) have been demonstrated to improve
+profit in open-field wheat production by up to 17\% relative to
+conventional heuristic rules, with policies that adapt to scenario
+variation in ways that fixed rules cannot~\cite{Bayar2025,Hu2025}. In
+controlled-environment agriculture, Advantage Actor-Critic (A2C)
+agents have demonstrated water-use efficiency gains over both
+threshold-based and time-based controllers across distinct growth
+phases of greenhouse crops~\cite{Bayar2025}.
+
+The principal practical challenge across these applications is
+data-efficiency. Direct training on physical fields is infeasible
+due to the cost of irreversibly damaging real crops during the
+exploration phase. The dominant practice is therefore to train
+against a high-fidelity simulator (such as AquaCrop, APSIM, or
+custom agent-based models~\cite{Lopezjimenez2024}) and then transfer
+the learned policy to the physical environment. The fidelity of the
+simulator becomes the bottleneck: a poorly-validated simulator
+produces policies that do not transfer.
+
+\subsection{Continuous-Action Control: From DDPG to Soft Actor-Critic}
+
+For irrigation, the action space is continuous: per-agent water
+volume in some bounded interval. This rules out value-iteration
+methods that operate on discrete action sets and requires
+policy-gradient or actor-critic methods compatible with continuous
+controls. The Deep Deterministic Policy Gradient (DDPG) algorithm of
+Lillicrap et al.~\cite{lillicrap2015ddpg} was the first deep RL method
+to demonstrate competitive performance on continuous control tasks,
+combining off-policy Q-learning with a deterministic policy gradient
+through an actor-critic architecture. DDPG, however, exhibited high
+sensitivity to hyperparameters and instability across random seeds,
+limiting its applicability outside well-tuned benchmark settings.
+Twin Delayed Deep Deterministic Policy Gradient
+(TD3)~\cite{fujimoto2018td3} addressed several of these failure modes
+through twin Q-networks, delayed policy updates, and target-policy
+smoothing, producing more stable training but retaining the
+deterministic-policy framework.
+
+The Soft Actor-Critic (SAC) algorithm of Haarnoja et al.\
+\cite{haarnoja2018sac,haarnoja2019sac} is the current default for
+continuous control in deep RL. SAC is built on the maximum-entropy
+reinforcement learning framework, in which the standard objective
+$\mathbb{E}_\pi[\sum_t r_t]$ is augmented with an entropy bonus
+$\mathcal{H}[\pi(\cdot|s_t)]$ that rewards stochastic exploration:
+\begin{equation}
+J(\pi) = \mathbb{E}_\pi\Bigl[\sum_{t=0}^{\infty} \gamma^t
+(r_t + \alpha \mathcal{H}[\pi(\cdot \mid s_t)])\Bigr]
+\label{eq:sac-objective}
+\end{equation}
+The temperature parameter $\alpha$ trades off reward maximization
+against entropy maximization and is automatically tuned in the modern
+formulation~\cite{haarnoja2019sac} via a constrained Lagrangian
+update against a target entropy. The maximum-entropy framework has
+two principal practical benefits relative to deterministic-policy
+methods: it produces stochastic policies that explore more
+effectively during training, and it produces policies that capture
+multi-modal optima --- a property of value when several distinct
+control sequences achieve similar reward, as is common in irrigation
+where the timing of water application admits considerable latitude.
+SAC is off-policy (using a replay buffer) and uses twin Q-networks
+in the manner of TD3 to mitigate value overestimation.
+
+For the irrigation problem of this thesis, SAC is adopted as the RL
+architecture. The justification is threefold: continuous action
+support without quantization artifacts, sample efficiency on the
+order required for high-fidelity simulator training, and demonstrated
+robustness across hyperparameter and seed variation in the maximum-
+entropy formulation~\cite{haarnoja2019sac}.
+
+\subsection{Reward Engineering and Constraint Handling}
+
+A central challenge in applying RL to constrained problems is that
+standard RL algorithms have no native mechanism for enforcing hard
+constraints~\cite{Bayar2025}. The MPC solver, by contrast, treats the
+seasonal water budget as a hard linear inequality enforced at every
+solver iteration. RL alternatives rely on reward shaping (penalizing
+constraint violations) and on action clipping (truncating actions to
+the feasible set), but these mechanisms shift constraint satisfaction
+from a guarantee to an emergent property of training. The reward
+function therefore requires careful construction. Documented practice
+in irrigation RL combines: a positive baseline reward for matching
+crop water demand, an exponential penalty for over-irrigation that
+discourages dumping the budget early, a soft penalty on field-capacity
+overshoot that prevents waterlogging stress, and a sparse terminal
+bonus on harvested biomass that incentivizes long-horizon
+yield~\cite{Bayar2025}. The cost function of the present thesis
+follows this pattern, with an explicit policy-equivalence design
+choice that the SAC reward is constructed as the exact negation of
+the MPC path cost (see Chapter~\ref{chap:controllers}).
+
+\subsection{Multi-Agent and Distributed Reinforcement Learning}
+
+When the controlled system consists of many spatially distributed
+sub-units, monolithic single-agent RL scales poorly because the
+joint action space grows exponentially with the number of agents.
+Multi-agent RL (MARL) addresses this by decomposing the problem into
+per-agent policies that share information during training but execute
+locally. The Centralized Training, Decentralized Execution (CTDE)
+paradigm has emerged as the dominant
+architecture~\cite{amato2024ctde}: during training, agents have
+access to global state and all other agents' actions through a
+centralized critic, while at deployment each agent acts on local
+observations only. CTDE methods preserve the coordination benefits
+of centralized training while producing policies that are scalable,
+communication-free at deployment, and consistent with the partially
+observable distributed structure of physical multi-agent systems.
+
+For irrigation on a topographically heterogeneous field, the CTDE
+paradigm is naturally applicable: each agent (corresponding to a
+spatial cell of the field) observes its local state, while the
+training-time critic has access to the joint state and can resolve
+the credit-assignment problem of attributing global yield to per-cell
+irrigation decisions. The thesis adopts this architecture; the
+implementation details are presented in Chapter~\ref{chap:controllers}.
+
+\section{Spatial Modeling and Topographic Heterogeneity}
+\label{sec:lit-spatial}
+
+The vast majority of irrigation control literature, including the
+references reviewed in Sections~\ref{sec:lit-classical} through
+\ref{sec:lit-rl}, treats the field as a single lumped soil-moisture
+reservoir. This simplification is justified for small, flat,
+homogeneous plots but breaks down when the controlled field is
+spatially heterogeneous in elevation, soil texture, or crop
+distribution. For agricultural fields with non-trivial topography ---
+including the great majority of fields in mountainous regions such as
+Gilan --- lateral water redistribution through surface runoff couples
+the moisture states of adjacent cells in ways that lumped models
+cannot represent.
+
+\subsection{Variable-Rate Irrigation as a Spatial Control Precedent}
+
+The closest commercial precedent for spatially distributed irrigation
+control is Variable-Rate Irrigation (VRI), in which the application
+rate of a center-pivot or linear-move sprinkler is modulated as the
+machine traverses the field, applying different volumes to different
+cells as a function of soil texture, slope, or
+crop-vigor maps~\cite{Sharma2025,Bayar2025}. VRI partially addresses
+the spatial-heterogeneity problem at the application end but does not
+typically incorporate runoff coupling between cells: each cell's
+prescription is computed independently from a static spatial map.
+This is a reasonable approximation when slopes are mild and rainfall
+events are gentle, but it loses fidelity in topographically active
+fields where overland flow between cells is non-negligible.
+
+\subsection{DEM-Based Flow Routing}
+
+The hydrology literature has developed sophisticated machinery for
+representing surface water flow on a discretized terrain. The
+foundational technique is the D8 algorithm of O'Callaghan and
+Mark~\cite{ocallaghan1984d8}, which assigns each cell of a digital
+elevation model (DEM) a single downslope flow direction toward the
+neighbor with the steepest descent. The D8 representation produces a
+directed graph over the field cells whose edges encode lateral water
+exchange. Multiple-flow-direction extensions, including
+MD8~\cite{quinn1991mfd}, distribute flow proportionally among all
+downslope neighbors weighted by slope; these reduce the artificial
+flow-line concentration of D8 at the cost of greater computational
+complexity. For control applications, where the routing graph must be
+embedded in a symbolic optimization framework with second-order
+gradient information, the simpler D8 representation has been the
+practical choice in recent agent-based irrigation
+work~\cite{Lopezjimenez2024,LopezJimenez2022}.
+
+The integration of DEM-based routing into a control framework
+introduces two design considerations not present in standard hydrology
+applications: (i) the routing must be computable at every receding-
+horizon iteration and must be differentiable with respect to control
+inputs and state variables, ruling out iterative routing solvers and
+discontinuous flow-direction switches; and (ii) the routing must
+respect mass conservation across the field domain, including at the
+field boundary, where naive routing schemes produce degenerate
+sink behavior in low-elevation cells with no internal downhill
+neighbors. The first consideration is addressed by static topological
+sorting of the routing graph at NLP construction time, allowing the
+forward sweep to be unrolled symbolically; the second is addressed
+through fractional routing through padded boundary cells, as
+implemented in the present thesis.
+
+\subsection{Agent-Based Models for Spatial Irrigation Control}
+
+The most recent line of work that directly addresses spatially
+distributed irrigation control on heterogeneous fields is the
+agent-based model of Lopez-Jimenez et al.~\cite{Lopezjimenez2024,LopezJimenez2022}.
+This work formulates a discrete-cell model in which each agent
+maintains its own soil moisture, ponding, and biomass states, coupled
+through D8-derived surface runoff routing, and embeds this model
+within a nonlinear MPC formulation for water-budget-constrained
+irrigation. The agent-based formulation is compact relative to fine-
+resolution finite-element soil hydrology and admits the symbolic
+differentiation required by interior-point optimization, while
+preserving the spatial fidelity needed to capture topographically
+driven phenomena such as ridge runoff and valley waterlogging.
+
+The present thesis builds directly on the Lopez-Jimenez framework with
+three modifications motivated by the constrained control setting: an
+explicit two-layer hydrological decoupling between surface ponding
+and root-zone moisture, a padded-DEM boundary condition that resolves
+a degenerate sink behavior in the original formulation, and a coupling
+of drought stress directly to biomass accumulation rather than only to
+maturation. These modifications and their motivations are documented
+in Chapter~\ref{chap:system}.
+
+\section{Sensing, Data Assimilation, and Communication Infrastructure}
+\label{sec:lit-sensing}
+
+Field deployment of any closed-loop irrigation controller depends on
+the upstream sensing infrastructure that provides the soil moisture,
+temperature, and weather observations consumed by the controller.
+Soil-based sensing using Time Domain Reflectometry (TDR), Frequency
+Domain Reflectometry (FDR), and capacitive probes is the dominant
+modality, deployed at cell-level density across the
+field~\cite{Sharma2025,Bayar2025}. Plant-based sensing of leaf
+turgor, sap flow, and stomatal conductance is increasingly used in
+high-value horticulture for direct measurement of physiological water
+status. Atmospheric sensing using satellite remote sensing products
+(SMAP, SMOS, MERRA-2 GWETROOT~\cite{Afrasiabikia2026}) provides
+field-mean estimates that complement the localized in-situ
+measurements and are particularly useful for validation of integrated
+field-scale models.
+
+The principal practical challenges are sensor drift in harsh field
+environments, which motivates online data assimilation through
+particle-filter or Kalman-filter calibration~\cite{Maniam2026}, and
+the energy and bandwidth constraints of farm-wide deployment, which
+motivates Low-Power Wide-Area Network (LPWAN) protocols such as LoRa
+and NB-IoT for telemetry. These infrastructure questions, while
+critical for deployment, are largely orthogonal to the control-policy
+question of this thesis and are not developed further.
+
+\section{Deficit Irrigation and Crop-Physiological Constraints}
+\label{sec:lit-deficit}
+
+A substantial literature addresses deficit-irrigation strategies in
+which water application is deliberately reduced below crop demand
+during non-critical phenological stages, exploiting the plant's
+physiological response to mild water stress to improve fruit quality
+and water-use efficiency. Regulated Deficit Irrigation (RDI) and
+Partial Root-zone Drying (PRD) have been demonstrated to achieve
+substantial water savings in stone fruits, processing tomatoes, and
+citrus orchards while preserving or improving harvested
+quality~\cite{Sharma2025}. These strategies are compelling for crops
+in which water stress modulates harvest quality through secondary-
+metabolite accumulation. They are, however, largely inapplicable to
+flooded-paddy rice cultivation, where rice's intolerance of
+moderate-to-severe drought stress~\cite{jalali2021,raoufi2025}
+constrains the controller to keeping soil moisture above the
+agronomic stress threshold throughout the season. The present thesis
+operates in this constrained regime and does not pursue
+deficit-irrigation strategies; the deficit budget scenarios at 85\%
+and 70\% allocation evaluated in Chapter~\ref{chap:results} test
+controller robustness under hard volumetric scarcity, not under
+deliberate stress imposition.
+
+\section{Synthesis and Research Gap}
+\label{sec:lit-gap}
+
+The literature surveyed in this chapter establishes the principal
+families of control architectures that have been brought to bear on
+the irrigation problem and their respective strengths and limitations.
+Heuristic and classical controllers are simple and operationally
+robust but cannot enforce season-cumulative constraints or anticipate
+future weather. MPC provides constraint-aware, forecast-driven
+optimization but at a per-step computational cost that limits
+edge-device deployment and that scales unfavorably with prediction
+horizon. RL provides sub-millisecond inference after training but
+lacks native constraint guarantees and depends critically on the
+fidelity of the training simulator. Each family has been demonstrated
+in irrigation applications, and recent work has produced increasingly
+sophisticated extensions (RISPMPC, distributed MPC, CTDE-based
+multi-agent RL).
+
+Within this landscape, several gaps motivate the present thesis.
+First, the integration of agent-based topographic cascade routing
+with constrained MPC has been demonstrated only in a handful of
+recent works~\cite{Lopezjimenez2024,LopezJimenez2022}, and several
+pathologies of the resulting NLP --- including degenerate sink
+behavior, field-capacity overshoot at long horizons, and chronic
+waterlogging in wet-year scenarios --- have not been systematically
+characterized or resolved. Second, the calibration of the multi-term
+MPC cost function to real economic price tiers has not been
+demonstrated in the published literature; existing work treats the
+weights as abstract regularization constants rather than as
+quantities anchored to volumetric water tariffs. Third, the direct
+head-to-head comparison of constrained MPC against a SAC controller
+trained on the exact same plant model and against an exact-equivalent
+reward function --- enabling rigorous policy-comparison rather than
+algorithm-vs-algorithm benchmarking --- has not been reported for
+spatially distributed agricultural control.
+
+The thesis addresses these three gaps. Chapter~\ref{chap:system}
+presents the validated agent-based virtual plant on which all
+controllers operate. Chapter~\ref{chap:controllers} introduces a
+constrained MPC formulation with a six-term cost function (later
+reduced to five terms via factorial sensitivity analysis) anchored to
+the four-tier Iranian water pricing schedule, and a SAC controller
+trained against the exact-negation of the MPC path cost.
+Chapter~\ref{chap:results} reports the comparative performance of
+both controllers across nine combinations of climate scenario and
+budget allocation, identifying the operational regimes in which each
+architecture excels and quantifying the cost-function weight
+calibration through a thirty-one-configuration sensitivity sweep.
+The Iranian context provides both the policy motivation, through the
+water-scarcity dynamics surveyed in Section~\ref{sec:lit-context},
+and the empirical anchor, through the Gilan rice-production setting
+on which the virtual plant is parameterized.
