@@ -11,6 +11,9 @@
 #   2. Solve the NLP (warm-started from previous solution)
 #   3. Return the first-step action u[0]
 #   4. Update internal tracking (x3, x4, warm start, solve times)
+#
+# v2.2: added noise_rho kwarg to expose the AR(1) persistence parameter
+# of NoisyForecast. Default 0.6 (Buizza et al., 2005).
 # =============================================================================
 
 import numpy as np
@@ -38,6 +41,11 @@ class MPCController(Controller):
         'perfect' or 'noisy'. Default 'perfect'.
     noise_sigma : float
         Noise base for noisy forecast. Default 0.15.
+    noise_rho : float
+        AR(1) persistence parameter for noisy forecast, in [0, 1).
+        Default 0.6 (Buizza et al., 2005, daily precipitation forecast
+        error autocorrelation at short lead times). Only used when
+        forecast_mode='noisy'.
     noise_seed : int or None
         Seed for noisy forecast. Default None.
     verbose : bool
@@ -46,7 +54,8 @@ class MPCController(Controller):
 
     def __init__(self, Hp=8, weights=None, ub_mm_per_day=12.0,
                  use_smooth=True, forecast_mode='perfect',
-                 noise_sigma=0.15, noise_seed=None, verbose=True):
+                 noise_sigma=0.15, noise_rho=0.6, noise_seed=None,
+                 verbose=True):
         name = f"mpc_{forecast_mode}_Hp{Hp}"
         super().__init__(name=name)
 
@@ -56,6 +65,7 @@ class MPCController(Controller):
         self.use_smooth = use_smooth
         self.forecast_mode = forecast_mode
         self.noise_sigma = noise_sigma
+        self.noise_rho = noise_rho
         self.noise_seed = noise_seed
         self.verbose = verbose
 
@@ -107,7 +117,9 @@ class MPCController(Controller):
         elif self.forecast_mode == 'noisy':
             from src.forecast import NoisyForecast
             self._forecast_provider = NoisyForecast(
-                sigma_base=self.noise_sigma, seed=self.noise_seed
+                sigma_base=self.noise_sigma,
+                rho=self.noise_rho,
+                seed=self.noise_seed,
             )
         else:
             raise ValueError(f"Unknown forecast_mode: {self.forecast_mode}")

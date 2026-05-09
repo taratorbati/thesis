@@ -24,6 +24,16 @@
 # stress conditional now also use smooth formulations instead of ca.if_else,
 # which is a hard (non-differentiable) switch that was causing IPOPT to
 # struggle at kink points (~960 hard kinks per NLP with N=130, Hp=8).
+#
+# v2.2 fix: corrected drought stress to mirror abm.py at ETc = 0.
+# The previous form h4 = max(1 - phi1/(ETc+eps), 0) returned h4 = 1
+# (maximum stress) when ETc = 0 because 0 / eps = 0 and 1 - 0 = 1. This
+# created a COM-vs-SOM inconsistency: with ETc = 0, the ABM (ground truth)
+# returns h4 = 0 (no stress, since phi1 < ETc is False when both are zero),
+# while the MPC's internal model returned the opposite. Although ETc never
+# reaches zero during the rice growing season in Gilan (min ≈ 1.65 mm/day),
+# the formulation is now corrected for robustness and to remove the model
+# inconsistency. See _drought_stress in abm.py for the reference.
 # =============================================================================
 
 import casadi as ca
@@ -178,14 +188,25 @@ def build_dynamics_function(terrain, crop, use_smooth=False):
 
     # ── Drought stress ────────────────────────────────────────────────────────
 
-    # h3 = 1 - theta14 * max(1 - phi1/ETc, 0)
+    # Mirrors abm.py exactly:
+    #     h4 = (ETc - phi1) / ETc  when phi1 < ETc, else 0
+    #     h3 = 1 - theta14 * h4
     #
-    # The original used ca.if_else(ETc > 1e-6, ..., 0) which is another hard
-    # conditional. Replace with a safe division: add eps to denominator.
-    # When ETc ≈ 0, phi1 ≈ 0 too (transpiration is min(demand, ETc)),
-    # so phi1/ETc is indeterminate but the physical stress is zero.
-    # Using a guarded denominator avoids the branch entirely.
-    h4 = _max0(1.0 - phi1 / (ETc + 1e-6))
+    # Rewriting via deficit = max(ETc - phi1, 0) makes the numerator vanish
+    # when ETc = 0 (since phi1 = min(demand, ETc) = 0 in that case), so
+    # h4 = 0 / eps = 0 and h3 = 1 (no stress). This avoids the COM-vs-SOM
+    # inconsistency where the previous form h4 = max(1 - phi1/(ETc+eps), 0)
+    # returned h4 = 1 (maximum stress) when ETc = 0.
+    #
+    # When ETc > 0, phi1 ≤ ETc always (transpiration is min(demand, ETc)),
+    # so deficit = ETc - phi1 ≥ 0 and h4 = (ETc - phi1) / ETc = 1 - phi1/ETc,
+    # identical to the original ABM expression. The (ETc + 1e-6) denominator
+    # is retained only to guarantee numerical safety; the smoothing operator
+    # _max0 is no longer needed because (ETc - phi1) is already non-negative
+    # by construction, but we keep it for symbolic robustness in the smooth
+    # formulation (where _max0 is the smoothed C² operator).
+    deficit = _max0(ETc - phi1)
+    h4 = deficit / (ETc + 1e-6)
     h3 = 1.0 - theta14 * h4
 
     # ── Waterlogging stress ───────────────────────────────────────────────────

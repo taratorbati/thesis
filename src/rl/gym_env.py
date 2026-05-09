@@ -3,12 +3,23 @@
 # Gymnasium wrapper for the 130-agent crop-soil ABM, configured at the
 # recommended operating point alpha* (Chapter 4 of the thesis).
 #
-# Observation (660 dims):
+# Observation (706 dims at default forecast_horizon=8):
 #   Per-agent (5 × 130 = 650):
 #     x1_norm, x5_norm, x4_norm, x3, elevation
-#   Scalars (10):
-#     day_frac, budget_frac, burn_rate, rain_today, rain_forecast,
-#     ETc_today, ETc_forecast, h2_today, h7_today, g_base_today
+#   Scalars (8):
+#     day_frac, budget_frac, burn_rate,
+#     rain_today, ETc_today, h2_today, h7_today, g_base_today
+#   Per-day forecasts (6 × forecast_horizon = 48):
+#     rain[d:d+H], ETc[d:d+H], radiation[d:d+H],
+#     h2[d:d+H], h7[d:d+H], g_base[d:d+H]
+#     End-of-season padding uses forward fill (last available value),
+#     matching PerfectForecast._slice_pad in src/forecast.py. This ensures
+#     the SAC agent sees the same forecast structure that the MPC sees,
+#     eliminating the information asymmetry that would otherwise handicap
+#     the policy-equivalence comparison claimed in Chapter 4 §4.6. The
+#     previous implementation provided only summed forecasts (one scalar
+#     for total rain over the horizon, one for total ETc), which destroys
+#     the temporal structure that matters for irrigation scheduling.
 #
 # Action: Box(0, 1, shape=(130,)) → scaled to [0, UB_MM] mm/day.
 #
@@ -87,6 +98,9 @@ class IrrigationEnv(gym.Env):
         Path to the GeoTIFF DEM file.
     forecast_horizon : int
         Days of forecast to include in observation. Default 8 to match Hp*=8.
+        The SAC agent receives per-day forecast arrays of this length for
+        rain, ETc, radiation, h2, h7, and g_base — the same temporal
+        structure that the MPC receives via PerfectForecast.
     seed : int or None
         Random seed for reproducibility.
     """
@@ -129,8 +143,12 @@ class IrrigationEnv(gym.Env):
         df = load_cleaned_data()
         self.climate = extract_scenario_by_name(df, scenario, self.crop)
 
-        # Spaces
-        obs_dim = 5 * self.N + 10
+        # Observation space
+        # Per-agent: 5 × N = 650 (x1_norm, x5_norm, x4_norm, x3, elevation)
+        # Scalars: 8 (day_frac, budget_frac, burn_rate, rain_today, ETc_today,
+        #             h2_today, h7_today, g_base_today)
+        # Per-day forecasts: 6 × forecast_horizon (rain, ETc, rad, h2, h7, g_base)
+        obs_dim = 5 * self.N + 8 + 6 * self.forecast_horizon
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
         )
@@ -302,26 +320,50 @@ class IrrigationEnv(gym.Env):
         daily_budget = self.budget_total / self.season_days
         burn_rate = (self.water_used / max(self.day, 1)) / max(daily_budget, 1e-6) if self.day > 0 else 0.0
 
+        # Today's values (the "now" frame, j = 0 in forecast indexing)
         d = min(self.day, self.season_days - 1)
         rain_today = float(self.climate['rainfall'][d])
         ETc_today = float(self.precomputed.Kc_ET[d])
-
-        end = min(d + self.forecast_horizon, self.season_days)
-        rain_forecast = float(self.climate['rainfall'][d:end].sum()) if end > d else 0.0
-        ETc_forecast = float(self.precomputed.Kc_ET[d:end].sum()) if end > d else 0.0
-
         h2_today = float(self.precomputed.h2[d])
         h7_today = float(self.precomputed.h7[d])
         g_base_today = float(self.precomputed.g_base[d])
 
         scalars = np.array([
             day_frac, budget_frac, burn_rate,
-            rain_today, rain_forecast, ETc_today, ETc_forecast,
+            rain_today, ETc_today,
             h2_today, h7_today, g_base_today,
         ], dtype=np.float32)
 
+        # Per-day forecast arrays of length forecast_horizon, mirroring the
+        # full per-day forecast that the MPC receives via PerfectForecast.
+        # End-of-season padding repeats the last available value (forward
+        # fill), matching PerfectForecast._slice_pad in src/forecast.py.
+        # Without this, the SAC agent would see only summed forecasts while
+        # the MPC sees the full temporal structure — a severe information
+        # asymmetry that would handicap the policy-equivalence comparison.
+        H = self.forecast_horizon
+        end = min(d + H, self.season_days)
+        n_avail = end - d  # ≥ 1 because d ≤ season_days - 1
+
+        def _pad(arr):
+            arr = np.asarray(arr, dtype=np.float32)
+            if len(arr) < H:
+                pad_val = arr[-1] if len(arr) > 0 else 0.0
+                pad = np.full(H - len(arr), pad_val, dtype=np.float32)
+                return np.concatenate([arr, pad])
+            return arr
+
+        rain_fc = _pad(self.climate['rainfall'][d:end])
+        ETc_fc  = _pad(self.precomputed.Kc_ET[d:end])
+        rad_fc  = _pad(self.climate['radiation'][d:end])
+        h2_fc   = _pad(self.precomputed.h2[d:end])
+        h7_fc   = _pad(self.precomputed.h7[d:end])
+        g_fc    = _pad(self.precomputed.g_base[d:end])
+
         obs = np.concatenate([
-            x1_norm, x5_norm, x4_norm, x3, elev, scalars
+            x1_norm, x5_norm, x4_norm, x3, elev,
+            scalars,
+            rain_fc, ETc_fc, rad_fc, h2_fc, h7_fc, g_fc,
         ]).astype(np.float32)
 
         return obs
