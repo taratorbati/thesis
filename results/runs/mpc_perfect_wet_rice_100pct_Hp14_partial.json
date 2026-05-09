@@ -4,7 +4,7 @@
   "controller": "mpc_perfect_Hp14",
   "budget_total": 484.0,
   "seed": 0,
-  "last_completed_day": 59,
+  "last_completed_day": 69,
   "completed_at": null,
-  "checkpointed_at": "2026-05-09T00:18:57"
+  "checkpointed_at": "2026-05-09T13:34:11"
 }
