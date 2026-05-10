@@ -2,38 +2,42 @@
 # src/rl/train.py
 # SAC training loop using Stable-Baselines3 with the CTDE policy.
 #
-# Design decisions (Chapter 4 of the thesis):
-#   - Algorithm: SAC (entropy-regularized, continuous action)
-#   - Policy: CTDESACPolicy — shared-parameter actor + centralized critic
-#   - Reward: exact negation of the MPC path cost at alpha*
-#     (constructed inside src/rl/gym_env.py)
-#   - Multiple seeds for statistical robustness (3 minimum, 5 ideal)
+# Design (Chapter 4):
+#   - One policy trained across all (year, budget) combinations.
+#     At each episode reset the env samples a year from TRAINING_YEARS
+#     (23 years, 2000-2025 minus eval years) and a budget from U(70%,100%).
+#   - The 9 eval cells (2018/2022/2024 x 70/85/100%) are strictly held out
+#     and never seen during training. Final evaluation runs post-training
+#     via scripts/experiments/exp_rl.py --mode eval.
+#   - 5 seeds for statistical robustness (conference-paper standard).
 #
-# Kaggle deployment:
-#   - 30 GPU-hours/week, 9-hour session limit
-#   - Checkpoint every 10k steps
-#   - save_replay_buffer=True is REQUIRED for safe session resumption.
-#     SAC is off-policy; resuming with an empty replay buffer causes
-#     catastrophic forgetting on the first batch update.
+# Hyperparameters:
+#   target_entropy = -65 (= -0.5 x dim(A), standard heuristic).
+#   Pilot sweep over {-130, -65, -32}: -130 clearly worse; -65 vs -32
+#   within noise at 100k steps (2 seeds each). -65 chosen as the
+#   defensible default per Haarnoja et al. 2019.
 #
-# Hyperparameters (from Haarnoja et al. 2018/2019):
-#   - Learning rate 3e-4
-#   - Batch size 256
-#   - Gamma 0.99
-#   - Tau 0.005
-#   - Auto entropy tuning, target entropy = -dim(action)
+#   buffer_size = 200k: at obs_dim=707, 200k transitions ~= 1.2 GB RAM.
+#   gradient_steps = 1: measured on Kaggle T4 that gs=2 halves throughput
+#   (37 vs 68 steps/sec) without guaranteed convergence benefit for plain
+#   SAC (REDQ-style ensembles needed to safely push UTD > 1).
+#
+# Kaggle deployment (GPU T4):
+#   Measured 68 steps/sec; 500k steps ~= 2 hrs/seed.
+#   5 seeds in 5 parallel notebooks ~= 2 hrs wall-clock, ~10 GPU-hrs total.
+#   Checkpoint every 50k steps (10 total per seed).
+#   save_replay_buffer=True is REQUIRED for session resumption -- SAC is
+#   off-policy; resuming with empty buffer causes catastrophic forgetting.
 # =============================================================================
 
-import os
+import re
 import json
 import time
 from pathlib import Path
 
-import numpy as np
-
 from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import (
-    CheckpointCallback, EvalCallback, CallbackList
+    CheckpointCallback, EvalCallback, CallbackList,
 )
 from stable_baselines3.common.monitor import Monitor
 
@@ -44,66 +48,57 @@ from src.rl.networks import CTDESACPolicy, make_sac_policy_kwargs
 # ── Hyperparameters ──────────────────────────────────────────────────────────
 
 DEFAULT_HP = {
-    'learning_rate':    3e-4,       # Haarnoja et al. 2018
-    'batch_size':       256,        # SAC default
-    'buffer_size':      100_000,    # ~660 dims × 100k ≈ 0.5 GB on disk
-    'gamma':            0.99,       # episodic, 93-step
-    'tau':              0.005,      # soft target update
-    'ent_coef':         'auto',     # automatic entropy tuning
-    'learning_starts':  1000,       # random exploration steps
-    'train_freq':       1,          # update every env step
-    'gradient_steps':   1,          # one gradient step per env step
-    'target_entropy':   'auto',     # -dim(action) = -130
+    'learning_rate':    3e-4,
+    'batch_size':       256,
+    'buffer_size':      200_000,    # 707-dim obs x 200k ~= 1.2 GB
+    'gamma':            0.99,
+    'tau':              0.005,
+    'ent_coef':         'auto',
+    'learning_starts':  1000,
+    'train_freq':       1,
+    'gradient_steps':   1,
+    'target_entropy':   -65,        # -0.5 x dim(A); pilot confirmed
 }
 
-# Architecture (per-agent shared actor + centralized critic)
-ACTOR_HIDDEN = (128, 128)
+ACTOR_HIDDEN  = (128, 128)
 CRITIC_HIDDEN = (256, 256)
 
 
 def train_sac(
-    scenario='dry',
-    budget_pct=100,
     total_timesteps=500_000,
     seed=0,
     output_dir='results/rl',
     dem_path='gilan_farm.tif',
-    checkpoint_freq=10_000,
-    eval_freq=10_000,
+    checkpoint_freq=50_000,
+    eval_freq=25_000,
     resume_path=None,
     hp_overrides=None,
     verbose=1,
 ):
-    """Train a SAC agent on the irrigation environment.
+    """Train a single SAC policy across all (year, budget) combinations.
 
     Parameters
     ----------
-    scenario : str
-        'dry' or 'wet'.
-    budget_pct : int
-        100, 85, or 70.
     total_timesteps : int
+        Total env steps. 500k ~= 2 hrs on Kaggle T4.
     seed : int
     output_dir : str
     dem_path : str
     checkpoint_freq : int
-        Save model + replay buffer every N env steps.
+        Save model + replay buffer every N steps. Default 50k (10 total).
     eval_freq : int
-        Evaluate on a separate env every N env steps.
+        EvalCallback frequency. Default 25k.
     resume_path : str or None
-        Path to a .zip checkpoint to resume from. If a matching
-        '_replay_buffer.pkl' exists alongside, it will be loaded too.
+        Path to a checkpoint .zip to resume from.
     hp_overrides : dict or None
-        Override default hyperparameters.
     verbose : int
-        0 = silent, 1 = info, 2 = debug.
 
     Returns
     -------
     model : SAC
     """
     output_dir = Path(output_dir)
-    run_name = f"sac_{scenario}_{budget_pct}pct_seed{seed}"
+    run_name = f"sac_general_seed{seed}"
     run_dir = output_dir / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_dir = run_dir / 'checkpoints'
@@ -111,33 +106,22 @@ def train_sac(
     log_dir = run_dir / 'logs'
     log_dir.mkdir(exist_ok=True)
 
-    # Merge hyperparameters
     hp = {**DEFAULT_HP, **(hp_overrides or {})}
 
     # ── Environments ──────────────────────────────────────────────────────
-
+    # Both train and eval envs use randomize=True (sampling from the
+    # training distribution). The 9 held-out eval cells are NEVER used
+    # here -- they are reserved for post-training final evaluation only.
     train_env = Monitor(
-        IrrigationEnv(
-            scenario=scenario,
-            budget_pct=budget_pct,
-            dem_path=dem_path,
-            seed=seed,
-        ),
+        IrrigationEnv(randomize=True, dem_path=dem_path, seed=seed),
         filename=str(log_dir / 'train'),
     )
-
     eval_env = Monitor(
-        IrrigationEnv(
-            scenario=scenario,
-            budget_pct=budget_pct,
-            dem_path=dem_path,
-            seed=seed + 1000,
-        ),
+        IrrigationEnv(randomize=True, dem_path=dem_path, seed=seed + 1000),
         filename=str(log_dir / 'eval'),
     )
 
-    # ── Policy kwargs ─────────────────────────────────────────────────────
-
+    # ── Policy ────────────────────────────────────────────────────────────
     policy_kwargs = make_sac_policy_kwargs(
         N=train_env.unwrapped.N,
         actor_hidden=ACTOR_HIDDEN,
@@ -145,7 +129,6 @@ def train_sac(
     )
 
     # ── Create or resume model ────────────────────────────────────────────
-
     if resume_path is not None and Path(resume_path).exists():
         if verbose:
             print(f"Resuming from {resume_path}")
@@ -157,22 +140,30 @@ def train_sac(
         )
         model.set_env(train_env)
 
-        # Restore replay buffer if available alongside the checkpoint.
-        # SB3 saves it as <checkpoint>_replay_buffer.pkl when
-        # save_replay_buffer=True was used at save time.
-        rb_path = Path(resume_path).with_suffix('').name + '_replay_buffer.pkl'
-        rb_full = Path(resume_path).parent / rb_path
+        # Locate replay buffer. SB3 CheckpointCallback names it:
+        #   {name_prefix}_replay_buffer_{n_steps}_steps.pkl
+        # Parse name_prefix and n_steps from the model checkpoint filename.
+        _m = re.match(r'^(.+)_(\d+)_steps$', Path(resume_path).stem)
+        if _m is not None:
+            rb_full = (Path(resume_path).parent /
+                       f'{_m.group(1)}_replay_buffer_{_m.group(2)}_steps.pkl')
+        else:
+            # Fallback: final model (no _N_steps suffix in name)
+            rb_full = Path(str(resume_path).replace('.zip', '_replay_buffer.pkl'))
+
         if rb_full.exists():
             if verbose:
                 print(f"Loading replay buffer from {rb_full}")
             model.load_replay_buffer(str(rb_full))
         else:
-            print(f"WARNING: No replay buffer found at {rb_full}. "
-                  f"Resuming with an empty buffer will cause catastrophic "
-                  f"forgetting. Consider restarting training instead.")
+            print(
+                f"WARNING: No replay buffer at {rb_full}. "
+                f"Resuming with empty buffer causes catastrophic forgetting. "
+                f"Consider restarting from scratch."
+            )
     else:
         model = SAC(
-            policy=CTDESACPolicy,                  # CTDE shared-actor architecture
+            policy=CTDESACPolicy,
             env=train_env,
             learning_rate=hp['learning_rate'],
             batch_size=hp['batch_size'],
@@ -183,6 +174,7 @@ def train_sac(
             learning_starts=hp['learning_starts'],
             train_freq=hp['train_freq'],
             gradient_steps=hp['gradient_steps'],
+            target_entropy=hp['target_entropy'],
             policy_kwargs=policy_kwargs,
             seed=seed,
             device='auto',
@@ -191,10 +183,6 @@ def train_sac(
         )
 
     # ── Callbacks ─────────────────────────────────────────────────────────
-
-    # save_replay_buffer=True is REQUIRED for SAC session resumption.
-    # The replay buffer is ~500 MB at buffer_size=100k and obs_dim=660,
-    # which fits comfortably in Kaggle's 20 GB working directory.
     checkpoint_callback = CheckpointCallback(
         save_freq=checkpoint_freq,
         save_path=str(checkpoint_dir),
@@ -208,7 +196,7 @@ def train_sac(
         best_model_save_path=str(run_dir / 'best_model'),
         log_path=str(log_dir),
         eval_freq=eval_freq,
-        n_eval_episodes=3,
+        n_eval_episodes=5,
         deterministic=True,
         verbose=verbose,
     )
@@ -216,39 +204,40 @@ def train_sac(
     callbacks = CallbackList([checkpoint_callback, eval_callback])
 
     # ── Save config ───────────────────────────────────────────────────────
-
     config = {
-        'scenario': scenario,
-        'budget_pct': budget_pct,
+        'run_name': run_name,
         'seed': seed,
         'total_timesteps': total_timesteps,
         'policy_class': 'CTDESACPolicy',
-        'hyperparameters': {k: str(v) if not isinstance(v, (int, float)) else v
-                            for k, v in hp.items()},
+        'hyperparameters': {
+            k: str(v) if not isinstance(v, (int, float)) else v
+            for k, v in hp.items()
+        },
         'actor_hidden': list(ACTOR_HIDDEN),
         'critic_hidden': list(CRITIC_HIDDEN),
         'obs_dim': train_env.observation_space.shape[0],
         'action_dim': train_env.action_space.shape[0],
         'N_agents': train_env.unwrapped.N,
+        'training': 'TRAINING_YEARS (23 years) x U(70-100%) budget, randomized per episode',
+        'eval_years_held_out': [2018, 2022, 2024],
         'checkpoint_freq': checkpoint_freq,
         'eval_freq': eval_freq,
-        'save_replay_buffer': True,
         'resumed_from': resume_path,
     }
     with open(run_dir / 'config.json', 'w', encoding='utf-8') as f:
         json.dump(config, f, indent=2)
 
     # ── Train ─────────────────────────────────────────────────────────────
-
     t0 = time.time()
     if verbose:
         print(f"Training SAC: {run_name}")
-        print(f"  Scenario: {scenario}/{budget_pct}%")
-        print(f"  Timesteps: {total_timesteps:,}")
-        print(f"  Seed: {seed}")
-        print(f"  Device: {model.device}")
-        print(f"  Policy: CTDESACPolicy (shared actor + centralized critic)")
-        print(f"  Output: {run_dir}")
+        print(f"  Timesteps:  {total_timesteps:,}")
+        print(f"  Seed:       {seed}")
+        print(f"  Device:     {model.device}")
+        print(f"  Policy:     CTDESACPolicy (shared actor + centralized critic)")
+        print(f"  Training:   23 years x U(70-100%) budget, randomized per episode")
+        print(f"  Eval env:   randomized training-year env (held-out cells post-training only)")
+        print(f"  Output:     {run_dir}")
         print()
 
     model.learn(
@@ -261,10 +250,8 @@ def train_sac(
     train_time = time.time() - t0
 
     # ── Save final model ──────────────────────────────────────────────────
-
     final_path = run_dir / f'{run_name}_final'
     model.save(str(final_path))
-    # Also save the replay buffer with the final model for completeness.
     model.save_replay_buffer(str(final_path) + '_replay_buffer.pkl')
 
     summary = {

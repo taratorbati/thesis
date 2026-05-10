@@ -3,42 +3,50 @@
 # Gymnasium wrapper for the 130-agent crop-soil ABM, configured at the
 # recommended operating point alpha* (Chapter 4 of the thesis).
 #
-# Observation (706 dims at default forecast_horizon=8):
+# Observation (707 dims at default forecast_horizon=8):
 #   Per-agent (5 × 130 = 650):
 #     x1_norm, x5_norm, x4_norm, x3, elevation
-#   Scalars (8):
-#     day_frac, budget_frac, burn_rate,
+#   Scalars (9):
+#     day_frac, budget_frac, budget_total_norm, burn_rate,
 #     rain_today, ETc_today, h2_today, h7_today, g_base_today
 #   Per-day forecasts (6 × forecast_horizon = 48):
 #     rain[d:d+H], ETc[d:d+H], radiation[d:d+H],
 #     h2[d:d+H], h7[d:d+H], g_base[d:d+H]
 #     End-of-season padding uses forward fill (last available value),
-#     matching PerfectForecast._slice_pad in src/forecast.py. This ensures
-#     the SAC agent sees the same forecast structure that the MPC sees,
-#     eliminating the information asymmetry that would otherwise handicap
-#     the policy-equivalence comparison claimed in Chapter 4 §4.6. The
-#     previous implementation provided only summed forecasts (one scalar
-#     for total rain over the horizon, one for total ETc), which destroys
-#     the temporal structure that matters for irrigation scheduling.
+#     matching PerfectForecast._slice_pad in src/forecast.py.
+#
+# budget_total_norm is included so the agent can distinguish "50% of a tight
+# budget" from "50% of a generous budget" — essential when budget is
+# randomised across episodes during training.
 #
 # Action: Box(0, 1, shape=(130,)) → scaled to [0, UB_MM] mm/day.
 #
-# Reward (dense, exact negation of the MPC path cost at alpha*):
+# Reward (approximate negation of the MPC path cost at alpha*, under γ→1):
 #   r(t) = +alpha1 * Δx4_mean / x4_ref           (biomass progress)
 #        - alpha2 * Σu / W_daily_ref              (water cost — domestic tier)
 #        - alpha3 * mean(max(ST-x1, 0)) / (ST-WP) (drought)
 #        - alpha4 * mean(x5) / x5_ref             (ponding — INACTIVE at alpha4=0)
 #        - alpha5 * ||u-u_prev||² / (UB² · N)     (delta-u)
-#        - alpha6 * mean([max(x1-FC, 0)/FC]²)     (FC overshoot — ACTIVATED)
+#        - alpha6 * mean([max(x1-FC, 0)/FC]²)     (FC overshoot)
 #        - λ_budget * max(burn_rate-1, 0)²        (budget soft penalty)
 #   Terminal: + TERMINAL_BONUS_MULT * alpha1 * final_x4_mean / x4_ref
+#             (paid on BOTH truncated=True and terminated=True so the agent
+#              is not penalised for exhausting the budget after crop is grown)
 #
-# CRITICAL: Reward construction matches src/mpc/cost.py at alpha* exactly,
-# enabling the policy-equivalence comparison claimed in Chapter 4 §4.6.
+# Note on policy-equivalence: the SAC discounted return (γ=0.99) is an
+# approximation to the undiscounted MPC cost. The approximation is accurate
+# for the first ~70 days (discount factor 0.99^70 ≈ 0.50) but diverges at
+# the terminal step. The word "exact" that appeared in previous versions of
+# this docstring was incorrect and has been removed.
 #
-# Scenarios: 'dry' or 'wet'. The thesis omits the 2020 moderate scenario
-# because it is climatologically too close to 2022 (dry) to produce
-# distinguishable controller behaviour.
+# Training design:
+#   - At each reset(), a year is sampled uniformly from TRAINING_YEARS
+#     (23 years: 2000-2025 excluding eval years 2018, 2022, 2024).
+#   - Budget is sampled uniformly from U(70%, 100%) of full seasonal need.
+#   - This trains a single general policy evaluated on the 9 fixed holdout
+#     cells (3 eval years × 3 budgets) shared with the MPC evaluation.
+#   - To freeze scenario/budget for evaluation, pass fixed_scenario and
+#     fixed_budget_pct at construction time.
 # =============================================================================
 
 import gymnasium as gym
@@ -49,7 +57,10 @@ from abm import CropSoilABM
 from src.terrain import load_terrain, get_sink_agents
 from src.precompute import get_precomputed
 from soil_data import get_crop
-from climate_data import load_cleaned_data, extract_scenario_by_name
+from climate_data import (
+    load_cleaned_data, extract_scenario, extract_scenario_by_name,
+    TRAINING_YEARS, SCENARIO_YEARS,
+)
 
 
 # ── Normalization references — must match src/mpc/cost.py DEFAULT_REFS ───
@@ -57,29 +68,18 @@ X4_REF = 900.0       # g/m², biomass normalization (~3800 kg/ha target)
 X5_REF = 50.0        # mm, ponding normalization (only used if alpha4 != 0)
 UB_MM = 12.0         # mm/day, actuator cap
 
+FULL_SEASON_NEED_MM = 484.0   # 100% budget for rice (mm, field-averaged)
+MAX_BUDGET_MM = FULL_SEASON_NEED_MM            # normalization denominator
+
 # ── Recommended operating point alpha* (Chapter 4) ───────────────────────
-# These match src/mpc/cost.py DEFAULT_WEIGHTS exactly. Do not modify
-# without updating the MPC cost as well, otherwise the SAC reward will
-# no longer be the negation of the MPC cost.
-ALPHA1 = 1.0      # terminal biomass anchor
-ALPHA2 = 0.016    # water cost — domestic-base Iranian tariff
-ALPHA3 = 0.1      # drought stress regularizer
-ALPHA4 = 0.0      # surface ponding — INACTIVE (subsumed by alpha6 per Group F)
-ALPHA5 = 0.005    # delta-u regularizer
-ALPHA6 = 8.0      # x1 > FC soft penalty — recommended ceiling-confirmed value
+ALPHA1 = 1.0
+ALPHA2 = 0.016
+ALPHA3 = 0.1
+ALPHA4 = 0.0
+ALPHA5 = 0.005
+ALPHA6 = 8.0
 
-# Budget violation penalty weight (RL-only soft constraint)
 LAMBDA_BUDGET = 5.0
-
-# Terminal biomass reward multiplier.
-# The path-reward contribution from the per-step Δx4 term accumulates to
-# roughly +0.93 over a successful season (full biomass reached), and the
-# accumulated path penalties at alpha* sum to roughly -1.7 for a good
-# policy. A terminal bonus of 1.0× would leave a successful policy at
-# net reward ~+0.2, with weak gradient signal. Using a 5× multiplier
-# scales the terminal bonus to +5.0 for full yield, producing a clear
-# net-positive return for successful policies and a strong learning
-# signal for the sparse end-of-episode reward.
 TERMINAL_BONUS_MULT = 5.0
 
 
@@ -88,36 +88,46 @@ class IrrigationEnv(gym.Env):
 
     Parameters
     ----------
-    scenario : str
-        'dry' or 'wet'.
-    budget_pct : int
-        Budget percentage: 100, 85, or 70.
+    fixed_scenario : str or None
+        If set, always use this named scenario (e.g. 'dry'). If None,
+        a random year from TRAINING_YEARS is sampled at each reset().
+        Use None during training; use a scenario name for evaluation.
+    fixed_budget_pct : float or None
+        If set, always use this budget percentage (e.g. 100.0). If None,
+        budget is sampled uniformly from U(70%, 100%) at each reset().
+        Use None during training; use a fixed value for evaluation.
     crop_name : str
         'rice' (only supported in Phase 1).
     dem_path : str
         Path to the GeoTIFF DEM file.
     forecast_horizon : int
-        Days of forecast to include in observation. Default 8 to match Hp*=8.
-        The SAC agent receives per-day forecast arrays of this length for
-        rain, ETc, radiation, h2, h7, and g_base — the same temporal
-        structure that the MPC receives via PerfectForecast.
+        Days of forecast in observation. Default 8 (= Hp* of the MPC).
     seed : int or None
         Random seed for reproducibility.
     """
 
     metadata = {'render_modes': []}
 
-    def __init__(self, scenario='dry', budget_pct=100, crop_name='rice',
-                 dem_path='gilan_farm.tif', forecast_horizon=8, seed=None):
+    def __init__(self, fixed_scenario=None, fixed_budget_pct=None,
+                 crop_name='rice', dem_path='gilan_farm.tif',
+                 forecast_horizon=8, seed=None,
+                 # Legacy positional aliases kept for backward compatibility:
+                 scenario=None, budget_pct=None):
         super().__init__()
 
-        self.scenario = scenario
-        self.budget_pct = budget_pct
+        # Handle legacy positional args
+        if scenario is not None and fixed_scenario is None:
+            fixed_scenario = scenario
+        if budget_pct is not None and fixed_budget_pct is None:
+            fixed_budget_pct = budget_pct
+
+        self.fixed_scenario = fixed_scenario
+        self.fixed_budget_pct = fixed_budget_pct
         self.crop_name = crop_name
         self.dem_path = dem_path
         self.forecast_horizon = forecast_horizon
 
-        # Load static data
+        # Load static data once
         self.crop = get_crop(crop_name)
         self.terrain = load_terrain(dem_path)
         self.N = self.terrain['N']
@@ -127,28 +137,17 @@ class IrrigationEnv(gym.Env):
         self.fc_total = self.crop['theta6'] * self.crop['theta5']
         self.wp_total = self.crop['theta2'] * self.crop['theta5']
         p = self.crop.get('p', 0.20)
-        raw = p * (self.fc_total - self.wp_total)
-        self.stress_threshold = self.fc_total - raw
-
-        full_need_mm = {'rice': 484.0, 'tobacco': 389.0}[crop_name]
-        self.budget_total = full_need_mm * (budget_pct / 100.0)
+        self.stress_threshold = self.fc_total - p * (self.fc_total - self.wp_total)
 
         # Elevation (static, included in obs)
         self.elev_norm = self.terrain['gamma_flat']
 
-        # Precomputed climate-only quantities
-        self.precomputed = get_precomputed(scenario, crop_name)
+        # Load all climate data once; individual years extracted in reset()
+        self._df = load_cleaned_data()
 
-        # Load climate
-        df = load_cleaned_data()
-        self.climate = extract_scenario_by_name(df, scenario, self.crop)
-
-        # Observation space
-        # Per-agent: 5 × N = 650 (x1_norm, x5_norm, x4_norm, x3, elevation)
-        # Scalars: 8 (day_frac, budget_frac, burn_rate, rain_today, ETc_today,
-        #             h2_today, h7_today, g_base_today)
-        # Per-day forecasts: 6 × forecast_horizon (rain, ETc, rad, h2, h7, g_base)
-        obs_dim = 5 * self.N + 8 + 6 * self.forecast_horizon
+        # Observation space:
+        # 650 per-agent + 9 scalars + 6*forecast_horizon forecast = 707
+        obs_dim = 5 * self.N + 9 + 6 * self.forecast_horizon
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
         )
@@ -156,7 +155,7 @@ class IrrigationEnv(gym.Env):
             low=0.0, high=1.0, shape=(self.N,), dtype=np.float32
         )
 
-        # Cost weights at recommended alpha* (must match src/mpc/cost.py)
+        # Cost weights
         self.alpha1 = ALPHA1
         self.alpha2 = ALPHA2
         self.alpha3 = ALPHA3
@@ -165,8 +164,11 @@ class IrrigationEnv(gym.Env):
         self.alpha6 = ALPHA6
         self.W_daily_ref = 5.0 * self.N
 
-        # Will be set in reset()
+        # Episode state (set in reset)
         self.abm = None
+        self.climate = None
+        self.precomputed = None
+        self.budget_total = None
         self.day = 0
         self.budget_remaining = 0.0
         self.water_used = 0.0
@@ -179,6 +181,33 @@ class IrrigationEnv(gym.Env):
         if seed is not None:
             self._np_random = np.random.default_rng(seed)
 
+        # ── Sample year and budget for this episode ───────────────────────
+        if self.fixed_scenario is not None:
+            # Eval mode: fixed named scenario
+            self.climate = extract_scenario_by_name(
+                self._df, self.fixed_scenario, self.crop
+            )
+            self.precomputed = get_precomputed(self.fixed_scenario, self.crop_name)
+        else:
+            # Training mode: random year from training pool
+            year = int(self._np_random.choice(TRAINING_YEARS))
+            self.climate = extract_scenario(self._df, year, self.crop)
+            # Precomputed quantities depend only on crop+climate; re-derive
+            # from the chosen year's data inline.
+            # get_precomputed() caches by (scenario_name, crop_name) — since
+            # we're sampling arbitrary years we call the year-based variant.
+            self.precomputed = get_precomputed(year, self.crop_name)
+
+        if self.fixed_budget_pct is not None:
+            budget_pct = float(self.fixed_budget_pct)
+        else:
+            # Continuous uniform U(70%, 100%) — avoids lookup-table behaviour
+            # that discrete {70,85,100} sampling could induce.
+            budget_pct = float(self._np_random.uniform(70.0, 100.0))
+
+        self.budget_total = FULL_SEASON_NEED_MM * (budget_pct / 100.0)
+
+        # ── Reset ABM ─────────────────────────────────────────────────────
         self.abm = CropSoilABM(
             gamma_flat=self.terrain['gamma_flat'],
             sends_to=self.terrain['sends_to'],
@@ -189,7 +218,6 @@ class IrrigationEnv(gym.Env):
             elevation=self.terrain['elevation_flat'],
         )
         self.abm.reset()
-
         self.abm.x1 = np.full(self.N, self.fc_total)
         self.abm.x2 = np.full(self.N, self.crop.get('x2_init', 0.0))
         self.abm.x3 = np.zeros(self.N)
@@ -202,14 +230,13 @@ class IrrigationEnv(gym.Env):
         self.u_prev = np.zeros(self.N)
         self.x4_prev_mean = float(self.abm.x4.mean())
 
-        obs = self._get_obs()
-        return obs, {}
+        return self._get_obs(), {}
 
     def step(self, action):
         action = np.asarray(action, dtype=float).clip(0, 1)
         u = action * UB_MM
 
-        # Budget clip (hard constraint enforcement at the RL boundary)
+        # Budget clip
         if u.mean() > self.budget_remaining:
             scale = self.budget_remaining / max(u.mean(), 1e-12)
             u = u * scale
@@ -221,92 +248,75 @@ class IrrigationEnv(gym.Env):
             'radiation': float(self.climate['radiation'][self.day]),
             'ET':        float(self.climate['ET'][self.day]),
         }
-
         self.abm.step(u, climate_today)
 
         daily_spend = float(u.mean())
         self.budget_remaining = max(self.budget_remaining - daily_spend, 0.0)
         self.water_used += daily_spend
 
-        # ── Compute reward (negation of MPC path cost at alpha*) ─────────
-
+        # ── Reward ────────────────────────────────────────────────────────
         x4_mean = float(self.abm.x4.mean())
 
-        # Term 1: biomass progress (positive contribution)
         r_biomass = self.alpha1 * (x4_mean - self.x4_prev_mean) / X4_REF
-
-        # Term 2: water cost
         r_water = -self.alpha2 * u.sum() / self.W_daily_ref
 
-        # Term 3: drought penalty
         deficit = np.maximum(self.stress_threshold - self.abm.x1, 0)
         r_drought = -self.alpha3 * deficit.sum() / (
             self.N * max(self.stress_threshold - self.wp_total, 1e-6))
 
-        # Term 4: ponding penalty (inactive at alpha4 = 0; computed for logging)
-        if self.alpha4 != 0.0:
-            r_ponding = -self.alpha4 * self.abm.x5.sum() / (self.N * X5_REF)
-        else:
-            r_ponding = 0.0
+        r_ponding = (
+            -self.alpha4 * self.abm.x5.sum() / (self.N * X5_REF)
+            if self.alpha4 != 0.0 else 0.0
+        )
 
-        # Term 5: delta-u penalty
         du = u - self.u_prev
         r_delta_u = -self.alpha5 * np.dot(du, du) / (UB_MM ** 2 * self.N)
 
-        # Term 6: FC overshoot penalty (NEW — matches MPC J_overFC at alpha6=8)
-        # Quadratic in normalized excess: max(x1 - FC, 0) / FC, squared.
-        # Inactive when x1 ≤ FC (excess = 0 → contribution = 0).
         if self.alpha6 != 0.0:
             excess = np.maximum(self.abm.x1 - self.fc_total, 0.0)
-            normalized_sq = (excess / self.fc_total) ** 2
-            r_overfc = -self.alpha6 * normalized_sq.sum() / self.N
+            r_overfc = -self.alpha6 * ((excess / self.fc_total) ** 2).sum() / self.N
         else:
             r_overfc = 0.0
 
-        # Budget soft penalty (RL-only — MPC enforces this as hard constraint)
+        # burn_rate: unified formula used in both reward and obs.
+        # Uses self.day + 1 because the day counter is incremented below,
+        # so at the moment of the reward self.day still holds the pre-step day.
         daily_budget = self.budget_total / self.season_days
-        burn_rate = self.water_used / max(self.day + 1, 1) / max(daily_budget, 1e-6)
+        burn_rate = (
+            self.water_used / (self.day + 1) / max(daily_budget, 1e-6)
+        )
         r_budget = -LAMBDA_BUDGET * max(burn_rate - 1.0, 0.0) ** 2
 
-        reward = (r_biomass + r_water + r_drought + r_ponding
-                  + r_delta_u + r_overfc + r_budget)
+        reward = r_biomass + r_water + r_drought + r_ponding + r_delta_u + r_overfc + r_budget
 
         self.u_prev = u.copy()
         self.x4_prev_mean = x4_mean
         self.day += 1
 
         # ── Termination ───────────────────────────────────────────────────
+        terminated = self.budget_remaining <= 0 and self.day < self.season_days
+        truncated = self.day >= self.season_days
 
-        terminated = False
-        truncated = False
-
-        if self.budget_remaining <= 0 and self.day < self.season_days:
-            terminated = True
-
-        if self.day >= self.season_days:
-            truncated = True
-            # Terminal bonus on harvested biomass.
-            # Multiplier > 1 ensures successful policies achieve
-            # net-positive return relative to the do-nothing baseline.
+        # Terminal bonus on BOTH terminated and truncated so the agent is
+        # not penalised for exhausting the budget after the crop has grown.
+        # Previously, terminated episodes received no bonus, creating a
+        # pathological incentive to hoard water and under-irrigate.
+        if terminated or truncated:
             reward += TERMINAL_BONUS_MULT * self.alpha1 * x4_mean / X4_REF
-
-        obs = self._get_obs()
 
         info = {
             'day': self.day,
             'yield_kg_ha': x4_mean * self.crop.get('HI', 0.42) * 10.0,
             'water_used_mm': self.water_used,
             'budget_remaining': self.budget_remaining,
-            'r_biomass':  r_biomass,
-            'r_water':    r_water,
-            'r_drought':  r_drought,
-            'r_ponding':  r_ponding,
-            'r_delta_u':  r_delta_u,
-            'r_overfc':   r_overfc,
-            'r_budget':   r_budget,
+            'burn_rate': burn_rate,
+            'r_biomass': r_biomass, 'r_water': r_water,
+            'r_drought': r_drought, 'r_ponding': r_ponding,
+            'r_delta_u': r_delta_u, 'r_overfc': r_overfc,
+            'r_budget': r_budget,
         }
 
-        return obs, float(reward), terminated, truncated, info
+        return self._get_obs(), float(reward), terminated, truncated, info
 
     def _get_obs(self):
         x1_norm = self.abm.x1 / self.fc_total
@@ -317,40 +327,36 @@ class IrrigationEnv(gym.Env):
 
         day_frac = self.day / self.season_days
         budget_frac = self.budget_remaining / max(self.budget_total, 1e-6)
-        daily_budget = self.budget_total / self.season_days
-        burn_rate = (self.water_used / max(self.day, 1)) / max(daily_budget, 1e-6) if self.day > 0 else 0.0
+        budget_total_norm = self.budget_total / MAX_BUDGET_MM
 
-        # Today's values (the "now" frame, j = 0 in forecast indexing)
+        # burn_rate in obs uses same formula as in step() reward.
+        # At day=0 (before any step), water_used=0 → burn_rate=0.
+        daily_budget = self.budget_total / self.season_days
+        burn_rate = (
+            self.water_used / max(self.day, 1) / max(daily_budget, 1e-6)
+            if self.day > 0 else 0.0
+        )
+
         d = min(self.day, self.season_days - 1)
-        rain_today = float(self.climate['rainfall'][d])
-        ETc_today = float(self.precomputed.Kc_ET[d])
-        h2_today = float(self.precomputed.h2[d])
-        h7_today = float(self.precomputed.h7[d])
+        rain_today   = float(self.climate['rainfall'][d])
+        ETc_today    = float(self.precomputed.Kc_ET[d])
+        h2_today     = float(self.precomputed.h2[d])
+        h7_today     = float(self.precomputed.h7[d])
         g_base_today = float(self.precomputed.g_base[d])
 
         scalars = np.array([
-            day_frac, budget_frac, burn_rate,
-            rain_today, ETc_today,
-            h2_today, h7_today, g_base_today,
+            day_frac, budget_frac, budget_total_norm, burn_rate,
+            rain_today, ETc_today, h2_today, h7_today, g_base_today,
         ], dtype=np.float32)
 
-        # Per-day forecast arrays of length forecast_horizon, mirroring the
-        # full per-day forecast that the MPC receives via PerfectForecast.
-        # End-of-season padding repeats the last available value (forward
-        # fill), matching PerfectForecast._slice_pad in src/forecast.py.
-        # Without this, the SAC agent would see only summed forecasts while
-        # the MPC sees the full temporal structure — a severe information
-        # asymmetry that would handicap the policy-equivalence comparison.
         H = self.forecast_horizon
         end = min(d + H, self.season_days)
-        n_avail = end - d  # ≥ 1 because d ≤ season_days - 1
 
         def _pad(arr):
             arr = np.asarray(arr, dtype=np.float32)
             if len(arr) < H:
                 pad_val = arr[-1] if len(arr) > 0 else 0.0
-                pad = np.full(H - len(arr), pad_val, dtype=np.float32)
-                return np.concatenate([arr, pad])
+                return np.concatenate([arr, np.full(H - len(arr), pad_val, dtype=np.float32)])
             return arr
 
         rain_fc = _pad(self.climate['rainfall'][d:end])
@@ -360,10 +366,8 @@ class IrrigationEnv(gym.Env):
         h7_fc   = _pad(self.precomputed.h7[d:end])
         g_fc    = _pad(self.precomputed.g_base[d:end])
 
-        obs = np.concatenate([
+        return np.concatenate([
             x1_norm, x5_norm, x4_norm, x3, elev,
             scalars,
             rain_fc, ETc_fc, rad_fc, h2_fc, h7_fc, g_fc,
         ]).astype(np.float32)
-
-        return obs
