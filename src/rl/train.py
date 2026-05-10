@@ -2,32 +2,25 @@
 # src/rl/train.py
 # SAC training loop using Stable-Baselines3 with the CTDE policy.
 #
-# Design (Chapter 4):
-#   - One policy trained across all (year, budget) combinations.
-#     At each episode reset the env samples a year from TRAINING_YEARS
-#     (23 years, 2000-2025 minus eval years) and a budget from U(70%,100%).
-#   - The 9 eval cells (2018/2022/2024 x 70/85/100%) are strictly held out
-#     and never seen during training. Final evaluation runs post-training
-#     via scripts/experiments/exp_rl.py --mode eval.
-#   - 5 seeds for statistical robustness (conference-paper standard).
+# One general policy trained across all (year, budget) combinations.
+# Year is sampled uniformly from TRAINING_YEARS (23 years) per episode.
+# Budget is sampled uniformly from U(70%, 100%) per episode.
+# The 9 eval cells (dry/moderate/wet x 70/85/100%) are held out entirely.
 #
 # Hyperparameters:
 #   target_entropy = -65 (= -0.5 x dim(A), standard heuristic).
-#   Pilot sweep over {-130, -65, -32}: -130 clearly worse; -65 vs -32
-#   within noise at 100k steps (2 seeds each). -65 chosen as the
-#   defensible default per Haarnoja et al. 2019.
+#   Pilot sweep over {-130, -65, -32}, 2 seeds each at 100k steps:
+#   -130 clearly worse; -65 vs -32 within noise. -65 chosen per Haarnoja
+#   et al. 2019 and cited as standard heuristic in the thesis.
 #
 #   buffer_size = 200k: at obs_dim=707, 200k transitions ~= 1.2 GB RAM.
 #   gradient_steps = 1: measured on Kaggle T4 that gs=2 halves throughput
 #   (37 vs 68 steps/sec) without guaranteed convergence benefit for plain
-#   SAC (REDQ-style ensembles needed to safely push UTD > 1).
+#   SAC without REDQ-style critic ensembles.
 #
-# Kaggle deployment (GPU T4):
-#   Measured 68 steps/sec; 500k steps ~= 2 hrs/seed.
-#   5 seeds in 5 parallel notebooks ~= 2 hrs wall-clock, ~10 GPU-hrs total.
-#   Checkpoint every 50k steps (10 total per seed).
-#   save_replay_buffer=True is REQUIRED for session resumption -- SAC is
-#   off-policy; resuming with empty buffer causes catastrophic forgetting.
+# Kaggle GPU T4: measured 68 steps/sec; 500k steps ~= 2 hrs/seed.
+# 5 seeds in 5 parallel notebooks ~= 2 hrs wall-clock, ~10 GPU-hrs total.
+# Checkpoint every 50k steps (10 total); save_replay_buffer=True required.
 # =============================================================================
 
 import re
@@ -45,19 +38,17 @@ from src.rl.gym_env import IrrigationEnv
 from src.rl.networks import CTDESACPolicy, make_sac_policy_kwargs
 
 
-# ── Hyperparameters ──────────────────────────────────────────────────────────
-
 DEFAULT_HP = {
     'learning_rate':    3e-4,
     'batch_size':       256,
-    'buffer_size':      200_000,    # 707-dim obs x 200k ~= 1.2 GB
+    'buffer_size':      200_000,
     'gamma':            0.99,
     'tau':              0.005,
     'ent_coef':         'auto',
     'learning_starts':  1000,
     'train_freq':       1,
     'gradient_steps':   1,
-    'target_entropy':   -65,        # -0.5 x dim(A); pilot confirmed
+    'target_entropy':   -65,
 }
 
 ACTOR_HIDDEN  = (128, 128)
@@ -75,7 +66,7 @@ def train_sac(
     hp_overrides=None,
     verbose=1,
 ):
-    """Train a single SAC policy across all (year, budget) combinations.
+    """Train a general SAC policy across all (year, budget) combinations.
 
     Parameters
     ----------
@@ -85,11 +76,11 @@ def train_sac(
     output_dir : str
     dem_path : str
     checkpoint_freq : int
-        Save model + replay buffer every N steps. Default 50k (10 total).
+        Default 50k (10 checkpoints per 500k run).
     eval_freq : int
         EvalCallback frequency. Default 25k.
     resume_path : str or None
-        Path to a checkpoint .zip to resume from.
+        Path to checkpoint .zip to resume from.
     hp_overrides : dict or None
     verbose : int
 
@@ -109,15 +100,17 @@ def train_sac(
     hp = {**DEFAULT_HP, **(hp_overrides or {})}
 
     # ── Environments ──────────────────────────────────────────────────────
-    # Both train and eval envs use randomize=True (sampling from the
-    # training distribution). The 9 held-out eval cells are NEVER used
-    # here -- they are reserved for post-training final evaluation only.
+    # Training mode: fixed_scenario=None, fixed_budget_pct=None.
+    # IrrigationEnv will sample a random year from TRAINING_YEARS and a
+    # random budget from U(70%,100%) at each reset().
+    # The 9 held-out eval cells (dry/moderate/wet x 70/85/100%) are NEVER
+    # used here — they are reserved for post-training final evaluation only.
     train_env = Monitor(
-        IrrigationEnv(randomize=True, dem_path=dem_path, seed=seed),
+        IrrigationEnv(dem_path=dem_path, seed=seed),
         filename=str(log_dir / 'train'),
     )
     eval_env = Monitor(
-        IrrigationEnv(randomize=True, dem_path=dem_path, seed=seed + 1000),
+        IrrigationEnv(dem_path=dem_path, seed=seed + 1000),
         filename=str(log_dir / 'eval'),
     )
 
@@ -140,15 +133,15 @@ def train_sac(
         )
         model.set_env(train_env)
 
-        # Locate replay buffer. SB3 CheckpointCallback names it:
-        #   {name_prefix}_replay_buffer_{n_steps}_steps.pkl
-        # Parse name_prefix and n_steps from the model checkpoint filename.
+        # Locate replay buffer.
+        # SB3 CheckpointCallback saves: {name_prefix}_replay_buffer_{n}_steps.pkl
+        # Parse name_prefix and n from the model filename stem.
         _m = re.match(r'^(.+)_(\d+)_steps$', Path(resume_path).stem)
         if _m is not None:
             rb_full = (Path(resume_path).parent /
                        f'{_m.group(1)}_replay_buffer_{_m.group(2)}_steps.pkl')
         else:
-            # Fallback: final model (no _N_steps suffix in name)
+            # Fallback for final model (no _N_steps suffix)
             rb_full = Path(str(resume_path).replace('.zip', '_replay_buffer.pkl'))
 
         if rb_full.exists():
@@ -231,13 +224,13 @@ def train_sac(
     t0 = time.time()
     if verbose:
         print(f"Training SAC: {run_name}")
-        print(f"  Timesteps:  {total_timesteps:,}")
-        print(f"  Seed:       {seed}")
-        print(f"  Device:     {model.device}")
-        print(f"  Policy:     CTDESACPolicy (shared actor + centralized critic)")
-        print(f"  Training:   23 years x U(70-100%) budget, randomized per episode")
-        print(f"  Eval env:   randomized training-year env (held-out cells post-training only)")
-        print(f"  Output:     {run_dir}")
+        print(f"  Timesteps: {total_timesteps:,}")
+        print(f"  Seed:      {seed}")
+        print(f"  Device:    {model.device}")
+        print(f"  Policy:    CTDESACPolicy (shared actor + centralized critic)")
+        print(f"  Training:  TRAINING_YEARS (23 yrs) x U(70-100%) budget")
+        print(f"  Eval env:  same training distribution (held-out cells are post-training only)")
+        print(f"  Output:    {run_dir}")
         print()
 
     model.learn(

@@ -3,27 +3,26 @@
 # Train and/or evaluate SAC agents for the irrigation task.
 #
 # Usage:
-#   # Local CPU dry-run (validates the environment + CTDE policy wiring):
-#   python -m scripts.experiments.exp_rl --mode train --scenario dry --budget 100 --seed 0 --timesteps 10000
+#   # Smoke test (validates env + CTDE policy, ~2 min on GPU):
+#   python -m scripts.experiments.exp_rl --mode train --seed 0 --timesteps 10000
 #
-#   # Train all 3 seeds on dry/100% (typical Kaggle session):
-#   python -m scripts.experiments.exp_rl --mode train --scenario dry --budget 100 --seed all
+#   # Full training, seed 0 (run 5 notebooks in parallel with seeds 0-4):
+#   python -m scripts.experiments.exp_rl --mode train --seed 0 --timesteps 500000
 #
-#   # Resume a Kaggle session that was killed at hour 9:
-#   python -m scripts.experiments.exp_rl --mode train --scenario dry --budget 100 --seed 0 \
-#       --resume results/rl/sac_dry_100pct_seed0/checkpoints/sac_dry_100pct_seed0_900000_steps.zip
+#   # Resume an interrupted session:
+#   python -m scripts.experiments.exp_rl --mode train --seed 0 --timesteps 500000 \
+#       --resume results/rl/sac_general_seed0/checkpoints/sac_general_seed0_300000_steps.zip
 #
-#   # Evaluate a trained model across the (scenario × budget) grid:
+#   # Evaluate trained model on all 9 held-out cells:
 #   python -m scripts.experiments.exp_rl --mode eval \
-#       --model results/rl/sac_dry_100pct_seed0/best_model/best_model.zip \
+#       --model results/rl/sac_general_seed0/best_model/best_model.zip \
 #       --scenario all --budget all
 #
-# Scenarios available: 'dry' or 'wet' (the moderate-2020 scenario was removed
-# in the two-scenario thesis design — see thesis Section 3.3).
+# Training design: one general policy trained on 23 years x U(70-100%) budget.
+# Scenarios/budgets are NOT passed during training — the env randomizes them.
+# --scenario and --budget args are only used in eval mode.
 #
-# Seeds: SEEDS=[0,1,2] by default. Three seeds is the minimum for credible
-# variance reporting in RL. Scaling to five seeds requires either reducing
-# total_timesteps proportionally or splitting across multiple Kaggle weeks.
+# Seeds: 5 seeds (0-4) for conference-paper-standard statistical robustness.
 # =============================================================================
 
 import argparse
@@ -37,33 +36,33 @@ from climate_data import SCENARIO_YEARS
 from soil_data import get_crop
 from src.terrain import load_terrain
 
-SCENARIOS_ALL = list(SCENARIO_YEARS.keys())              # ['dry', 'wet']
+SCENARIOS_ALL = list(SCENARIO_YEARS.keys())   # ['dry', 'moderate', 'wet']
 BUDGET_LEVELS = {100: 1.00, 85: 0.85, 70: 0.70}
 CROP_FULL_BUDGET_MM = {'rice': 484.0}
 
-# Three seeds for the headline comparison. Reduce to 2 if Kaggle quota is
-# tight, or extend to 5 if running across multiple weeks.
-SEEDS = [0, 1, 2]
+# 5 seeds for statistical robustness (conference-paper standard).
+# Run each seed in a separate Kaggle GPU notebook simultaneously.
+SEEDS = [0, 1, 2, 3, 4]
 
-DEM_PATH = PROJECT_ROOT / 'gilan_farm.tif'
-RL_OUTPUT_DIR = PROJECT_ROOT / 'results' / 'rl'
+DEM_PATH       = PROJECT_ROOT / 'gilan_farm.tif'
+RL_OUTPUT_DIR  = PROJECT_ROOT / 'results' / 'rl'
 RUNS_OUTPUT_DIR = PROJECT_ROOT / 'results' / 'runs'
 
 
 def run_training(args):
-    """Train SAC agent(s)."""
+    """Train one general SAC policy (year+budget randomized per episode)."""
     from src.rl.train import train_sac
 
     seeds = SEEDS if args.seed == 'all' else [int(args.seed)]
 
     for seed in seeds:
         print(f"\n{'='*60}")
-        print(f"Training: {args.scenario}/{args.budget}% seed={seed}")
+        print(f"Training: general policy  seed={seed}")
         print(f"{'='*60}\n")
 
+        # NOTE: scenario and budget are NOT passed — the env samples them
+        # randomly each episode from TRAINING_YEARS and U(70%, 100%).
         train_sac(
-            scenario=args.scenario,
-            budget_pct=int(args.budget),
             total_timesteps=args.timesteps,
             seed=seed,
             output_dir=str(RL_OUTPUT_DIR),
@@ -76,7 +75,7 @@ def run_training(args):
 
 
 def run_evaluation(args):
-    """Evaluate a trained model across the (scenario × budget) grid."""
+    """Evaluate a trained model on the 9 held-out (scenario x budget) cells."""
     from src.rl.runner import RLController
     from src.runner import run_season
     from climate_data import load_cleaned_data, extract_scenario_by_name
@@ -88,13 +87,20 @@ def run_evaluation(args):
     if not model_path.exists():
         raise SystemExit(f"Model not found: {model_path}")
 
-    crop = get_crop('rice')
+    crop    = get_crop('rice')
     terrain = load_terrain(str(DEM_PATH))
-    df_climate = load_cleaned_data()
+    df_climate  = load_cleaned_data()
     full_need_mm = CROP_FULL_BUDGET_MM['rice']
 
-    scenarios = SCENARIOS_ALL if args.scenario == 'all' else [args.scenario]
+    scenarios   = SCENARIOS_ALL if args.scenario == 'all' else [args.scenario]
     budget_pcts = list(BUDGET_LEVELS.keys()) if args.budget == 'all' else [int(args.budget)]
+
+    # Extract seed from model path
+    seed_str = '0'
+    for part in model_path.parts:
+        if 'seed' in part:
+            seed_str = part.split('seed')[-1].split('_')[0]
+            break
 
     for scenario in scenarios:
         climate = extract_scenario_by_name(df_climate, scenario, crop)
@@ -102,13 +108,6 @@ def run_evaluation(args):
 
         for budget_pct in budget_pcts:
             budget_total = full_need_mm * BUDGET_LEVELS[budget_pct]
-
-            # Extract seed from model path or use 0
-            seed_str = '0'
-            for part in model_path.parts:
-                if 'seed' in part:
-                    seed_str = part.split('seed')[-1].split('_')[0]
-                    break
 
             output_filename = (
                 f"sac_{'det' if args.deterministic else 'stoch'}"
@@ -139,27 +138,28 @@ def run_evaluation(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Train or evaluate SAC irrigation agent.')
+    parser = argparse.ArgumentParser(
+        description='Train or evaluate SAC irrigation agent.'
+    )
     parser.add_argument('--mode', choices=['train', 'eval'], required=True)
-    parser.add_argument('--scenario', choices=SCENARIOS_ALL + ['all'], default='dry')
-    parser.add_argument('--budget', choices=[str(b) for b in BUDGET_LEVELS] + ['all'], default='100')
+    parser.add_argument('--scenario',
+                        choices=SCENARIOS_ALL + ['all'], default='all',
+                        help='Eval scenario (eval mode only). Ignored during training.')
+    parser.add_argument('--budget',
+                        choices=[str(b) for b in BUDGET_LEVELS] + ['all'],
+                        default='all',
+                        help='Budget level (eval mode only). Ignored during training.')
     parser.add_argument('--seed', default='0',
-                        help="Seed (int) or 'all' for SEEDS=[0,1,2].")
-    parser.add_argument('--timesteps', type=int, default=500_000,
-                        help='Total training timesteps. Default 500k. '
-                             'Use 10_000 for a local CPU dry-run.')
-    parser.add_argument('--checkpoint-freq', type=int, default=10_000)
-    parser.add_argument('--eval-freq', type=int, default=10_000)
+                        help="Seed (int) or 'all' for SEEDS=[0,1,2,3,4].")
+    parser.add_argument('--timesteps', type=int, default=500_000)
+    parser.add_argument('--checkpoint-freq', type=int, default=50_000)
+    parser.add_argument('--eval-freq',       type=int, default=25_000)
     parser.add_argument('--resume', default=None,
-                        help='Path to .zip checkpoint to resume from. The '
-                             'matching <name>_replay_buffer.pkl is loaded '
-                             'automatically if present.')
+                        help='Path to .zip checkpoint to resume from.')
     parser.add_argument('--model', default=None,
-                        help='Path to trained model .zip (for eval mode).')
-    parser.add_argument('--deterministic', action='store_true', default=True,
-                        help='Use deterministic actions in eval. Default True.')
-    parser.add_argument('--stochastic', action='store_true',
-                        help='Use stochastic actions in eval.')
+                        help='Path to trained model .zip (eval mode).')
+    parser.add_argument('--deterministic', action='store_true', default=True)
+    parser.add_argument('--stochastic', action='store_true')
     parser.add_argument('--force', action='store_true')
     args = parser.parse_args()
 
