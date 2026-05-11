@@ -17,29 +17,36 @@
 #   -130 clearly worse; -65 vs -32 within noise. -65 chosen per Haarnoja
 #   et al. 2019 and cited as standard heuristic in the thesis.
 #
-#   buffer_size = 200k: at obs_dim=707, 200k transitions ~= 1.2 GB RAM.
+#   buffer_size = 500k (v2.4.1, was 200k). At 2M total steps the buffer
+#   cycles ~4× which is reasonable churn for off-policy SAC. Memory cost:
+#   ~3.1 GB RAM and ~3.1 GB disk (single saved buffer file).
+#
 #   gradient_steps = 1: measured on Kaggle T4 that gs=2 halves throughput
 #   (37 vs 68 steps/sec) without guaranteed convergence benefit for plain
 #   SAC without REDQ-style critic ensembles.
 #
 # v2.4 changes (post-500k pilot diagnosis):
-#   - LAMBDA_BUDGET reduced 5.0 → 0.1 in gym_env.py (see that file's
-#     docstring for the empirical justification).
-#   - Per-year precomputed quantities in gym_env.py — eliminates the v2.3
-#     Markov leak where every training year used the dry-year precomputed.
-#   - Eval env now samples from DEV_YEARS (3 stratified years) rather than
-#     TRAINING_YEARS (20 years). With n_eval_episodes=9 (3× the year pool),
-#     each dev year is hit ~3 times per eval, reducing the best_model
-#     selection noise that destroyed the v2.3 500k-step run.
+#   - LAMBDA_BUDGET reduced 5.0 → 0.1 in gym_env.py.
+#   - Per-year precomputed quantities in gym_env.py (no Markov leak).
+#   - Eval env samples from DEV_YEARS, n_eval_episodes=9.
 #
-# Kaggle GPU T4: measured 68 steps/sec; 500k steps ~= 2 hrs/seed.
-# Plan budget for 1M steps (~4 hrs/seed) given v2.3 pilot showed eval
-# reward peaked at 75k and then diverged — the fixes should remove the
-# divergence, but expect a longer slow-and-steady plateau.
-# Checkpoint every 50k steps (20 total at 1M); save_replay_buffer=True
-# required to allow safe resumption.
+# v2.4.1 changes (disk-quota fix):
+#   - Custom RotatingReplayBufferCheckpoint replaces SB3's CheckpointCallback.
+#     Keeps only the LATEST replay buffer on disk (overwrites previous before
+#     saving new). Reason: at buffer_size=500k, obs_dim=707, each saved buffer
+#     is ~3.1 GB. SB3's CheckpointCallback saves all snapshots, which over
+#     40 checkpoints (2M / 50k) would consume ~124 GB — Kaggle's
+#     /kaggle/working hard limit is 20 GB. The v2.4 run crashed at
+#     checkpoint #15 with OSError [Errno 28] No space left on device.
+#     With rotation, total disk footprint stays at ~3.1 GB regardless of
+#     run length, while still allowing resume-from-latest. Model weights
+#     (~5 MB each) are still saved at every checkpoint for the learning-
+#     curve story.
+#
+# Kaggle GPU T4: measured 68 steps/sec; 2M steps ≈ 8 hrs/seed.
 # =============================================================================
 
+import os
 import re
 import json
 import time
@@ -59,7 +66,7 @@ from climate_data import DEV_YEARS
 DEFAULT_HP = {
     'learning_rate':    3e-4,
     'batch_size':       256,
-    'buffer_size':      200_000,
+    'buffer_size':      500_000,   # v2.4.1: raised from 200k for 2M-step runs
     'gamma':            0.99,
     'tau':              0.005,
     'ent_coef':         'auto',
@@ -73,8 +80,44 @@ ACTOR_HIDDEN  = (128, 128)
 CRITIC_HIDDEN = (256, 256)
 
 
+# ── Custom checkpoint callback ────────────────────────────────────────────────
+#
+# SB3's CheckpointCallback saves a replay buffer at every save_freq step
+# and never deletes the old ones. With buffer_size=500k and obs_dim=707,
+# each saved buffer is ~3.1 GB. Over a 2M-step run at save_freq=50k
+# (40 checkpoints), this would consume ~124 GB — Kaggle's 20 GB quota
+# rejects this with [Errno 28] No space left on device.
+#
+# This subclass overrides the replay-buffer save path to always use a
+# single fixed filename, so each new save overwrites the previous. Model
+# weights are still saved at every checkpoint (small, ~5 MB each).
+#
+# Resume semantics unchanged: the latest replay buffer is always available
+# at <save_path>/replay_buffer_latest.pkl alongside the numbered model
+# checkpoints.
+
+class RotatingReplayBufferCheckpoint(CheckpointCallback):
+    """CheckpointCallback that keeps only the latest replay buffer on disk.
+
+    Models are still saved at every save_freq step (numbered, for the
+    learning curve). The replay buffer is overwritten at a single fixed
+    path so disk usage stays bounded regardless of run length.
+    """
+
+    LATEST_BUFFER_NAME = 'replay_buffer_latest.pkl'
+
+    def _checkpoint_path(self, checkpoint_type='', extension=''):
+        """Return numbered path for models, fixed path for replay_buffer_."""
+        # SB3 calls this with checkpoint_type='replay_buffer_' for the buffer
+        # and '' (empty) for the model. We only intercept the buffer call.
+        if checkpoint_type == 'replay_buffer_':
+            return os.path.join(self.save_path, self.LATEST_BUFFER_NAME)
+        # Fall through to default behavior for models, vecnormalize, etc.
+        return super()._checkpoint_path(checkpoint_type, extension=extension)
+
+
 def train_sac(
-    total_timesteps=500_000,
+    total_timesteps=2_000_000,
     seed=0,
     output_dir='results/rl',
     dem_path='gilan_farm.tif',
@@ -90,21 +133,23 @@ def train_sac(
     Parameters
     ----------
     total_timesteps : int
-        Total env steps. v2.3 used 500k (~2 hrs T4) but diverged; v2.4 plan
-        is 1M (~4 hrs T4) with the fixes.
+        Total env steps. Default 2M (~8 hrs on Kaggle T4).
     seed : int
     output_dir : str
     dem_path : str
     checkpoint_freq : int
-        Default 50k.
+        Default 50k. Model weights saved at every interval; replay buffer
+        rotated (one file overwritten in place — see
+        RotatingReplayBufferCheckpoint above).
     eval_freq : int
         EvalCallback frequency. Default 25k.
     n_eval_episodes : int
-        Episodes per EvalCallback invocation. Default 9 = 3 × |DEV_YEARS|
-        so each dev year is sampled ~3 times per eval, reducing
-        best_model selection variance.
+        Default 9 = 3 × |DEV_YEARS|.
     resume_path : str or None
-        Path to checkpoint .zip to resume from.
+        Path to checkpoint .zip to resume from. Replay buffer will be
+        loaded from <same_dir>/replay_buffer_latest.pkl. If that file
+        doesn't exist (e.g. resuming from an old run), tries the
+        legacy SB3 naming.
     hp_overrides : dict or None
     verbose : int
 
@@ -124,17 +169,11 @@ def train_sac(
     hp = {**DEFAULT_HP, **(hp_overrides or {})}
 
     # ── Environments ──────────────────────────────────────────────────────
-    # Training env: fixed_scenario=None, fixed_budget_pct=None. The env
-    # samples a year from TRAINING_YEARS (20 years) and a budget from
-    # U(70%,100%) at each reset().
     train_env = Monitor(
         IrrigationEnv(dem_path=dem_path, seed=seed),
         filename=str(log_dir / 'train'),
     )
 
-    # Eval env: samples from DEV_YEARS (3 years, stratified) for
-    # best_model selection. Test scenarios (dry/moderate/wet) are NEVER
-    # used here — they are reserved for post-training final evaluation.
     eval_env = Monitor(
         IrrigationEnv(
             dem_path=dem_path,
@@ -163,13 +202,19 @@ def train_sac(
         )
         model.set_env(train_env)
 
-        # SB3 CheckpointCallback saves: {name_prefix}_replay_buffer_{n}_steps.pkl
-        _m = re.match(r'^(.+)_(\d+)_steps$', Path(resume_path).stem)
-        if _m is not None:
-            rb_full = (Path(resume_path).parent /
-                       f'{_m.group(1)}_replay_buffer_{_m.group(2)}_steps.pkl')
+        # Try the v2.4.1 rotating-buffer name first.
+        resume_dir = Path(resume_path).parent
+        rotating_rb = resume_dir / RotatingReplayBufferCheckpoint.LATEST_BUFFER_NAME
+        if rotating_rb.exists():
+            rb_full = rotating_rb
         else:
-            rb_full = Path(str(resume_path).replace('.zip', '_replay_buffer.pkl'))
+            # Fall back to legacy SB3 naming for compatibility with old runs.
+            _m = re.match(r'^(.+)_(\d+)_steps$', Path(resume_path).stem)
+            if _m is not None:
+                rb_full = (resume_dir /
+                           f'{_m.group(1)}_replay_buffer_{_m.group(2)}_steps.pkl')
+            else:
+                rb_full = Path(str(resume_path).replace('.zip', '_replay_buffer.pkl'))
 
         if rb_full.exists():
             if verbose:
@@ -177,7 +222,8 @@ def train_sac(
             model.load_replay_buffer(str(rb_full))
         else:
             print(
-                f"WARNING: No replay buffer at {rb_full}. "
+                f"WARNING: No replay buffer found "
+                f"(tried {rotating_rb} and legacy paths). "
                 f"Resuming with empty buffer causes catastrophic forgetting. "
                 f"Consider restarting from scratch."
             )
@@ -203,7 +249,8 @@ def train_sac(
         )
 
     # ── Callbacks ─────────────────────────────────────────────────────────
-    checkpoint_callback = CheckpointCallback(
+    # Rotating checkpoint: numbered model files + single overwritten buffer.
+    checkpoint_callback = RotatingReplayBufferCheckpoint(
         save_freq=checkpoint_freq,
         save_path=str(checkpoint_dir),
         name_prefix=run_name,
@@ -238,15 +285,18 @@ def train_sac(
         'obs_dim': train_env.observation_space.shape[0],
         'action_dim': train_env.action_space.shape[0],
         'N_agents': train_env.unwrapped.N,
-        'training_pool_size': len(train_env.unwrapped._df['YEAR'].unique()) if False else 20,
+        'training_pool_size': 20,
         'dev_years': list(DEV_YEARS),
         'eval_test_years_held_out': [2018, 2022, 2024],
         'n_eval_episodes': n_eval_episodes,
         'checkpoint_freq': checkpoint_freq,
         'eval_freq': eval_freq,
         'resumed_from': resume_path,
-        'lambda_budget_note': 'v2.4: reduced 5.0 -> 0.1 (see gym_env.py)',
+        'lambda_budget_note': 'v2.4: reduced 5.0 -> 0.1',
         'precomputed_note': 'v2.4: per-year on-the-fly (no Markov leak)',
+        'buffer_checkpoint_note': 'v2.4.1: rotating buffer (single file, '
+                                  'overwritten each checkpoint) to fit '
+                                  'Kaggle 20 GB disk quota',
     }
     with open(run_dir / 'config.json', 'w', encoding='utf-8') as f:
         json.dump(config, f, indent=2)
@@ -262,6 +312,7 @@ def train_sac(
         print(f"  Training years:   20 (TRAINING_YEARS) x U(70-100%) budget")
         print(f"  Dev years (eval): {DEV_YEARS}")
         print(f"  n_eval_episodes:  {n_eval_episodes}")
+        print(f"  Buffer size:      {hp['buffer_size']:,}")
         print(f"  Output:           {run_dir}")
         print()
 
@@ -275,21 +326,27 @@ def train_sac(
     train_time = time.time() - t0
 
     # ── Save final model ──────────────────────────────────────────────────
+    # The replay buffer is also saved here. To save disk, we overwrite the
+    # same rotating file used by the checkpoint callback instead of writing
+    # a separate <final_model>_replay_buffer.pkl.
     final_path = run_dir / f'{run_name}_final'
     model.save(str(final_path))
-    model.save_replay_buffer(str(final_path) + '_replay_buffer.pkl')
+    final_rb_path = checkpoint_dir / RotatingReplayBufferCheckpoint.LATEST_BUFFER_NAME
+    model.save_replay_buffer(str(final_rb_path))
 
     summary = {
         'run_name': run_name,
         'train_time_seconds': train_time,
         'total_timesteps': total_timesteps,
         'final_model_path': str(final_path.with_suffix('.zip')),
+        'final_replay_buffer_path': str(final_rb_path),
     }
     with open(run_dir / 'train_summary.json', 'w', encoding='utf-8') as f:
         json.dump(summary, f, indent=2)
 
     if verbose:
         print(f"\nTraining complete in {train_time:.0f}s")
-        print(f"Final model: {final_path}.zip")
+        print(f"Final model:  {final_path}.zip")
+        print(f"Final buffer: {final_rb_path}")
 
     return model
