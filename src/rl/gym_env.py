@@ -22,16 +22,36 @@
 #
 # Training design (Chapter 4):
 #   Training mode (fixed_scenario=None): each reset() samples a year
-#   uniformly from TRAINING_YEARS (23 years, 2000-2025 minus eval years)
-#   and a budget uniformly from U(70%, 100%).
-#   Eval mode (fixed_scenario set): fixed year and budget.
+#   uniformly from TRAINING_YEARS (20 years) and a budget uniformly
+#   from U(70%, 100%).
+#   Eval mode (fixed_scenario set): fixed scenario (named test year or
+#   any year integer if passed as fixed_year) and fixed budget.
 #
-# Note on precomputed quantities during training:
-#   h2 (heat stress), h7 (cold stress), and g_base depend primarily on
-#   temperature. Since all 23 training years span a narrow range
-#   (mean temperature 25-28°C in Gilan rice season), the precomputed
-#   'dry' scenario (2022) is used as an approximation for all training
-#   years. This is a deliberate simplification documented in the thesis.
+# Precomputed quantities per training year (v2.4):
+#   h2, h7, g_base, Kc_ET are computed on-the-fly from each sampled
+#   year's temperature/ET data (compute_precomputed_from_climate). Cached
+#   in self._precomputed_by_year so each year's computation runs at most
+#   once across the lifetime of the env. Eliminates the prior Markov leak
+#   where every training year used the dry-year (2022) precomputed.
+#
+# Reward (approximate negation of MPC path cost):
+#   r(t) = +alpha1 * Δx4_mean / x4_ref           (biomass progress)
+#        - alpha2 * Σu / W_daily_ref              (water cost)
+#        - alpha3 * mean(max(ST-x1, 0)) / (ST-WP) (drought)
+#        - alpha5 * ||u-u_prev||² / (UB² · N)     (delta-u)
+#        - alpha6 * mean([max(x1-FC, 0)/FC]²)     (FC overshoot)
+#        - λ_budget * max(burn_rate-1, 0)²        (budget soft penalty)
+#   Terminal: + TERMINAL_BONUS_MULT * alpha1 * final_x4_mean / x4_ref
+#             (paid on BOTH truncated=True and terminated=True)
+#
+# v2.4 reward tuning: LAMBDA_BUDGET reduced from 5.0 to 0.1 based on
+#   reward-magnitude analysis. At the previous value, the burn-rate soft
+#   penalty was ~100× the sum of all agronomic terms on any step where
+#   burn_rate > 1, dominating the gradient and causing training divergence
+#   (observed in the 500k-step pilot: eval reward degraded from -3.0 at
+#   step 75k to -9.7 at step 500k with multiple instability spikes).
+#   The hard budget clip in step() still guarantees constraint feasibility
+#   independently of this soft term.
 # =============================================================================
 
 import gymnasium as gym
@@ -40,7 +60,7 @@ from gymnasium import spaces
 
 from abm import CropSoilABM
 from src.terrain import load_terrain
-from src.precompute import get_precomputed
+from src.precompute import get_precomputed, compute_precomputed_from_climate
 from soil_data import get_crop
 from climate_data import (
     load_cleaned_data, extract_scenario, extract_scenario_by_name,
@@ -61,7 +81,16 @@ ALPHA3 = 0.1
 ALPHA4 = 0.0      # inactive
 ALPHA5 = 0.005
 ALPHA6 = 8.0
-LAMBDA_BUDGET = 5.0
+
+# Budget soft-penalty coefficient.
+# Was 5.0 in v2.3 — produced reward terms ~100× larger than agronomic
+# components, dominating the gradient and causing training to diverge in
+# the 500k-step pilot. Reduced to 0.1 so the soft penalty is on the same
+# order of magnitude as the other reward terms while still providing a
+# smooth gradient near the budget boundary. The hard u.mean() <=
+# budget_remaining clip in step() enforces the constraint absolutely.
+LAMBDA_BUDGET = 0.1
+
 TERMINAL_BONUS_MULT = 5.0
 
 
@@ -71,15 +100,25 @@ class IrrigationEnv(gym.Env):
     Parameters
     ----------
     fixed_scenario : str or None
-        Named eval scenario ('dry', 'moderate', 'wet'). If None, a random
+        Named test scenario ('dry', 'moderate', 'wet'). If None, a random
         year from TRAINING_YEARS is used each episode (training mode).
     fixed_budget_pct : float or None
         Budget percentage (70-100). If None, sampled from U(70,100) each
         episode (training mode).
+    fixed_year : int or None
+        Integer year for episodes that are not a named scenario. Useful
+        for evaluating on a specific dev year. Mutually exclusive with
+        fixed_scenario (named scenarios already resolve to a year via
+        SCENARIO_YEARS).
+    year_pool : tuple/list of int or None
+        If set (and fixed_scenario/fixed_year are None), sample from this
+        pool of years at each reset(). Used by EvalCallback to evaluate
+        on a deterministic set of dev years rather than the full training
+        pool. Default None (= sample from TRAINING_YEARS).
     randomize : bool
-        Convenience alias: if True, forces fixed_scenario=None and
-        fixed_budget_pct=None regardless of other args. Useful for
-        explicitly marking training envs in code that reads them.
+        Convenience alias: if True, forces fixed_scenario=None,
+        fixed_budget_pct=None, fixed_year=None regardless of other args.
+        Useful for explicitly marking training envs in code that reads them.
     crop_name : str
     dem_path : str
     forecast_horizon : int
@@ -97,6 +136,8 @@ class IrrigationEnv(gym.Env):
         self,
         fixed_scenario=None,
         fixed_budget_pct=None,
+        fixed_year=None,
+        year_pool=None,
         randomize=False,
         crop_name='rice',
         dem_path='gilan_farm.tif',
@@ -108,7 +149,7 @@ class IrrigationEnv(gym.Env):
     ):
         super().__init__()
 
-        # Handle legacy aliases
+        # Legacy aliases
         if scenario is not None and fixed_scenario is None:
             fixed_scenario = scenario
         if budget_pct is not None and fixed_budget_pct is None:
@@ -118,9 +159,19 @@ class IrrigationEnv(gym.Env):
         if randomize:
             fixed_scenario = None
             fixed_budget_pct = None
+            fixed_year = None
+
+        if fixed_scenario is not None and fixed_year is not None:
+            raise ValueError(
+                "fixed_scenario and fixed_year are mutually exclusive. "
+                "Use fixed_scenario for named test scenarios (dry/moderate/wet) "
+                "and fixed_year for arbitrary integer years (e.g. dev years)."
+            )
 
         self.fixed_scenario = fixed_scenario
         self.fixed_budget_pct = fixed_budget_pct
+        self.fixed_year = fixed_year
+        self.year_pool = tuple(year_pool) if year_pool is not None else None
         self.crop_name = crop_name
         self.dem_path = dem_path
         self.forecast_horizon = forecast_horizon
@@ -138,9 +189,11 @@ class IrrigationEnv(gym.Env):
 
         self._df = load_cleaned_data()
 
-        # Pre-load the 'dry' precomputed for use as training-year approximation.
-        # See module docstring note on the simplification.
-        self._precomputed_dry = get_precomputed('dry', crop_name)
+        # Per-year precomputed cache. Populated lazily on first reset that
+        # needs each year. Eliminates the v2.3 Markov leak (all training
+        # years used the dry-year precomputed). Memory cost: ~few KB per
+        # year × 20 training years + 3 dev years = negligible.
+        self._precomputed_by_year = {}
 
         # obs_dim: 5*N per-agent + 9 scalars + 6*H forecast
         obs_dim = 5 * self.N + 9 + 6 * self.forecast_horizon
@@ -168,8 +221,18 @@ class IrrigationEnv(gym.Env):
         self.water_used = 0.0
         self.u_prev = None
         self.x4_prev_mean = 0.0
+        self._current_year = None   # for debugging / introspection
 
         self._np_random = np.random.default_rng(seed)
+
+    def _get_precomputed_for_year(self, year):
+        """Return cached precomputed for an integer year, computing if needed."""
+        if year not in self._precomputed_by_year:
+            climate = extract_scenario(self._df, year, self.crop)
+            self._precomputed_by_year[year] = compute_precomputed_from_climate(
+                climate, self.crop_name, scenario_tag=f"year_{year}"
+            )
+        return self._precomputed_by_year[year]
 
     def reset(self, *, seed=None, options=None):
         if seed is not None:
@@ -177,20 +240,31 @@ class IrrigationEnv(gym.Env):
 
         # ── Sample year / scenario and budget ─────────────────────────────
         if self.fixed_scenario is not None:
-            # Eval mode: fixed named scenario with exact precomputed data
+            # Eval mode (named test scenario): use the cached disk precomputed
+            # for backward compatibility with the existing MPC eval pipeline.
             self.climate = extract_scenario_by_name(
                 self._df, self.fixed_scenario, self.crop
             )
             self.precomputed = get_precomputed(self.fixed_scenario, self.crop_name)
-        else:
-            # Training mode: random year from TRAINING_YEARS.
-            # Climate: exact year data (rainfall, temperature, ET).
-            # Precomputed (h2, h7, g_base, Kc_ET): use 'dry' approximation
-            # since temperature-derived quantities vary little across the 23
-            # training years (all in the dry-to-moderate range, 14-89mm).
-            year = int(self._np_random.choice(TRAINING_YEARS))
+            from climate_data import SCENARIO_YEARS
+            self._current_year = SCENARIO_YEARS[self.fixed_scenario]
+
+        elif self.fixed_year is not None:
+            # Eval mode (integer year, e.g. dev year): compute on the fly.
+            year = int(self.fixed_year)
             self.climate = extract_scenario(self._df, year, self.crop)
-            self.precomputed = self._precomputed_dry
+            self.precomputed = self._get_precomputed_for_year(year)
+            self._current_year = year
+
+        else:
+            # Training mode: random year from the active pool.
+            # Per-year precomputed (Kc_ET, h2, h7, g_base) computed from
+            # this year's temperature/ET, keeping obs and ABM consistent.
+            pool = self.year_pool if self.year_pool is not None else TRAINING_YEARS
+            year = int(self._np_random.choice(pool))
+            self.climate = extract_scenario(self._df, year, self.crop)
+            self.precomputed = self._get_precomputed_for_year(year)
+            self._current_year = year
 
         if self.fixed_budget_pct is not None:
             budget_pct = float(self.fixed_budget_pct)
@@ -228,6 +302,7 @@ class IrrigationEnv(gym.Env):
         action = np.asarray(action, dtype=float).clip(0, 1)
         u = action * UB_MM
 
+        # Hard budget clip — enforces feasibility regardless of soft penalty.
         if u.mean() > self.budget_remaining:
             scale = self.budget_remaining / max(u.mean(), 1e-12)
             u = u * scale
@@ -277,13 +352,14 @@ class IrrigationEnv(gym.Env):
         terminated = self.budget_remaining <= 0 and self.day < self.season_days
         truncated  = self.day >= self.season_days
 
-        # Terminal bonus on BOTH: prevents the pathological incentive to
-        # hoard water that arose when the bonus was truncated-only.
+        # Terminal bonus on BOTH (prevents hoard-water pathology).
         if terminated or truncated:
             reward += TERMINAL_BONUS_MULT * self.alpha1 * x4_mean / X4_REF
 
         info = {
             'day': self.day,
+            'year': self._current_year,
+            'budget_total': self.budget_total,
             'yield_kg_ha': x4_mean * self.crop.get('HI', 0.42) * 10.0,
             'water_used_mm': self.water_used,
             'budget_remaining': self.budget_remaining,
@@ -301,13 +377,12 @@ class IrrigationEnv(gym.Env):
         x3      = self.abm.x3
         elev    = self.elev_norm
 
-        day_frac         = self.day / self.season_days
-        budget_frac      = self.budget_remaining / max(self.budget_total, 1e-6)
+        day_frac          = self.day / self.season_days
+        budget_frac       = self.budget_remaining / max(self.budget_total, 1e-6)
         budget_total_norm = self.budget_total / FULL_SEASON_NEED_MM  # in [0.7, 1.0]
 
         # burn_rate in obs: water used per day elapsed / daily budget.
         # At day=0 before first step, returns 0.
-        # Uses self.day (already incremented after step) as denominator.
         daily_budget = self.budget_total / self.season_days
         burn_rate = (
             self.water_used / max(self.day, 1) / max(daily_budget, 1e-6)
@@ -322,7 +397,6 @@ class IrrigationEnv(gym.Env):
         g_base_today = float(self.precomputed.g_base[d])
 
         # Scalar order — MUST match runner._build_obs exactly.
-        # Any change here requires the same change in runner.py.
         scalars = np.array([
             day_frac,          # [0]
             budget_frac,       # [1]

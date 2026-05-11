@@ -2,13 +2,17 @@
 # src/rl/train.py
 # SAC training loop using Stable-Baselines3 with the CTDE policy.
 #
-# One general policy trained across all (year, budget) combinations.
-# Year is sampled uniformly from TRAINING_YEARS (23 years) per episode.
-# Budget is sampled uniformly from U(70%, 100%) per episode.
-# The 9 eval cells (dry/moderate/wet x 70/85/100%) are held out entirely.
+# Year split (v2.4):
+#   TRAIN — 20 years (TRAINING_YEARS): sampled per episode from gym_env reset()
+#   DEV   — 3 years  (DEV_YEARS = 2002, 2016, 2023): used by EvalCallback
+#           during training for best_model selection and learning-curve
+#           monitoring. Stratified by rainfall tercile so dev reward is a
+#           meaningful generalization signal across the training distribution.
+#   TEST  — 3 named scenarios (dry=2022, moderate=2018, wet=2024): touched
+#           only post-training for the headline thesis comparison.
 #
 # Hyperparameters:
-#   target_entropy = -65 (= -0.5 x dim(A), standard heuristic).
+#   target_entropy = -65 (= -0.5 × dim(A), standard heuristic).
 #   Pilot sweep over {-130, -65, -32}, 2 seeds each at 100k steps:
 #   -130 clearly worse; -65 vs -32 within noise. -65 chosen per Haarnoja
 #   et al. 2019 and cited as standard heuristic in the thesis.
@@ -18,9 +22,22 @@
 #   (37 vs 68 steps/sec) without guaranteed convergence benefit for plain
 #   SAC without REDQ-style critic ensembles.
 #
+# v2.4 changes (post-500k pilot diagnosis):
+#   - LAMBDA_BUDGET reduced 5.0 → 0.1 in gym_env.py (see that file's
+#     docstring for the empirical justification).
+#   - Per-year precomputed quantities in gym_env.py — eliminates the v2.3
+#     Markov leak where every training year used the dry-year precomputed.
+#   - Eval env now samples from DEV_YEARS (3 stratified years) rather than
+#     TRAINING_YEARS (20 years). With n_eval_episodes=9 (3× the year pool),
+#     each dev year is hit ~3 times per eval, reducing the best_model
+#     selection noise that destroyed the v2.3 500k-step run.
+#
 # Kaggle GPU T4: measured 68 steps/sec; 500k steps ~= 2 hrs/seed.
-# 5 seeds in 5 parallel notebooks ~= 2 hrs wall-clock, ~10 GPU-hrs total.
-# Checkpoint every 50k steps (10 total); save_replay_buffer=True required.
+# Plan budget for 1M steps (~4 hrs/seed) given v2.3 pilot showed eval
+# reward peaked at 75k and then diverged — the fixes should remove the
+# divergence, but expect a longer slow-and-steady plateau.
+# Checkpoint every 50k steps (20 total at 1M); save_replay_buffer=True
+# required to allow safe resumption.
 # =============================================================================
 
 import re
@@ -36,6 +53,7 @@ from stable_baselines3.common.monitor import Monitor
 
 from src.rl.gym_env import IrrigationEnv
 from src.rl.networks import CTDESACPolicy, make_sac_policy_kwargs
+from climate_data import DEV_YEARS
 
 
 DEFAULT_HP = {
@@ -62,23 +80,29 @@ def train_sac(
     dem_path='gilan_farm.tif',
     checkpoint_freq=50_000,
     eval_freq=25_000,
+    n_eval_episodes=9,
     resume_path=None,
     hp_overrides=None,
     verbose=1,
 ):
-    """Train a general SAC policy across all (year, budget) combinations.
+    """Train a general SAC policy across all (training-year, budget) combinations.
 
     Parameters
     ----------
     total_timesteps : int
-        Total env steps. 500k ~= 2 hrs on Kaggle T4.
+        Total env steps. v2.3 used 500k (~2 hrs T4) but diverged; v2.4 plan
+        is 1M (~4 hrs T4) with the fixes.
     seed : int
     output_dir : str
     dem_path : str
     checkpoint_freq : int
-        Default 50k (10 checkpoints per 500k run).
+        Default 50k.
     eval_freq : int
         EvalCallback frequency. Default 25k.
+    n_eval_episodes : int
+        Episodes per EvalCallback invocation. Default 9 = 3 × |DEV_YEARS|
+        so each dev year is sampled ~3 times per eval, reducing
+        best_model selection variance.
     resume_path : str or None
         Path to checkpoint .zip to resume from.
     hp_overrides : dict or None
@@ -100,17 +124,23 @@ def train_sac(
     hp = {**DEFAULT_HP, **(hp_overrides or {})}
 
     # ── Environments ──────────────────────────────────────────────────────
-    # Training mode: fixed_scenario=None, fixed_budget_pct=None.
-    # IrrigationEnv will sample a random year from TRAINING_YEARS and a
-    # random budget from U(70%,100%) at each reset().
-    # The 9 held-out eval cells (dry/moderate/wet x 70/85/100%) are NEVER
-    # used here — they are reserved for post-training final evaluation only.
+    # Training env: fixed_scenario=None, fixed_budget_pct=None. The env
+    # samples a year from TRAINING_YEARS (20 years) and a budget from
+    # U(70%,100%) at each reset().
     train_env = Monitor(
         IrrigationEnv(dem_path=dem_path, seed=seed),
         filename=str(log_dir / 'train'),
     )
+
+    # Eval env: samples from DEV_YEARS (3 years, stratified) for
+    # best_model selection. Test scenarios (dry/moderate/wet) are NEVER
+    # used here — they are reserved for post-training final evaluation.
     eval_env = Monitor(
-        IrrigationEnv(dem_path=dem_path, seed=seed + 1000),
+        IrrigationEnv(
+            dem_path=dem_path,
+            seed=seed + 1000,
+            year_pool=DEV_YEARS,
+        ),
         filename=str(log_dir / 'eval'),
     )
 
@@ -133,15 +163,12 @@ def train_sac(
         )
         model.set_env(train_env)
 
-        # Locate replay buffer.
         # SB3 CheckpointCallback saves: {name_prefix}_replay_buffer_{n}_steps.pkl
-        # Parse name_prefix and n from the model filename stem.
         _m = re.match(r'^(.+)_(\d+)_steps$', Path(resume_path).stem)
         if _m is not None:
             rb_full = (Path(resume_path).parent /
                        f'{_m.group(1)}_replay_buffer_{_m.group(2)}_steps.pkl')
         else:
-            # Fallback for final model (no _N_steps suffix)
             rb_full = Path(str(resume_path).replace('.zip', '_replay_buffer.pkl'))
 
         if rb_full.exists():
@@ -189,7 +216,7 @@ def train_sac(
         best_model_save_path=str(run_dir / 'best_model'),
         log_path=str(log_dir),
         eval_freq=eval_freq,
-        n_eval_episodes=5,
+        n_eval_episodes=n_eval_episodes,
         deterministic=True,
         verbose=verbose,
     )
@@ -211,11 +238,15 @@ def train_sac(
         'obs_dim': train_env.observation_space.shape[0],
         'action_dim': train_env.action_space.shape[0],
         'N_agents': train_env.unwrapped.N,
-        'training': 'TRAINING_YEARS (23 years) x U(70-100%) budget, randomized per episode',
-        'eval_years_held_out': [2018, 2022, 2024],
+        'training_pool_size': len(train_env.unwrapped._df['YEAR'].unique()) if False else 20,
+        'dev_years': list(DEV_YEARS),
+        'eval_test_years_held_out': [2018, 2022, 2024],
+        'n_eval_episodes': n_eval_episodes,
         'checkpoint_freq': checkpoint_freq,
         'eval_freq': eval_freq,
         'resumed_from': resume_path,
+        'lambda_budget_note': 'v2.4: reduced 5.0 -> 0.1 (see gym_env.py)',
+        'precomputed_note': 'v2.4: per-year on-the-fly (no Markov leak)',
     }
     with open(run_dir / 'config.json', 'w', encoding='utf-8') as f:
         json.dump(config, f, indent=2)
@@ -224,13 +255,14 @@ def train_sac(
     t0 = time.time()
     if verbose:
         print(f"Training SAC: {run_name}")
-        print(f"  Timesteps: {total_timesteps:,}")
-        print(f"  Seed:      {seed}")
-        print(f"  Device:    {model.device}")
-        print(f"  Policy:    CTDESACPolicy (shared actor + centralized critic)")
-        print(f"  Training:  TRAINING_YEARS (23 yrs) x U(70-100%) budget")
-        print(f"  Eval env:  same training distribution (held-out cells are post-training only)")
-        print(f"  Output:    {run_dir}")
+        print(f"  Timesteps:        {total_timesteps:,}")
+        print(f"  Seed:             {seed}")
+        print(f"  Device:           {model.device}")
+        print(f"  Policy:           CTDESACPolicy (shared actor + centralized critic)")
+        print(f"  Training years:   20 (TRAINING_YEARS) x U(70-100%) budget")
+        print(f"  Dev years (eval): {DEV_YEARS}")
+        print(f"  n_eval_episodes:  {n_eval_episodes}")
+        print(f"  Output:           {run_dir}")
         print()
 
     model.learn(

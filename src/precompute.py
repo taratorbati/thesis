@@ -32,6 +32,13 @@
 #     pre = get_precomputed('dry', 'rice')   # loads from cache, or computes & saves
 #     pre.h1                                 # np.ndarray, shape (n_days,)
 #     pre.x2                                 # np.ndarray, shape (n_days,)
+#
+# For arbitrary climate dicts (used by IrrigationEnv to compute precomputed
+# quantities on-the-fly for the sampled training year, avoiding the previous
+# Markov leak where all training years used the dry-year cached precomputed):
+#
+#     from src.precompute import compute_precomputed_from_climate
+#     pre = compute_precomputed_from_climate(climate_dict, 'rice')
 # =============================================================================
 
 import json
@@ -143,8 +150,63 @@ def _compute_kc_et(et0, kc):
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
+def compute_precomputed_from_climate(climate, crop_name, scenario_tag='custom'):
+    """Compute precomputed bundle from an arbitrary climate dict.
+
+    This is the year-agnostic core; takes whatever climate the caller has
+    in hand and produces the matching precomputed quantities. Used by
+    IrrigationEnv during training to keep precomputed in sync with the
+    sampled training year's climate.
+
+    Parameters
+    ----------
+    climate : dict
+        Must contain keys 'temp_mean', 'temp_max', 'ET' (each at least
+        crop['season_days'] long).
+    crop_name : str
+        'rice' or 'tobacco'.
+    scenario_tag : str
+        Label stored in the returned Precomputed.scenario field. Default
+        'custom'. For named-scenario callers, pass the scenario name.
+
+    Returns
+    -------
+    Precomputed
+    """
+    crop = get_crop(crop_name)
+    n_days = crop['season_days']
+
+    if len(climate['temp_mean']) < n_days:
+        raise ValueError(
+            f"Climate data has {len(climate['temp_mean'])} days but crop "
+            f"{crop_name!r} expects {n_days}."
+        )
+
+    temp_mean = np.asarray(climate['temp_mean'][:n_days], dtype=float)
+    temp_max  = np.asarray(climate['temp_max'][:n_days],  dtype=float)
+    et0       = np.asarray(climate['ET'][:n_days],        dtype=float)
+
+    h1 = _compute_h1(temp_mean, crop['theta7'])
+    x2 = _compute_x2(h1, crop.get('x2_init', 0.0))
+    h2 = _compute_h2(temp_max, crop['theta9'], crop['theta10'])
+    h7 = _compute_h7(temp_mean, crop['theta7'])
+    g_base = _compute_g_baseline(x2, crop['theta18'], crop['theta19'], crop['theta20'])
+    Kc_ET = _compute_kc_et(et0, crop.get('Kc', 1.0))
+
+    return Precomputed(
+        scenario=scenario_tag,
+        crop_name=crop_name,
+        n_days=n_days,
+        h1=h1, x2=x2, h2=h2, h7=h7,
+        g_base=g_base, Kc_ET=Kc_ET,
+    )
+
+
 def compute_precomputed(scenario, crop_name, df=None):
     """Compute the precomputed bundle for (scenario, crop). Does NOT cache.
+
+    Thin wrapper that resolves a named scenario to a climate dict and
+    delegates to compute_precomputed_from_climate.
 
     Parameters
     ----------
@@ -163,33 +225,7 @@ def compute_precomputed(scenario, crop_name, df=None):
     if df is None:
         df = load_cleaned_data()
     climate = extract_scenario_by_name(df, scenario, crop)
-
-    n_days = crop['season_days']
-    if len(climate['temp_mean']) < n_days:
-        raise ValueError(
-            f"Climate data has {len(climate['temp_mean'])} days but crop "
-            f"{crop_name!r} expects {n_days}."
-        )
-
-    # Truncate to season length (defensive)
-    temp_mean = np.asarray(climate['temp_mean'][:n_days], dtype=float)
-    temp_max  = np.asarray(climate['temp_max'][:n_days],  dtype=float)
-    et0       = np.asarray(climate['ET'][:n_days],        dtype=float)
-
-    h1 = _compute_h1(temp_mean, crop['theta7'])
-    x2 = _compute_x2(h1, crop.get('x2_init', 0.0))
-    h2 = _compute_h2(temp_max, crop['theta9'], crop['theta10'])
-    h7 = _compute_h7(temp_mean, crop['theta7'])
-    g_base = _compute_g_baseline(x2, crop['theta18'], crop['theta19'], crop['theta20'])
-    Kc_ET = _compute_kc_et(et0, crop.get('Kc', 1.0))
-
-    return Precomputed(
-        scenario=scenario,
-        crop_name=crop_name,
-        n_days=n_days,
-        h1=h1, x2=x2, h2=h2, h7=h7,
-        g_base=g_base, Kc_ET=Kc_ET,
-    )
+    return compute_precomputed_from_climate(climate, crop_name, scenario_tag=scenario)
 
 
 def cache_path(scenario, crop_name, cache_dir=DEFAULT_CACHE_DIR):
