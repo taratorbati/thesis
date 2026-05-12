@@ -12,10 +12,20 @@
 #           only post-training for the headline thesis comparison.
 #
 # Hyperparameters:
-#   target_entropy = -65 (= -0.5 × dim(A), standard heuristic).
-#   Pilot sweep over {-130, -65, -32}, 2 seeds each at 100k steps:
-#   -130 clearly worse; -65 vs -32 within noise. -65 chosen per Haarnoja
-#   et al. 2019 and cited as standard heuristic in the thesis.
+#   target_entropy = -13 (= -0.1 × dim(A)).
+#
+#   v2.4.2 change (post-20k pilot diagnosis): reduced from -65 (= -0.5 × dim)
+#   to -13 (= -0.1 × dim). The v2.4.1 pilot showed catastrophic entropy
+#   collapse: ent_coef plummeted from 0.172 to 0.0037 in 14k steps, killing
+#   exploration. Root cause: with the (correctly) reduced LAMBDA_BUDGET=0.1
+#   in v2.4, agronomic reward magnitudes are on the order 0.01-1, so the
+#   entropy-penalty term (ent_coef × entropy) dominates the SAC objective
+#   when ent_coef is anywhere near typical values. The dual optimizer for
+#   ent_coef then has a strong gradient to crush it toward zero, collapsing
+#   policy stochasticity. A more conservative target_entropy (-0.1 × dim
+#   instead of -0.5 × dim) keeps the equilibrium ent_coef higher and
+#   preserves exploration. If this still collapses (kill the run if
+#   ent_coef < 0.01 at step 20k), fall back to fixed ent_coef = 0.1.
 #
 #   buffer_size = 500k (v2.4.1, was 200k). At 2M total steps the buffer
 #   cycles ~4× which is reasonable churn for off-policy SAC. Memory cost:
@@ -31,17 +41,17 @@
 #   - Eval env samples from DEV_YEARS, n_eval_episodes=9.
 #
 # v2.4.1 changes (disk-quota fix):
-#   - Custom RotatingReplayBufferCheckpoint replaces SB3's CheckpointCallback.
-#     Keeps only the LATEST replay buffer on disk (overwrites previous before
-#     saving new). Reason: at buffer_size=500k, obs_dim=707, each saved buffer
-#     is ~3.1 GB. SB3's CheckpointCallback saves all snapshots, which over
-#     40 checkpoints (2M / 50k) would consume ~124 GB — Kaggle's
-#     /kaggle/working hard limit is 20 GB. The v2.4 run crashed at
-#     checkpoint #15 with OSError [Errno 28] No space left on device.
-#     With rotation, total disk footprint stays at ~3.1 GB regardless of
-#     run length, while still allowing resume-from-latest. Model weights
-#     (~5 MB each) are still saved at every checkpoint for the learning-
-#     curve story.
+#   - RotatingReplayBufferCheckpoint: keeps only latest buffer on disk so
+#     a 2M-step run fits Kaggle's 20 GB /kaggle/working quota.
+#
+# v2.4.2 changes (entropy + observability):
+#   - target_entropy = -13 (see entropy-collapse diagnosis above).
+#   - Optional WandB integration via wandb_project parameter. If wandb is
+#     installed AND WANDB_API_KEY is set (as env var, Kaggle Secret, or
+#     Colab userdata), training metrics and model checkpoints stream to
+#     the cloud in real time. If wandb is missing or unconfigured, training
+#     proceeds with local-only logging and prints a warning. The smoke test
+#     does not require wandb.
 #
 # Kaggle GPU T4: measured 68 steps/sec; 2M steps ≈ 8 hrs/seed.
 # =============================================================================
@@ -50,6 +60,7 @@ import os
 import re
 import json
 import time
+import warnings
 from pathlib import Path
 
 from stable_baselines3 import SAC
@@ -73,7 +84,7 @@ DEFAULT_HP = {
     'learning_starts':  1000,
     'train_freq':       1,
     'gradient_steps':   1,
-    'target_entropy':   -65,
+    'target_entropy':   -13,       # v2.4.2: was -65; see header docstring
 }
 
 ACTOR_HIDDEN  = (128, 128)
@@ -116,6 +127,110 @@ class RotatingReplayBufferCheckpoint(CheckpointCallback):
         return super()._checkpoint_path(checkpoint_type, extension=extension)
 
 
+# ── WandB integration (optional) ──────────────────────────────────────────────
+#
+# WandB is loaded lazily and only if requested. If wandb is not installed
+# or the API key is not available, training falls back to local-only
+# logging and prints a warning. This keeps the smoke test and offline runs
+# working without a wandb account.
+#
+# API key resolution order:
+#   1. WANDB_API_KEY environment variable (set by user or by host setup)
+#   2. Kaggle Secret 'WANDB_API_KEY' (if running on Kaggle)
+#   3. Colab userdata 'WANDB_API_KEY' (if running on Colab)
+#   4. None found → return without initializing wandb
+
+def _resolve_wandb_api_key():
+    """Try to find WANDB_API_KEY in env, Kaggle secrets, or Colab userdata."""
+    if os.environ.get('WANDB_API_KEY'):
+        return 'env', os.environ['WANDB_API_KEY']
+
+    # Kaggle Secrets
+    try:
+        from kaggle_secrets import UserSecretsClient
+        try:
+            key = UserSecretsClient().get_secret('WANDB_API_KEY')
+            if key:
+                return 'kaggle_secrets', key
+        except Exception:
+            pass
+    except ImportError:
+        pass
+
+    # Colab userdata
+    try:
+        from google.colab import userdata
+        try:
+            key = userdata.get('WANDB_API_KEY')
+            if key:
+                return 'colab_userdata', key
+        except Exception:
+            pass
+    except ImportError:
+        pass
+
+    return None, None
+
+
+def _init_wandb(wandb_project, wandb_entity, run_name, config, total_timesteps,
+                log_dir, verbose=1):
+    """Initialize wandb run if possible. Returns (wandb_run, wandb_callback)
+    or (None, None) if wandb is unavailable/unconfigured."""
+
+    try:
+        import wandb
+        from wandb.integration.sb3 import WandbCallback
+    except ImportError:
+        if verbose:
+            print("⚠  wandb not installed (pip install wandb). "
+                  "Training will run with local-only logging.")
+        return None, None
+
+    source, key = _resolve_wandb_api_key()
+    if key is None:
+        if verbose:
+            print("⚠  WANDB_API_KEY not found in env, Kaggle Secrets, or "
+                  "Colab userdata. Training will run with local-only logging.")
+            print("   To enable cloud sync: set WANDB_API_KEY in your "
+                  "platform's secret manager (Kaggle Add-ons > Secrets, "
+                  "or Colab sidebar key icon).")
+        return None, None
+
+    # wandb.login() reads from the env var; set it from whichever source we found.
+    os.environ['WANDB_API_KEY'] = key
+    if verbose:
+        print(f"✓  WandB API key loaded from {source}.")
+
+    try:
+        run = wandb.init(
+            project=wandb_project,
+            entity=wandb_entity,
+            name=run_name,
+            config=config,
+            sync_tensorboard=True,
+            monitor_gym=False,
+            save_code=True,
+            dir=str(log_dir),
+            reinit=True,
+        )
+    except Exception as e:
+        warnings.warn(f"wandb.init() failed ({type(e).__name__}: {e}). "
+                      "Continuing with local-only logging.")
+        return None, None
+
+    callback = WandbCallback(
+        gradient_save_freq=0,          # disable; expensive and not useful here
+        model_save_path=str(log_dir / 'wandb_models'),
+        model_save_freq=50_000,        # match the local checkpoint cadence
+        verbose=2 if verbose else 0,
+    )
+
+    if verbose:
+        print(f"✓  WandB run initialized: {run.url}")
+
+    return run, callback
+
+
 def train_sac(
     total_timesteps=2_000_000,
     seed=0,
@@ -126,6 +241,8 @@ def train_sac(
     n_eval_episodes=9,
     resume_path=None,
     hp_overrides=None,
+    wandb_project=None,
+    wandb_entity=None,
     verbose=1,
 ):
     """Train a general SAC policy across all (training-year, budget) combinations.
@@ -148,9 +265,16 @@ def train_sac(
     resume_path : str or None
         Path to checkpoint .zip to resume from. Replay buffer will be
         loaded from <same_dir>/replay_buffer_latest.pkl. If that file
-        doesn't exist (e.g. resuming from an old run), tries the
-        legacy SB3 naming.
+        doesn't exist (e.g. resuming from an old run), tries the legacy
+        SB3 naming.
     hp_overrides : dict or None
+    wandb_project : str or None
+        WandB project name. If None, WandB is disabled. If set (e.g.
+        'sac-irrigation-thesis'), and WANDB_API_KEY can be resolved from
+        env / Kaggle Secrets / Colab userdata, metrics and model
+        checkpoints stream to the WandB dashboard in real time.
+    wandb_entity : str or None
+        WandB entity (username or team). Default None = personal account.
     verbose : int
 
     Returns
@@ -248,29 +372,7 @@ def train_sac(
             tensorboard_log=str(log_dir),
         )
 
-    # ── Callbacks ─────────────────────────────────────────────────────────
-    # Rotating checkpoint: numbered model files + single overwritten buffer.
-    checkpoint_callback = RotatingReplayBufferCheckpoint(
-        save_freq=checkpoint_freq,
-        save_path=str(checkpoint_dir),
-        name_prefix=run_name,
-        save_replay_buffer=True,
-        save_vecnormalize=False,
-    )
-
-    eval_callback = EvalCallback(
-        eval_env,
-        best_model_save_path=str(run_dir / 'best_model'),
-        log_path=str(log_dir),
-        eval_freq=eval_freq,
-        n_eval_episodes=n_eval_episodes,
-        deterministic=True,
-        verbose=verbose,
-    )
-
-    callbacks = CallbackList([checkpoint_callback, eval_callback])
-
-    # ── Save config ───────────────────────────────────────────────────────
+    # ── Build config (used by both wandb and local config.json) ──────────
     config = {
         'run_name': run_name,
         'seed': seed,
@@ -297,7 +399,53 @@ def train_sac(
         'buffer_checkpoint_note': 'v2.4.1: rotating buffer (single file, '
                                   'overwritten each checkpoint) to fit '
                                   'Kaggle 20 GB disk quota',
+        'target_entropy_note': 'v2.4.2: -13 (= -0.1 x dim); was -65 in v2.4',
     }
+
+    # ── WandB init (optional) ─────────────────────────────────────────────
+    wandb_run = None
+    wandb_callback = None
+    if wandb_project is not None:
+        wandb_run, wandb_callback = _init_wandb(
+            wandb_project=wandb_project,
+            wandb_entity=wandb_entity,
+            run_name=run_name,
+            config=config,
+            total_timesteps=total_timesteps,
+            log_dir=log_dir,
+            verbose=verbose,
+        )
+
+    # ── Callbacks ─────────────────────────────────────────────────────────
+    # Rotating checkpoint: numbered model files + single overwritten buffer.
+    checkpoint_callback = RotatingReplayBufferCheckpoint(
+        save_freq=checkpoint_freq,
+        save_path=str(checkpoint_dir),
+        name_prefix=run_name,
+        save_replay_buffer=True,
+        save_vecnormalize=False,
+    )
+
+    eval_callback = EvalCallback(
+        eval_env,
+        best_model_save_path=str(run_dir / 'best_model'),
+        log_path=str(log_dir),
+        eval_freq=eval_freq,
+        n_eval_episodes=n_eval_episodes,
+        deterministic=True,
+        verbose=verbose,
+    )
+
+    callback_list = [checkpoint_callback, eval_callback]
+    if wandb_callback is not None:
+        callback_list.append(wandb_callback)
+    callbacks = CallbackList(callback_list)
+
+    # ── Save config ───────────────────────────────────────────────────────
+    config['wandb_active'] = wandb_run is not None
+    if wandb_run is not None:
+        config['wandb_url'] = wandb_run.url
+        config['wandb_project'] = wandb_project
     with open(run_dir / 'config.json', 'w', encoding='utf-8') as f:
         json.dump(config, f, indent=2)
 
@@ -313,15 +461,25 @@ def train_sac(
         print(f"  Dev years (eval): {DEV_YEARS}")
         print(f"  n_eval_episodes:  {n_eval_episodes}")
         print(f"  Buffer size:      {hp['buffer_size']:,}")
+        print(f"  target_entropy:   {hp['target_entropy']}")
+        print(f"  WandB:            {'active (' + wandb_run.url + ')' if wandb_run else 'disabled'}")
         print(f"  Output:           {run_dir}")
         print()
 
-    model.learn(
-        total_timesteps=total_timesteps,
-        callback=callbacks,
-        log_interval=100,
-        progress_bar=True,
-    )
+    try:
+        model.learn(
+            total_timesteps=total_timesteps,
+            callback=callbacks,
+            log_interval=100,
+            progress_bar=True,
+        )
+    finally:
+        # Ensure wandb run is properly closed even if training errors out.
+        if wandb_run is not None:
+            try:
+                wandb_run.finish()
+            except Exception as e:
+                warnings.warn(f"wandb.finish() failed: {e}")
 
     train_time = time.time() - t0
 
@@ -340,6 +498,7 @@ def train_sac(
         'total_timesteps': total_timesteps,
         'final_model_path': str(final_path.with_suffix('.zip')),
         'final_replay_buffer_path': str(final_rb_path),
+        'wandb_url': wandb_run.url if wandb_run else None,
     }
     with open(run_dir / 'train_summary.json', 'w', encoding='utf-8') as f:
         json.dump(summary, f, indent=2)
@@ -348,5 +507,7 @@ def train_sac(
         print(f"\nTraining complete in {train_time:.0f}s")
         print(f"Final model:  {final_path}.zip")
         print(f"Final buffer: {final_rb_path}")
+        if wandb_run:
+            print(f"WandB run:    {wandb_run.url}")
 
     return model

@@ -1,0 +1,831 @@
+Time
+#
+Log Message
+12.0s	0	0.00s - Debugger warning: It seems that frozen modules are being used, which may
+12.0s	1	0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off
+12.0s	2	0.00s - to python to disable frozen modules.
+12.0s	3	0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.
+12.8s	4	0.00s - Debugger warning: It seems that frozen modules are being used, which may
+12.8s	5	0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off
+12.8s	6	0.00s - to python to disable frozen modules.
+12.8s	7	0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.
+22.1s	8	Cloning into '/kaggle/working/thesis'...
+22.3s	9	Cloning into '/kaggle/working/thesis'...
+22.3s	10	
+22.3s	11	Cloning into '/kaggle/working/thesis'...
+35.6s	12	ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+35.6s	13	kaggle-environments 1.27.3 requires gymnasium==1.2.0, but you have gymnasium 1.1.1 which is incompatible.
+35.6s	14	dopamine-rl 4.1.2 requires gym<=0.25.2, but you have gym 0.26.2 which is incompatible.
+35.8s	15	ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+35.8s	16	kaggle-environments 1.27.3 requires gymnasium==1.2.0, but you have gymnasium 1.1.1 which is incompatible.
+35.8s	17	dopamine-rl 4.1.2 requires gym<=0.25.2, but you have gym 0.26.2 which is incompatible.
+35.8s	18	
+35.8s	19	ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+35.8s	20	kaggle-environments 1.27.3 requires gymnasium==1.2.0, but you have gymnasium 1.1.1 which is incompatible.
+35.8s	21	dopamine-rl 4.1.2 requires gym<=0.25.2, but you have gym 0.26.2 which is incompatible.
+41.5s	22	2026-05-11 18:26:56.022568: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+41.5s	23	WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+41.5s	24	E0000 00:00:1778524016.417315      24 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+41.5s	25	E0000 00:00:1778524016.541846      24 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+41.5s	26	W0000 00:00:1778524017.553907      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.5s	27	W0000 00:00:1778524017.553953      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.5s	28	W0000 00:00:1778524017.553956      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.5s	29	W0000 00:00:1778524017.553958      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	30	2026-05-11 18:26:56.022568: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+41.7s	31	WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+41.7s	32	E0000 00:00:1778524016.417315      24 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+41.7s	33	E0000 00:00:1778524016.541846      24 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+41.7s	34	W0000 00:00:1778524017.553907      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	35	W0000 00:00:1778524017.553953      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	36	W0000 00:00:1778524017.553956      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	37	W0000 00:00:1778524017.553958      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	38	
+41.7s	39	2026-05-11 18:26:56.022568: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+41.7s	40	WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+41.7s	41	E0000 00:00:1778524016.417315      24 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+41.7s	42	E0000 00:00:1778524016.541846      24 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+41.7s	43	W0000 00:00:1778524017.553907      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	44	W0000 00:00:1778524017.553953      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	45	W0000 00:00:1778524017.553956      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	46	W0000 00:00:1778524017.553958      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+78.7s	47	Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+78.7s	48	Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+78.7s	49	Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
+78.7s	50	See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+78.7s	51	
+78.7s	52	Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+78.7s	53	Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+78.7s	54	Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
+78.7s	55	See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+29.7s	56	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 184.5/184.5 kB 10.2 MB/s eta 0:00:00
+29.7s	57	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 965.4/965.4 kB 42.9 MB/s eta 0:00:00
+29.9s	58	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 184.5/184.5 kB 10.2 MB/s eta 0:00:00
+29.9s	59	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 965.4/965.4 kB 42.9 MB/s eta 0:00:00
+30.4s	60	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 75.6/75.6 MB 25.8 MB/s eta 0:00:00
+30.6s	61	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 75.6/75.6 MB 25.8 MB/s eta 0:00:00
+78.7s	62	numpy:             2.0.2
+78.7s	63	gymnasium:         1.1.1
+78.7s	64	stable-baselines3: 2.6.0
+78.7s	65	PyTorch:           2.10.0+cu128
+78.7s	66	CUDA:              True
+78.7s	67	Setup complete.
+79.3s	68	obs_dim:    707 (expected 707)
+79.3s	69	action_dim: 130 (expected 130)
+91.1s	70	Device: cuda
+91.1s	71	Rate:   68.7 steps/sec  ->  est 2.0 hrs for 500k steps
+91.1s	72	PASSED
+91.2s	73	Using cuda device
+91.2s	74	Wrapping the env in a DummyVecEnv.
+91.2s	75	Training SAC: sac_general_seed0
+91.2s	76	  Timesteps:        2,000,000
+91.2s	77	  Seed:             0
+91.2s	78	  Device:           cuda
+91.2s	79	  Policy:           CTDESACPolicy (shared actor + centralized critic)
+91.2s	80	  Training years:   20 (TRAINING_YEARS) x U(70-100%) budget
+91.2s	81	  Dev years (eval): (2002, 2016, 2023)
+91.2s	82	  n_eval_episodes:  9
+91.2s	83	  Buffer size:      500,000
+91.2s	84	  Output:           /kaggle/working/thesis/results/rl/sac_general_seed0
+91.2s	85	
+91.2s	86	Logging to /kaggle/working/thesis/results/rl/sac_general_seed0/logs/SAC_1
+181.4s	87	---------------------------------
+181.4s	88	| rollout/           |          |
+181.4s	89	|    ep_len_mean     | 68.8     |
+181.4s	90	|    ep_rew_mean     | -7.98    |
+181.4s	91	| time/              |          |
+181.4s	92	|    episodes        | 100      |
+181.4s	93	|    fps             | 76       |
+181.4s	94	|    time_elapsed    | 90       |
+181.4s	95	|    total_timesteps | 6879     |
+181.4s	96	| train/             |          |
+181.4s	97	|    actor_loss      | -674     |
+181.4s	98	|    critic_loss     | 1.08e+03 |
+181.4s	99	|    ent_coef        | 0.172    |
+181.4s	100	|    ent_coef_loss   | -261     |
+181.4s	101	|    learning_rate   | 0.0003   |
+181.4s	102	|    n_updates       | 5878     |
+181.4s	103	---------------------------------
+280.9s	104	---------------------------------
+280.9s	105	| rollout/           |          |
+280.9s	106	|    ep_len_mean     | 65.5     |
+280.9s	107	|    ep_rew_mean     | -13.3    |
+280.9s	108	| time/              |          |
+280.9s	109	|    episodes        | 200      |
+280.9s	110	|    fps             | 70       |
+280.9s	111	|    time_elapsed    | 189      |
+280.9s	112	|    total_timesteps | 13433    |
+280.9s	113	| train/             |          |
+280.9s	114	|    actor_loss      | -258     |
+280.9s	115	|    critic_loss     | 39.1     |
+280.9s	116	|    ent_coef        | 0.0244   |
+280.9s	117	|    ent_coef_loss   | -524     |
+280.9s	118	|    learning_rate   | 0.0003   |
+280.9s	119	|    n_updates       | 12432    |
+280.9s	120	---------------------------------
+394.7s	121	---------------------------------
+394.7s	122	| rollout/           |          |
+394.7s	123	|    ep_len_mean     | 74.2     |
+394.7s	124	|    ep_rew_mean     | -19.1    |
+394.7s	125	| time/              |          |
+394.7s	126	|    episodes        | 300      |
+394.7s	127	|    fps             | 68       |
+394.7s	128	|    time_elapsed    | 303      |
+394.7s	129	|    total_timesteps | 20853    |
+394.7s	130	| train/             |          |
+394.7s	131	|    actor_loss      | -27      |
+394.7s	132	|    critic_loss     | 1.41     |
+394.7s	133	|    ent_coef        | 0.00369  |
+394.7s	134	|    ent_coef_loss   | -142     |
+394.7s	135	|    learning_rate   | 0.0003   |
+394.7s	136	|    n_updates       | 19852    |
+394.7s	137	---------------------------------
+12.0s	138	0.00s - Debugger warning: It seems that frozen modules are being used, which may
+12.0s	139	0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off
+12.0s	140	0.00s - to python to disable frozen modules.
+12.0s	141	0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.
+12.8s	142	0.00s - Debugger warning: It seems that frozen modules are being used, which may
+12.8s	143	0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off
+12.8s	144	0.00s - to python to disable frozen modules.
+12.8s	145	0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.
+22.1s	146	Cloning into '/kaggle/working/thesis'...
+22.3s	147	Cloning into '/kaggle/working/thesis'...
+22.3s	148	
+22.3s	149	Cloning into '/kaggle/working/thesis'...
+35.6s	150	ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+35.6s	151	kaggle-environments 1.27.3 requires gymnasium==1.2.0, but you have gymnasium 1.1.1 which is incompatible.
+35.6s	152	dopamine-rl 4.1.2 requires gym<=0.25.2, but you have gym 0.26.2 which is incompatible.
+35.8s	153	ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+35.8s	154	kaggle-environments 1.27.3 requires gymnasium==1.2.0, but you have gymnasium 1.1.1 which is incompatible.
+35.8s	155	dopamine-rl 4.1.2 requires gym<=0.25.2, but you have gym 0.26.2 which is incompatible.
+35.8s	156	
+35.8s	157	ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+35.8s	158	kaggle-environments 1.27.3 requires gymnasium==1.2.0, but you have gymnasium 1.1.1 which is incompatible.
+35.8s	159	dopamine-rl 4.1.2 requires gym<=0.25.2, but you have gym 0.26.2 which is incompatible.
+41.5s	160	2026-05-11 18:26:56.022568: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+41.5s	161	WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+41.5s	162	E0000 00:00:1778524016.417315      24 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+41.5s	163	E0000 00:00:1778524016.541846      24 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+41.5s	164	W0000 00:00:1778524017.553907      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.5s	165	W0000 00:00:1778524017.553953      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.5s	166	W0000 00:00:1778524017.553956      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.5s	167	W0000 00:00:1778524017.553958      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	168	2026-05-11 18:26:56.022568: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+41.7s	169	WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+41.7s	170	E0000 00:00:1778524016.417315      24 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+41.7s	171	E0000 00:00:1778524016.541846      24 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+41.7s	172	W0000 00:00:1778524017.553907      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	173	W0000 00:00:1778524017.553953      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	174	W0000 00:00:1778524017.553956      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	175	W0000 00:00:1778524017.553958      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	176	
+41.7s	177	2026-05-11 18:26:56.022568: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+41.7s	178	WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+41.7s	179	E0000 00:00:1778524016.417315      24 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+41.7s	180	E0000 00:00:1778524016.541846      24 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+41.7s	181	W0000 00:00:1778524017.553907      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	182	W0000 00:00:1778524017.553953      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	183	W0000 00:00:1778524017.553956      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	184	W0000 00:00:1778524017.553958      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+78.7s	185	Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+78.7s	186	Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+78.7s	187	Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
+78.7s	188	See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+78.7s	189	
+78.7s	190	Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+78.7s	191	Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+78.7s	192	Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
+78.7s	193	See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+29.7s	194	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 184.5/184.5 kB 10.2 MB/s eta 0:00:00
+29.7s	195	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 965.4/965.4 kB 42.9 MB/s eta 0:00:00
+29.9s	196	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 184.5/184.5 kB 10.2 MB/s eta 0:00:00
+29.9s	197	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 965.4/965.4 kB 42.9 MB/s eta 0:00:00
+30.4s	198	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 75.6/75.6 MB 25.8 MB/s eta 0:00:00
+30.6s	199	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 75.6/75.6 MB 25.8 MB/s eta 0:00:00
+78.7s	200	numpy:             2.0.2
+78.7s	201	gymnasium:         1.1.1
+78.7s	202	stable-baselines3: 2.6.0
+78.7s	203	PyTorch:           2.10.0+cu128
+78.7s	204	CUDA:              True
+78.7s	205	Setup complete.
+79.3s	206	obs_dim:    707 (expected 707)
+79.3s	207	action_dim: 130 (expected 130)
+91.1s	208	Device: cuda
+91.1s	209	Rate:   68.7 steps/sec  ->  est 2.0 hrs for 500k steps
+91.1s	210	PASSED
+91.2s	211	Using cuda device
+91.2s	212	Wrapping the env in a DummyVecEnv.
+91.2s	213	Training SAC: sac_general_seed0
+91.2s	214	  Timesteps:        2,000,000
+91.2s	215	  Seed:             0
+91.2s	216	  Device:           cuda
+91.2s	217	  Policy:           CTDESACPolicy (shared actor + centralized critic)
+91.2s	218	  Training years:   20 (TRAINING_YEARS) x U(70-100%) budget
+91.2s	219	  Dev years (eval): (2002, 2016, 2023)
+91.2s	220	  n_eval_episodes:  9
+91.2s	221	  Buffer size:      500,000
+91.2s	222	  Output:           /kaggle/working/thesis/results/rl/sac_general_seed0
+91.2s	223	
+91.2s	224	Logging to /kaggle/working/thesis/results/rl/sac_general_seed0/logs/SAC_1
+181.4s	225	---------------------------------
+181.4s	226	| rollout/           |          |
+181.4s	227	|    ep_len_mean     | 68.8     |
+181.4s	228	|    ep_rew_mean     | -7.98    |
+181.4s	229	| time/              |          |
+181.4s	230	|    episodes        | 100      |
+181.4s	231	|    fps             | 76       |
+181.4s	232	|    time_elapsed    | 90       |
+181.4s	233	|    total_timesteps | 6879     |
+181.4s	234	| train/             |          |
+181.4s	235	|    actor_loss      | -674     |
+181.4s	236	|    critic_loss     | 1.08e+03 |
+181.4s	237	|    ent_coef        | 0.172    |
+181.4s	238	|    ent_coef_loss   | -261     |
+181.4s	239	|    learning_rate   | 0.0003   |
+181.4s	240	|    n_updates       | 5878     |
+181.4s	241	---------------------------------
+280.9s	242	---------------------------------
+280.9s	243	| rollout/           |          |
+280.9s	244	|    ep_len_mean     | 65.5     |
+280.9s	245	|    ep_rew_mean     | -13.3    |
+280.9s	246	| time/              |          |
+280.9s	247	|    episodes        | 200      |
+280.9s	248	|    fps             | 70       |
+280.9s	249	|    time_elapsed    | 189      |
+280.9s	250	|    total_timesteps | 13433    |
+280.9s	251	| train/             |          |
+280.9s	252	|    actor_loss      | -258     |
+280.9s	253	|    critic_loss     | 39.1     |
+280.9s	254	|    ent_coef        | 0.0244   |
+280.9s	255	|    ent_coef_loss   | -524     |
+280.9s	256	|    learning_rate   | 0.0003   |
+280.9s	257	|    n_updates       | 12432    |
+280.9s	258	---------------------------------
+394.7s	259	---------------------------------
+394.7s	260	| rollout/           |          |
+394.7s	261	|    ep_len_mean     | 74.2     |
+394.7s	262	|    ep_rew_mean     | -19.1    |
+394.7s	263	| time/              |          |
+394.7s	264	|    episodes        | 300      |
+394.7s	265	|    fps             | 68       |
+394.7s	266	|    time_elapsed    | 303      |
+394.7s	267	|    total_timesteps | 20853    |
+394.7s	268	| train/             |          |
+394.7s	269	|    actor_loss      | -27      |
+394.7s	270	|    critic_loss     | 1.41     |
+394.7s	271	|    ent_coef        | 0.00369  |
+394.7s	272	|    ent_coef_loss   | -142     |
+394.7s	273	|    learning_rate   | 0.0003   |
+394.7s	274	|    n_updates       | 19852    |
+394.7s	275	---------------------------------
+12.0s	276	0.00s - Debugger warning: It seems that frozen modules are being used, which may
+12.0s	277	0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off
+12.0s	278	0.00s - to python to disable frozen modules.
+12.0s	279	0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.
+12.8s	280	0.00s - Debugger warning: It seems that frozen modules are being used, which may
+12.8s	281	0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off
+12.8s	282	0.00s - to python to disable frozen modules.
+12.8s	283	0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.
+22.1s	284	Cloning into '/kaggle/working/thesis'...
+22.3s	285	Cloning into '/kaggle/working/thesis'...
+22.3s	286	
+22.3s	287	Cloning into '/kaggle/working/thesis'...
+35.6s	288	ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+35.6s	289	kaggle-environments 1.27.3 requires gymnasium==1.2.0, but you have gymnasium 1.1.1 which is incompatible.
+35.6s	290	dopamine-rl 4.1.2 requires gym<=0.25.2, but you have gym 0.26.2 which is incompatible.
+35.8s	291	ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+35.8s	292	kaggle-environments 1.27.3 requires gymnasium==1.2.0, but you have gymnasium 1.1.1 which is incompatible.
+35.8s	293	dopamine-rl 4.1.2 requires gym<=0.25.2, but you have gym 0.26.2 which is incompatible.
+35.8s	294	
+35.8s	295	ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+35.8s	296	kaggle-environments 1.27.3 requires gymnasium==1.2.0, but you have gymnasium 1.1.1 which is incompatible.
+35.8s	297	dopamine-rl 4.1.2 requires gym<=0.25.2, but you have gym 0.26.2 which is incompatible.
+41.5s	298	2026-05-11 18:26:56.022568: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+41.5s	299	WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+41.5s	300	E0000 00:00:1778524016.417315      24 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+41.5s	301	E0000 00:00:1778524016.541846      24 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+41.5s	302	W0000 00:00:1778524017.553907      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.5s	303	W0000 00:00:1778524017.553953      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.5s	304	W0000 00:00:1778524017.553956      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.5s	305	W0000 00:00:1778524017.553958      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	306	2026-05-11 18:26:56.022568: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+41.7s	307	WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+41.7s	308	E0000 00:00:1778524016.417315      24 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+41.7s	309	E0000 00:00:1778524016.541846      24 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+41.7s	310	W0000 00:00:1778524017.553907      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	311	W0000 00:00:1778524017.553953      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	312	W0000 00:00:1778524017.553956      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	313	W0000 00:00:1778524017.553958      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	314	
+41.7s	315	2026-05-11 18:26:56.022568: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+41.7s	316	WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+41.7s	317	E0000 00:00:1778524016.417315      24 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+41.7s	318	E0000 00:00:1778524016.541846      24 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+41.7s	319	W0000 00:00:1778524017.553907      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	320	W0000 00:00:1778524017.553953      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	321	W0000 00:00:1778524017.553956      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	322	W0000 00:00:1778524017.553958      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+78.7s	323	Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+78.7s	324	Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+78.7s	325	Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
+78.7s	326	See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+78.7s	327	
+78.7s	328	Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+78.7s	329	Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+78.7s	330	Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
+78.7s	331	See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+29.7s	332	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 184.5/184.5 kB 10.2 MB/s eta 0:00:00
+29.7s	333	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 965.4/965.4 kB 42.9 MB/s eta 0:00:00
+29.9s	334	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 184.5/184.5 kB 10.2 MB/s eta 0:00:00
+29.9s	335	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 965.4/965.4 kB 42.9 MB/s eta 0:00:00
+30.4s	336	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 75.6/75.6 MB 25.8 MB/s eta 0:00:00
+30.6s	337	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 75.6/75.6 MB 25.8 MB/s eta 0:00:00
+78.7s	338	numpy:             2.0.2
+78.7s	339	gymnasium:         1.1.1
+78.7s	340	stable-baselines3: 2.6.0
+78.7s	341	PyTorch:           2.10.0+cu128
+78.7s	342	CUDA:              True
+78.7s	343	Setup complete.
+79.3s	344	obs_dim:    707 (expected 707)
+79.3s	345	action_dim: 130 (expected 130)
+91.1s	346	Device: cuda
+91.1s	347	Rate:   68.7 steps/sec  ->  est 2.0 hrs for 500k steps
+91.1s	348	PASSED
+91.2s	349	Using cuda device
+91.2s	350	Wrapping the env in a DummyVecEnv.
+91.2s	351	Training SAC: sac_general_seed0
+91.2s	352	  Timesteps:        2,000,000
+91.2s	353	  Seed:             0
+91.2s	354	  Device:           cuda
+91.2s	355	  Policy:           CTDESACPolicy (shared actor + centralized critic)
+91.2s	356	  Training years:   20 (TRAINING_YEARS) x U(70-100%) budget
+91.2s	357	  Dev years (eval): (2002, 2016, 2023)
+91.2s	358	  n_eval_episodes:  9
+91.2s	359	  Buffer size:      500,000
+91.2s	360	  Output:           /kaggle/working/thesis/results/rl/sac_general_seed0
+91.2s	361	
+91.2s	362	Logging to /kaggle/working/thesis/results/rl/sac_general_seed0/logs/SAC_1
+181.4s	363	---------------------------------
+181.4s	364	| rollout/           |          |
+181.4s	365	|    ep_len_mean     | 68.8     |
+181.4s	366	|    ep_rew_mean     | -7.98    |
+181.4s	367	| time/              |          |
+181.4s	368	|    episodes        | 100      |
+181.4s	369	|    fps             | 76       |
+181.4s	370	|    time_elapsed    | 90       |
+181.4s	371	|    total_timesteps | 6879     |
+181.4s	372	| train/             |          |
+181.4s	373	|    actor_loss      | -674     |
+181.4s	374	|    critic_loss     | 1.08e+03 |
+181.4s	375	|    ent_coef        | 0.172    |
+181.4s	376	|    ent_coef_loss   | -261     |
+181.4s	377	|    learning_rate   | 0.0003   |
+181.4s	378	|    n_updates       | 5878     |
+181.4s	379	---------------------------------
+280.9s	380	---------------------------------
+280.9s	381	| rollout/           |          |
+280.9s	382	|    ep_len_mean     | 65.5     |
+280.9s	383	|    ep_rew_mean     | -13.3    |
+280.9s	384	| time/              |          |
+280.9s	385	|    episodes        | 200      |
+280.9s	386	|    fps             | 70       |
+280.9s	387	|    time_elapsed    | 189      |
+280.9s	388	|    total_timesteps | 13433    |
+280.9s	389	| train/             |          |
+280.9s	390	|    actor_loss      | -258     |
+280.9s	391	|    critic_loss     | 39.1     |
+280.9s	392	|    ent_coef        | 0.0244   |
+280.9s	393	|    ent_coef_loss   | -524     |
+280.9s	394	|    learning_rate   | 0.0003   |
+280.9s	395	|    n_updates       | 12432    |
+280.9s	396	---------------------------------
+394.7s	397	---------------------------------
+394.7s	398	| rollout/           |          |
+394.7s	399	|    ep_len_mean     | 74.2     |
+394.7s	400	|    ep_rew_mean     | -19.1    |
+394.7s	401	| time/              |          |
+394.7s	402	|    episodes        | 300      |
+394.7s	403	|    fps             | 68       |
+394.7s	404	|    time_elapsed    | 303      |
+394.7s	405	|    total_timesteps | 20853    |
+394.7s	406	| train/             |          |
+394.7s	407	|    actor_loss      | -27      |
+394.7s	408	|    critic_loss     | 1.41     |
+394.7s	409	|    ent_coef        | 0.00369  |
+394.7s	410	|    ent_coef_loss   | -142     |
+394.7s	411	|    learning_rate   | 0.0003   |
+394.7s	412	|    n_updates       | 19852    |
+394.7s	413	---------------------------------
+12.0s	414	0.00s - Debugger warning: It seems that frozen modules are being used, which may
+12.0s	415	0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off
+12.0s	416	0.00s - to python to disable frozen modules.
+12.0s	417	0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.
+12.8s	418	0.00s - Debugger warning: It seems that frozen modules are being used, which may
+12.8s	419	0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off
+12.8s	420	0.00s - to python to disable frozen modules.
+12.8s	421	0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.
+22.1s	422	Cloning into '/kaggle/working/thesis'...
+22.3s	423	Cloning into '/kaggle/working/thesis'...
+22.3s	424	
+22.3s	425	Cloning into '/kaggle/working/thesis'...
+35.6s	426	ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+35.6s	427	kaggle-environments 1.27.3 requires gymnasium==1.2.0, but you have gymnasium 1.1.1 which is incompatible.
+35.6s	428	dopamine-rl 4.1.2 requires gym<=0.25.2, but you have gym 0.26.2 which is incompatible.
+35.8s	429	ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+35.8s	430	kaggle-environments 1.27.3 requires gymnasium==1.2.0, but you have gymnasium 1.1.1 which is incompatible.
+35.8s	431	dopamine-rl 4.1.2 requires gym<=0.25.2, but you have gym 0.26.2 which is incompatible.
+35.8s	432	
+35.8s	433	ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+35.8s	434	kaggle-environments 1.27.3 requires gymnasium==1.2.0, but you have gymnasium 1.1.1 which is incompatible.
+35.8s	435	dopamine-rl 4.1.2 requires gym<=0.25.2, but you have gym 0.26.2 which is incompatible.
+41.5s	436	2026-05-11 18:26:56.022568: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+41.5s	437	WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+41.5s	438	E0000 00:00:1778524016.417315      24 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+41.5s	439	E0000 00:00:1778524016.541846      24 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+41.5s	440	W0000 00:00:1778524017.553907      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.5s	441	W0000 00:00:1778524017.553953      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.5s	442	W0000 00:00:1778524017.553956      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.5s	443	W0000 00:00:1778524017.553958      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	444	2026-05-11 18:26:56.022568: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+41.7s	445	WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+41.7s	446	E0000 00:00:1778524016.417315      24 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+41.7s	447	E0000 00:00:1778524016.541846      24 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+41.7s	448	W0000 00:00:1778524017.553907      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	449	W0000 00:00:1778524017.553953      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	450	W0000 00:00:1778524017.553956      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	451	W0000 00:00:1778524017.553958      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	452	
+41.7s	453	2026-05-11 18:26:56.022568: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+41.7s	454	WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+41.7s	455	E0000 00:00:1778524016.417315      24 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+41.7s	456	E0000 00:00:1778524016.541846      24 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+41.7s	457	W0000 00:00:1778524017.553907      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	458	W0000 00:00:1778524017.553953      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	459	W0000 00:00:1778524017.553956      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	460	W0000 00:00:1778524017.553958      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+78.7s	461	Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+78.7s	462	Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+78.7s	463	Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
+78.7s	464	See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+29.7s	465	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 184.5/184.5 kB 10.2 MB/s eta 0:00:00
+29.7s	466	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 965.4/965.4 kB 42.9 MB/s eta 0:00:00
+29.9s	467	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 184.5/184.5 kB 10.2 MB/s eta 0:00:00
+29.9s	468	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 965.4/965.4 kB 42.9 MB/s eta 0:00:00
+30.4s	469	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 75.6/75.6 MB 25.8 MB/s eta 0:00:00
+30.6s	470	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 75.6/75.6 MB 25.8 MB/s eta 0:00:00
+78.7s	471	
+78.7s	472	Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+78.7s	473	Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+78.7s	474	Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
+78.7s	475	See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+78.7s	476	numpy:             2.0.2
+78.7s	477	gymnasium:         1.1.1
+78.7s	478	stable-baselines3: 2.6.0
+78.7s	479	PyTorch:           2.10.0+cu128
+78.7s	480	CUDA:              True
+78.7s	481	Setup complete.
+79.3s	482	obs_dim:    707 (expected 707)
+79.3s	483	action_dim: 130 (expected 130)
+91.1s	484	Device: cuda
+91.1s	485	Rate:   68.7 steps/sec  ->  est 2.0 hrs for 500k steps
+91.1s	486	PASSED
+91.2s	487	Using cuda device
+91.2s	488	Wrapping the env in a DummyVecEnv.
+91.2s	489	Training SAC: sac_general_seed0
+91.2s	490	  Timesteps:        2,000,000
+91.2s	491	  Seed:             0
+91.2s	492	  Device:           cuda
+91.2s	493	  Policy:           CTDESACPolicy (shared actor + centralized critic)
+91.2s	494	  Training years:   20 (TRAINING_YEARS) x U(70-100%) budget
+91.2s	495	  Dev years (eval): (2002, 2016, 2023)
+91.2s	496	  n_eval_episodes:  9
+91.2s	497	  Buffer size:      500,000
+91.2s	498	  Output:           /kaggle/working/thesis/results/rl/sac_general_seed0
+91.2s	499	
+91.2s	500	Logging to /kaggle/working/thesis/results/rl/sac_general_seed0/logs/SAC_1
+181.4s	501	---------------------------------
+181.4s	502	| rollout/           |          |
+181.4s	503	|    ep_len_mean     | 68.8     |
+181.4s	504	|    ep_rew_mean     | -7.98    |
+181.4s	505	| time/              |          |
+181.4s	506	|    episodes        | 100      |
+181.4s	507	|    fps             | 76       |
+181.4s	508	|    time_elapsed    | 90       |
+181.4s	509	|    total_timesteps | 6879     |
+181.4s	510	| train/             |          |
+181.4s	511	|    actor_loss      | -674     |
+181.4s	512	|    critic_loss     | 1.08e+03 |
+181.4s	513	|    ent_coef        | 0.172    |
+181.4s	514	|    ent_coef_loss   | -261     |
+181.4s	515	|    learning_rate   | 0.0003   |
+181.4s	516	|    n_updates       | 5878     |
+181.4s	517	---------------------------------
+280.9s	518	---------------------------------
+280.9s	519	| rollout/           |          |
+280.9s	520	|    ep_len_mean     | 65.5     |
+280.9s	521	|    ep_rew_mean     | -13.3    |
+280.9s	522	| time/              |          |
+280.9s	523	|    episodes        | 200      |
+280.9s	524	|    fps             | 70       |
+280.9s	525	|    time_elapsed    | 189      |
+280.9s	526	|    total_timesteps | 13433    |
+280.9s	527	| train/             |          |
+280.9s	528	|    actor_loss      | -258     |
+280.9s	529	|    critic_loss     | 39.1     |
+280.9s	530	|    ent_coef        | 0.0244   |
+280.9s	531	|    ent_coef_loss   | -524     |
+280.9s	532	|    learning_rate   | 0.0003   |
+280.9s	533	|    n_updates       | 12432    |
+280.9s	534	---------------------------------
+394.7s	535	---------------------------------
+394.7s	536	| rollout/           |          |
+394.7s	537	|    ep_len_mean     | 74.2     |
+394.7s	538	|    ep_rew_mean     | -19.1    |
+394.7s	539	| time/              |          |
+394.7s	540	|    episodes        | 300      |
+394.7s	541	|    fps             | 68       |
+394.7s	542	|    time_elapsed    | 303      |
+394.7s	543	|    total_timesteps | 20853    |
+394.7s	544	| train/             |          |
+394.7s	545	|    actor_loss      | -27      |
+394.7s	546	|    critic_loss     | 1.41     |
+394.7s	547	|    ent_coef        | 0.00369  |
+394.7s	548	|    ent_coef_loss   | -142     |
+394.7s	549	|    learning_rate   | 0.0003   |
+394.7s	550	|    n_updates       | 19852    |
+394.7s	551	---------------------------------
+12.0s	552	0.00s - Debugger warning: It seems that frozen modules are being used, which may
+12.0s	553	0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off
+12.0s	554	0.00s - to python to disable frozen modules.
+12.0s	555	0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.
+12.8s	556	0.00s - Debugger warning: It seems that frozen modules are being used, which may
+12.8s	557	0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off
+12.8s	558	0.00s - to python to disable frozen modules.
+12.8s	559	0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.
+22.1s	560	Cloning into '/kaggle/working/thesis'...
+22.3s	561	Cloning into '/kaggle/working/thesis'...
+22.3s	562	
+22.3s	563	Cloning into '/kaggle/working/thesis'...
+35.6s	564	ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+35.6s	565	kaggle-environments 1.27.3 requires gymnasium==1.2.0, but you have gymnasium 1.1.1 which is incompatible.
+35.6s	566	dopamine-rl 4.1.2 requires gym<=0.25.2, but you have gym 0.26.2 which is incompatible.
+35.8s	567	ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+35.8s	568	kaggle-environments 1.27.3 requires gymnasium==1.2.0, but you have gymnasium 1.1.1 which is incompatible.
+35.8s	569	dopamine-rl 4.1.2 requires gym<=0.25.2, but you have gym 0.26.2 which is incompatible.
+35.8s	570	
+35.8s	571	ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+35.8s	572	kaggle-environments 1.27.3 requires gymnasium==1.2.0, but you have gymnasium 1.1.1 which is incompatible.
+35.8s	573	dopamine-rl 4.1.2 requires gym<=0.25.2, but you have gym 0.26.2 which is incompatible.
+41.5s	574	2026-05-11 18:26:56.022568: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+41.5s	575	WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+41.5s	576	E0000 00:00:1778524016.417315      24 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+41.5s	577	E0000 00:00:1778524016.541846      24 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+41.5s	578	W0000 00:00:1778524017.553907      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.5s	579	W0000 00:00:1778524017.553953      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.5s	580	W0000 00:00:1778524017.553956      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.5s	581	W0000 00:00:1778524017.553958      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	582	2026-05-11 18:26:56.022568: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+41.7s	583	WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+41.7s	584	E0000 00:00:1778524016.417315      24 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+41.7s	585	E0000 00:00:1778524016.541846      24 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+41.7s	586	W0000 00:00:1778524017.553907      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	587	W0000 00:00:1778524017.553953      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	588	W0000 00:00:1778524017.553956      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	589	W0000 00:00:1778524017.553958      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	590	
+41.7s	591	2026-05-11 18:26:56.022568: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+41.7s	592	WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+41.7s	593	E0000 00:00:1778524016.417315      24 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+41.7s	594	E0000 00:00:1778524016.541846      24 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+41.7s	595	W0000 00:00:1778524017.553907      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	596	W0000 00:00:1778524017.553953      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	597	W0000 00:00:1778524017.553956      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	598	W0000 00:00:1778524017.553958      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+78.7s	599	Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+78.7s	600	Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+78.7s	601	Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
+78.7s	602	See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+78.7s	603	
+78.7s	604	Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+78.7s	605	Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+78.7s	606	Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
+78.7s	607	See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+29.7s	608	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 184.5/184.5 kB 10.2 MB/s eta 0:00:00
+29.7s	609	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 965.4/965.4 kB 42.9 MB/s eta 0:00:00
+29.9s	610	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 184.5/184.5 kB 10.2 MB/s eta 0:00:00
+29.9s	611	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 965.4/965.4 kB 42.9 MB/s eta 0:00:00
+30.4s	612	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 75.6/75.6 MB 25.8 MB/s eta 0:00:00
+30.6s	613	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 75.6/75.6 MB 25.8 MB/s eta 0:00:00
+78.7s	614	numpy:             2.0.2
+78.7s	615	gymnasium:         1.1.1
+78.7s	616	stable-baselines3: 2.6.0
+78.7s	617	PyTorch:           2.10.0+cu128
+78.7s	618	CUDA:              True
+78.7s	619	Setup complete.
+79.3s	620	obs_dim:    707 (expected 707)
+79.3s	621	action_dim: 130 (expected 130)
+91.1s	622	Device: cuda
+91.1s	623	Rate:   68.7 steps/sec  ->  est 2.0 hrs for 500k steps
+91.1s	624	PASSED
+91.2s	625	Using cuda device
+91.2s	626	Wrapping the env in a DummyVecEnv.
+91.2s	627	Training SAC: sac_general_seed0
+91.2s	628	  Timesteps:        2,000,000
+91.2s	629	  Seed:             0
+91.2s	630	  Device:           cuda
+91.2s	631	  Policy:           CTDESACPolicy (shared actor + centralized critic)
+91.2s	632	  Training years:   20 (TRAINING_YEARS) x U(70-100%) budget
+91.2s	633	  Dev years (eval): (2002, 2016, 2023)
+91.2s	634	  n_eval_episodes:  9
+91.2s	635	  Buffer size:      500,000
+91.2s	636	  Output:           /kaggle/working/thesis/results/rl/sac_general_seed0
+91.2s	637	
+91.2s	638	Logging to /kaggle/working/thesis/results/rl/sac_general_seed0/logs/SAC_1
+181.4s	639	---------------------------------
+181.4s	640	| rollout/           |          |
+181.4s	641	|    ep_len_mean     | 68.8     |
+181.4s	642	|    ep_rew_mean     | -7.98    |
+181.4s	643	| time/              |          |
+181.4s	644	|    episodes        | 100      |
+181.4s	645	|    fps             | 76       |
+181.4s	646	|    time_elapsed    | 90       |
+181.4s	647	|    total_timesteps | 6879     |
+181.4s	648	| train/             |          |
+181.4s	649	|    actor_loss      | -674     |
+181.4s	650	|    critic_loss     | 1.08e+03 |
+181.4s	651	|    ent_coef        | 0.172    |
+181.4s	652	|    ent_coef_loss   | -261     |
+181.4s	653	|    learning_rate   | 0.0003   |
+181.4s	654	|    n_updates       | 5878     |
+181.4s	655	---------------------------------
+280.9s	656	---------------------------------
+280.9s	657	| rollout/           |          |
+280.9s	658	|    ep_len_mean     | 65.5     |
+280.9s	659	|    ep_rew_mean     | -13.3    |
+280.9s	660	| time/              |          |
+280.9s	661	|    episodes        | 200      |
+280.9s	662	|    fps             | 70       |
+280.9s	663	|    time_elapsed    | 189      |
+280.9s	664	|    total_timesteps | 13433    |
+280.9s	665	| train/             |          |
+280.9s	666	|    actor_loss      | -258     |
+280.9s	667	|    critic_loss     | 39.1     |
+280.9s	668	|    ent_coef        | 0.0244   |
+280.9s	669	|    ent_coef_loss   | -524     |
+280.9s	670	|    learning_rate   | 0.0003   |
+280.9s	671	|    n_updates       | 12432    |
+280.9s	672	---------------------------------
+394.7s	673	---------------------------------
+394.7s	674	| rollout/           |          |
+394.7s	675	|    ep_len_mean     | 74.2     |
+394.7s	676	|    ep_rew_mean     | -19.1    |
+394.7s	677	| time/              |          |
+394.7s	678	|    episodes        | 300      |
+394.7s	679	|    fps             | 68       |
+394.7s	680	|    time_elapsed    | 303      |
+394.7s	681	|    total_timesteps | 20853    |
+394.7s	682	| train/             |          |
+394.7s	683	|    actor_loss      | -27      |
+394.7s	684	|    critic_loss     | 1.41     |
+394.7s	685	|    ent_coef        | 0.00369  |
+394.7s	686	|    ent_coef_loss   | -142     |
+394.7s	687	|    learning_rate   | 0.0003   |
+394.7s	688	|    n_updates       | 19852    |
+394.7s	689	---------------------------------
+12.0s	690	0.00s - Debugger warning: It seems that frozen modules are being used, which may
+12.0s	691	0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off
+12.0s	692	0.00s - to python to disable frozen modules.
+12.0s	693	0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.
+12.8s	694	0.00s - Debugger warning: It seems that frozen modules are being used, which may
+12.8s	695	0.00s - make the debugger miss breakpoints. Please pass -Xfrozen_modules=off
+12.8s	696	0.00s - to python to disable frozen modules.
+12.8s	697	0.00s - Note: Debugging will proceed. Set PYDEVD_DISABLE_FILE_VALIDATION=1 to disable this validation.
+22.1s	698	Cloning into '/kaggle/working/thesis'...
+22.3s	699	Cloning into '/kaggle/working/thesis'...
+22.3s	700	
+22.3s	701	Cloning into '/kaggle/working/thesis'...
+35.6s	702	ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+35.6s	703	kaggle-environments 1.27.3 requires gymnasium==1.2.0, but you have gymnasium 1.1.1 which is incompatible.
+35.6s	704	dopamine-rl 4.1.2 requires gym<=0.25.2, but you have gym 0.26.2 which is incompatible.
+35.8s	705	ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+35.8s	706	kaggle-environments 1.27.3 requires gymnasium==1.2.0, but you have gymnasium 1.1.1 which is incompatible.
+35.8s	707	dopamine-rl 4.1.2 requires gym<=0.25.2, but you have gym 0.26.2 which is incompatible.
+35.8s	708	
+35.8s	709	ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+35.8s	710	kaggle-environments 1.27.3 requires gymnasium==1.2.0, but you have gymnasium 1.1.1 which is incompatible.
+35.8s	711	dopamine-rl 4.1.2 requires gym<=0.25.2, but you have gym 0.26.2 which is incompatible.
+41.5s	712	2026-05-11 18:26:56.022568: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+41.5s	713	WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+41.5s	714	E0000 00:00:1778524016.417315      24 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+41.5s	715	E0000 00:00:1778524016.541846      24 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+41.5s	716	W0000 00:00:1778524017.553907      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.5s	717	W0000 00:00:1778524017.553953      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.5s	718	W0000 00:00:1778524017.553956      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.5s	719	W0000 00:00:1778524017.553958      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	720	2026-05-11 18:26:56.022568: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+41.7s	721	WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+41.7s	722	E0000 00:00:1778524016.417315      24 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+41.7s	723	E0000 00:00:1778524016.541846      24 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+41.7s	724	W0000 00:00:1778524017.553907      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	725	W0000 00:00:1778524017.553953      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	726	W0000 00:00:1778524017.553956      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	727	W0000 00:00:1778524017.553958      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	728	
+41.7s	729	2026-05-11 18:26:56.022568: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+41.7s	730	WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+41.7s	731	E0000 00:00:1778524016.417315      24 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+41.7s	732	E0000 00:00:1778524016.541846      24 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+41.7s	733	W0000 00:00:1778524017.553907      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	734	W0000 00:00:1778524017.553953      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	735	W0000 00:00:1778524017.553956      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+41.7s	736	W0000 00:00:1778524017.553958      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+78.7s	737	Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+78.7s	738	Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+78.7s	739	Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
+78.7s	740	See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+78.7s	741	
+78.7s	742	Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+78.7s	743	Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+78.7s	744	Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
+78.7s	745	See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+29.7s	746	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 184.5/184.5 kB 10.2 MB/s eta 0:00:00
+29.7s	747	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 965.4/965.4 kB 42.9 MB/s eta 0:00:00
+29.9s	748	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 184.5/184.5 kB 10.2 MB/s eta 0:00:00
+29.9s	749	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 965.4/965.4 kB 42.9 MB/s eta 0:00:00
+30.4s	750	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 75.6/75.6 MB 25.8 MB/s eta 0:00:00
+30.6s	751	   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 75.6/75.6 MB 25.8 MB/s eta 0:00:00
+78.7s	752	numpy:             2.0.2
+78.7s	753	gymnasium:         1.1.1
+78.7s	754	stable-baselines3: 2.6.0
+78.7s	755	PyTorch:           2.10.0+cu128
+78.7s	756	CUDA:              True
+78.7s	757	Setup complete.
+79.3s	758	obs_dim:    707 (expected 707)
+79.3s	759	action_dim: 130 (expected 130)
+91.1s	760	Device: cuda
+91.1s	761	Rate:   68.7 steps/sec  ->  est 2.0 hrs for 500k steps
+91.1s	762	PASSED
+91.2s	763	Using cuda device
+91.2s	764	Wrapping the env in a DummyVecEnv.
+91.2s	765	Training SAC: sac_general_seed0
+91.2s	766	  Timesteps:        2,000,000
+91.2s	767	  Seed:             0
+91.2s	768	  Device:           cuda
+91.2s	769	  Policy:           CTDESACPolicy (shared actor + centralized critic)
+91.2s	770	  Training years:   20 (TRAINING_YEARS) x U(70-100%) budget
+91.2s	771	  Dev years (eval): (2002, 2016, 2023)
+91.2s	772	  n_eval_episodes:  9
+91.2s	773	  Buffer size:      500,000
+91.2s	774	  Output:           /kaggle/working/thesis/results/rl/sac_general_seed0
+91.2s	775	
+91.2s	776	Logging to /kaggle/working/thesis/results/rl/sac_general_seed0/logs/SAC_1
+181.4s	777	---------------------------------
+181.4s	778	| rollout/           |          |
+181.4s	779	|    ep_len_mean     | 68.8     |
+181.4s	780	|    ep_rew_mean     | -7.98    |
+181.4s	781	| time/              |          |
+181.4s	782	|    episodes        | 100      |
+181.4s	783	|    fps             | 76       |
+181.4s	784	|    time_elapsed    | 90       |
+181.4s	785	|    total_timesteps | 6879     |
+181.4s	786	| train/             |          |
+181.4s	787	|    actor_loss      | -674     |
+181.4s	788	|    critic_loss     | 1.08e+03 |
+181.4s	789	|    ent_coef        | 0.172    |
+181.4s	790	|    ent_coef_loss   | -261     |
+181.4s	791	|    learning_rate   | 0.0003   |
+181.4s	792	|    n_updates       | 5878     |
+181.4s	793	---------------------------------
+280.9s	794	---------------------------------
+280.9s	795	| rollout/           |          |
+280.9s	796	|    ep_len_mean     | 65.5     |
+280.9s	797	|    ep_rew_mean     | -13.3    |
+280.9s	798	| time/              |          |
+280.9s	799	|    episodes        | 200      |
+280.9s	800	|    fps             | 70       |
+280.9s	801	|    time_elapsed    | 189      |
+280.9s	802	|    total_timesteps | 13433    |
+280.9s	803	| train/             |          |
+280.9s	804	|    actor_loss      | -258     |
+280.9s	805	|    critic_loss     | 39.1     |
+280.9s	806	|    ent_coef        | 0.0244   |
+280.9s	807	|    ent_coef_loss   | -524     |
+280.9s	808	|    learning_rate   | 0.0003   |
+280.9s	809	|    n_updates       | 12432    |
+280.9s	810	---------------------------------
+394.7s	811	---------------------------------
+394.7s	812	| rollout/           |          |
+394.7s	813	|    ep_len_mean     | 74.2     |
+394.7s	814	|    ep_rew_mean     | -19.1    |
+394.7s	815	| time/              |          |
+394.7s	816	|    episodes        | 300      |
+394.7s	817	|    fps             | 68       |
+394.7s	818	|    time_elapsed    | 303      |
+394.7s	819	|    total_timesteps | 20853    |
+394.7s	820	| train/             |          |
+394.7s	821	|    actor_loss      | -27      |
+394.7s	822	|    critic_loss     | 1.41     |
+394.7s	823	|    ent_coef        | 0.00369  |
+394.7s	824	|    ent_coef_loss   | -142     |
+394.7s	825	|    learning_rate   | 0.0003   |
+394.7s	826	|    n_updates       | 19852    |
+394.7s	827	---------------------------------

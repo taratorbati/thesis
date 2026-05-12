@@ -17,11 +17,15 @@ pyyaml>=6.0           # not yet used — for Step D when MPC config moves to YAM
 # casadi>=3.6
 # (IPOPT comes bundled with casadi)
 
-# Step E (RL) — uncomment when ready:
+# Step E (RL):
 # torch>=2.1
 # stable-baselines3>=2.2
 # gymnasium>=0.29
 # tensorboard>=2.15  # optional, for training visualization
+# wandb>=0.16        # optional cloud-sync for long training runs (Kaggle/Colab).
+#                    # If unavailable or unconfigured, train.py falls back to
+#                    # local-only logging automatically — wandb is not required
+#                    # for the smoke test or for offline runs.
 
 # Development:
-# pytest>=7.4        # for tests/ once they exist
+# pytest>=7.4        # tests/test_rl_smoke.py
