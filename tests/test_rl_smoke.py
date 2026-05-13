@@ -2,13 +2,14 @@
 # tests/test_rl_smoke.py
 # Regression tests for the RL pipeline.
 #
-# These 30 lines catch every Tier-0 and Tier-1 bug identified in the
-# June 2026 audit:
+# These tests catch every Tier-0 and Tier-1 bug identified in the audit:
 #   - IrrigationEnv instantiation (crash bug: 'randomize' kwarg)
 #   - Random-year reset path (crash bug: int passed to get_precomputed)
 #   - runner import (crash bug: FULL_NEED_MM vs FULL_SEASON_NEED_MM)
 #   - obs_dim consistency between gym_env and runner (silent corruption)
 #   - Scalar order consistency at every position (silent corruption)
+#   - Noisy forecast runner attribute present (crash bug if _noisy_forecast
+#     attribute is missing when _build_obs is called without calling reset)
 #
 # Run with: pytest tests/test_rl_smoke.py -v
 # =============================================================================
@@ -50,7 +51,7 @@ def test_runner_imports():
 
 
 def test_obs_dim_matches_between_gym_and_runner():
-    """runner._build_obs must produce same shape as gym_env._get_obs."""
+    """runner._build_obs must produce same shape and values as gym_env._get_obs."""
     from src.rl.gym_env import IrrigationEnv, X4_REF, X5_REF
     from src.rl.runner import RLController
 
@@ -65,8 +66,6 @@ def test_obs_dim_matches_between_gym_and_runner():
         'x4': env.abm.x4,
     }
 
-    # Build a minimal RLController without loading a real model
-    # (we just test _build_obs, not model.predict)
     from src.terrain import load_terrain
     from src.precompute import get_precomputed
     from climate_data import load_cleaned_data, extract_scenario_by_name
@@ -84,6 +83,9 @@ def test_obs_dim_matches_between_gym_and_runner():
         _elev_norm = terrain['gamma_flat']
         _fc_total = crop['theta6'] * crop['theta5']
         forecast_horizon = 8
+        # Must be None so _build_obs takes the perfect-forecast branch.
+        # RLController.__init__ sets this to None before reset() is called.
+        _noisy_forecast = None
 
         def __init__(self):
             from src.precompute import get_precomputed
@@ -101,14 +103,13 @@ def test_obs_dim_matches_between_gym_and_runner():
         f"Shape mismatch: gym_env={obs_env.shape}, runner={obs_runner.shape}"
     )
 
-    # Check that the first obs step's values match position-by-position
-    # in the per-agent block (positions 0:650)
+    # Check per-agent block (positions 0:650)
     np.testing.assert_allclose(
         obs_env[:650], obs_runner[:650], rtol=1e-5,
         err_msg="Per-agent block mismatch between gym_env and runner"
     )
 
-    # Check scalar block shape and positions
+    # Check scalar block (positions 650:659)
     scalars_env    = obs_env[650:659]
     scalars_runner = obs_runner[650:659]
     np.testing.assert_allclose(

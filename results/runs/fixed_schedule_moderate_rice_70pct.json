@@ -1,6 +1,6 @@
 {
   "scenario": "moderate",
-  "year": 2020,
+  "year": 2018,
   "crop": "Rice",
   "controller": "fixed_schedule",
   "runoff_mode": "cascade",
@@ -12,19 +12,19 @@
   "initial_x5": 0.0,
   "seed": 0,
   "forecast_horizon": 0,
-  "wallclock_seconds": 0.12087512016296387,
+  "wallclock_seconds": 0.15305566787719727,
   "final_metrics": {
-    "terminal_biomass_g_m2": 814.9386404836179,
-    "yield_kg_ha": 3422.742290031195,
+    "terminal_biomass_g_m2": 758.0078841372555,
+    "yield_kg_ha": 3183.633113376473,
     "water_used_mm": 338.79999999999995,
-    "wue_kg_ha_per_mm": 10.102545129962206,
+    "wue_kg_ha_per_mm": 9.396791952114738,
     "budget_compliance": 1,
-    "drought_days_per_agent": 61.0,
-    "waterlog_days_per_agent": 24.0,
+    "drought_days_per_agent": 46.33076923076923,
+    "waterlog_days_per_agent": 36.48461538461538,
     "pond_days_per_agent": 0.0,
     "x5_max_mm": 0.0,
     "x5_mean_mm": 0.0,
-    "spatial_equity_cv": 1.3950355532798103e-16
+    "spatial_equity_cv": 0.0006153041254142071
   },
-  "completed_at": "2026-04-29T03:36:33"
+  "completed_at": "2026-05-13T07:52:34"
 }

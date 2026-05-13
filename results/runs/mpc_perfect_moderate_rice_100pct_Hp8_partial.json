@@ -1,0 +1,10 @@
+{
+  "scenario": "moderate",
+  "crop": "Rice",
+  "controller": "mpc_perfect_Hp8",
+  "budget_total": 484.0,
+  "seed": 0,
+  "last_completed_day": 9,
+  "completed_at": null,
+  "checkpointed_at": "2026-05-13T08:13:06"
+}
