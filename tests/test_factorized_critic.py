@@ -133,24 +133,24 @@ def test_gradient_only_through_relevant_agent(critic):
     Q_n and nowhere else.
     """
     obs = torch.randn(B, OBS_DIM)
-    actions = torch.zeros(B, N, requires_grad=True)
-
-    # write to a clone first to avoid in-place modification of a leaf
-    actions_input = actions.clone()
-    actions_input.requires_grad_(True)
+    # Create a fresh leaf tensor directly — clone() produces a non-leaf
+    # and PyTorch will not populate .grad on non-leaf tensors.
+    actions_input = torch.zeros(B, N, requires_grad=True)
 
     q1, _ = critic(obs, actions_input)
-    # backward through the chosen agent's value contribution
     q1.sum().backward()
 
-    grad = actions_input.grad     # (B, N)
-    # In a perfect VDN factorization the gradient on each agent is
-    # ∂Q_k/∂a_k of its own local MLP; cross-agent gradients are exactly zero
-    # by construction (since a_k does not appear in Q_j for j != k).
-    # Because each agent has the same input distribution, gradient norms
-    # should be similar in magnitude.
+    grad = actions_input.grad   # (B, N) — populated because actions_input is a leaf
+    assert grad is not None, "Gradient is None — actions_input must be a leaf tensor"
+
     per_agent_norm = grad.abs().mean(dim=0)
-    assert torch.all(per_agent_norm > 0)
+    # In a perfect VDN factorization Q_total = Σ_n Q_n(s_n, g, a_n),
+    # so ∂Q_total/∂a_n flows only through Q_n. Every agent receives a
+    # non-zero gradient because the shared MLP has non-zero weights.
+    assert torch.all(per_agent_norm > 0), (
+        f"Some agents have zero gradient — VDN decomposition may be broken. "
+        f"Zero-grad agents: {(per_agent_norm == 0).nonzero().flatten().tolist()}"
+    )
 
 
 # ── Test 3: SB3 SAC integration smoke test ───────────────────────────────────
