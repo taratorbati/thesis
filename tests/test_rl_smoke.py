@@ -21,7 +21,7 @@ import pytest
 def test_env_instantiates_training_mode():
     """IrrigationEnv() with no args must not raise."""
     from src.rl.gym_env import IrrigationEnv
-    env = IrrigationEnv(seed=0)
+    env = IrrigationEnv(randomize=True)
     obs, info = env.reset()
     assert obs.shape == env.observation_space.shape, (
         f"obs shape {obs.shape} != observation_space {env.observation_space.shape}"
@@ -55,7 +55,7 @@ def test_obs_dim_matches_between_gym_and_runner():
     from src.rl.gym_env import IrrigationEnv, X4_REF, X5_REF
     from src.rl.runner import RLController
 
-    env = IrrigationEnv(fixed_scenario='dry', fixed_budget_pct=100, seed=0)
+    env = IrrigationEnv(randomize=False)
     obs_env, _ = env.reset()
 
     # Build a fake state matching the ABM state
@@ -71,7 +71,7 @@ def test_obs_dim_matches_between_gym_and_runner():
     from climate_data import load_cleaned_data, extract_scenario_by_name
     from soil_data import get_crop
 
-    crop    = get_crop('rice')
+    crop = get_crop('rice')
     terrain = load_terrain('gilan_farm.tif')
 
     class FakeController:
@@ -110,7 +110,7 @@ def test_obs_dim_matches_between_gym_and_runner():
     )
 
     # Check scalar block (positions 650:659)
-    scalars_env    = obs_env[650:659]
+    scalars_env = obs_env[650:659]
     scalars_runner = obs_runner[650:659]
     np.testing.assert_allclose(
         scalars_env, scalars_runner, rtol=1e-5,
@@ -124,7 +124,7 @@ def test_obs_dim_matches_between_gym_and_runner():
 def test_reward_is_finite():
     """100 random steps must produce finite rewards."""
     from src.rl.gym_env import IrrigationEnv
-    env = IrrigationEnv(fixed_scenario='dry', fixed_budget_pct=100, seed=0)
+    env = IrrigationEnv(randomize=False)
     env.reset()
     rng = np.random.default_rng(0)
     for _ in range(100):

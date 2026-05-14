@@ -1,0 +1,1368 @@
+% =============================================================================
+% Chapter 4 — Controller Design and Calibration
+% Tara Torbati — Master's Thesis
+%
+% This chapter introduces the four controller architectures evaluated in
+% Chapter 5 and documents all design and calibration decisions required to
+% reproduce the experimental results. The MPC formulation, the five-term
+% cost function, the symbolic NLP construction, and the four-phase
+% weight-sensitivity analysis are developed in detail. The SAC architecture
+% is then presented with its corrected MDP formulation, CTDE actor-critic
+% structure, training protocol, and the AR(1) forecast-noise model shared
+% with the MPC robustness evaluation.
+% =============================================================================
+
+\chapter{Controller Design and Calibration}
+\label{chap:controllers}
+
+This chapter introduces the four controller architectures evaluated on the
+shared virtual plant of Chapter~\ref{chap:system}: a no-irrigation rainfed
+baseline, a fixed-schedule heuristic representing traditional Gilan practice,
+a constrained Model Predictive Controller (MPC), and a Soft Actor-Critic
+(SAC) reinforcement learning agent. The two baselines are introduced briefly
+in Section~\ref{sec:ctrl-baselines} and serve to bracket the performance
+space within which the optimization-based controllers operate.
+
+The MPC is developed in detail across
+Sections~\ref{sec:ctrl-mpc-formulation}--\ref{sec:ctrl-recommended}. This
+development spans the multi-objective cost function with economic anchoring
+(Section~\ref{sec:ctrl-mpc-formulation}), the Control-Oriented Model and
+symbolic NLP construction that make online optimization computationally
+tractable (Section~\ref{sec:ctrl-com}), the prediction horizon selection
+(Section~\ref{ssec:ctrl-horizon}), the four-phase weight-sensitivity analysis
+that identifies and resolves three cost-function pathologies
+(Section~\ref{sec:ctrl-sweep}), and the resulting recommended operating
+point (Section~\ref{sec:ctrl-recommended}).
+
+The SAC architecture is presented in Section~\ref{sec:ctrl-sac}, covering
+the Markov Decision Process formulation, the Gymnasium environment wrapper,
+the CTDE actor-critic structure, and the full training protocol including
+the 20/3/3 train/dev/test year split. Section~\ref{sec:ctrl-forecast-noise}
+introduces the AR(1) meteorological forecast noise model used to evaluate
+both controllers under realistic forecast uncertainty in Chapter~\ref{chap:results}.
+
+% =============================================================================
+\section{Baselines}
+\label{sec:ctrl-baselines}
+% =============================================================================
+
+\subsection{No-Irrigation Baseline}
+\label{ssec:ctrl-noirr}
+
+The no-irrigation controller applies $u^{(n)}(k) = 0$ for all agents and all
+timesteps. The crop subsists on rainfall alone. This baseline establishes the
+rainfed yield floor against which any irrigation controller is evaluated.
+Under the dry scenario (2022, 39.7~mm seasonal rainfall), the no-irrigation
+controller produces a near-complete yield collapse of 1{,}462~kg/ha with
+87~drought-days per agent. Under the wet scenario (2024, 176.8~mm), partial
+yield of 2{,}243~kg/ha is maintained with 83~drought-days per agent. These
+values quantify the marginal value of irrigation across scenarios and provide
+the lower bound for the comparative analysis of Chapter~\ref{chap:results}.
+
+\subsection{Fixed-Schedule Heuristic}
+\label{ssec:ctrl-fixed}
+
+The fixed-schedule controller represents traditional Hashemi irrigation
+practice in Gilan~\cite{jalali2021}. The seasonal water budget
+$W_{\mathrm{total}}$ is divided uniformly across all $K = 93$ days and
+applied identically to all $N = 130$ agents:
+\begin{equation}
+u_{\mathrm{fixed}}^{(n)}(k) = \frac{W_{\mathrm{total}}}{K}
+\qquad \forall n,\, \forall k
+\label{eq:fixed-schedule}
+\end{equation}
+This open-loop policy uses the full budget exactly, distributes it evenly
+in space and time, and ignores both spatial heterogeneity and temporal
+climate variation. As a baseline it isolates the value of \emph{closed-loop
+feedback}: any improvement of MPC or SAC over the fixed schedule is
+attributable specifically to the controller's ability to react to state and
+forecast information, since all three controllers share the same ABM, the
+same budget, and the same actuator bounds.
+
+Under the dry scenario at full budget (484~mm), the fixed schedule yields
+3{,}607~kg/ha but incurs 54~waterlog-days and 28~drought-days per agent: the
+uniform application is simultaneously too much (waterlogging upslope low-ET
+agents) and too little (under-supplying high-ET periods). Under the wet
+scenario the waterlogging worsens further (83.7~waterlog-days) because the
+fixed schedule does not react to rainfall, delivering the same volume
+regardless of whether the crop already has sufficient moisture from
+precipitation.
+
+% =============================================================================
+\section{MPC Problem Formulation}
+\label{sec:ctrl-mpc-formulation}
+% =============================================================================
+
+The Model Predictive Controller solves the constrained finite-horizon optimal
+control problem of Section~\ref{sec:sys-control} in a receding-horizon
+fashion. At each timestep~$k$, the controller observes the field state
+$\mathbf{X}(k)$, retrieves the climate forecast over the next $H_p$ days,
+solves a nonlinear program (NLP) to obtain the optimal control sequence
+$\mathbf{U}^*(k:k+H_p-1)$, applies only the first-step action
+$\mathbf{u}^*(k)$, and re-solves at $k+1$ with updated state and forecast.
+This receding-horizon mechanism converts the open-loop optimization into a
+feedback control law and provides robustness against modeling errors and
+weather-forecast deviations.
+
+The per-iteration optimization is
+\begin{equation}
+\min_{\mathbf{U}(k:k+H_p-1)}
+J\bigl(\mathbf{X}(k:k+H_p),\,\mathbf{U}(k:k+H_p-1)\bigr)
+\label{eq:mpc-ocp}
+\end{equation}
+subject to
+\begin{align}
+\mathbf{x}^{(n)}(j+1) &= f\!\bigl(\mathbf{x}^{(n)}(j),\,u^{(n)}(j),\,
+  \mathbf{w}(j);\,\mathcal{G}\bigr),
+  \quad n=1,\ldots,N,\quad j=k,\ldots,k+H_p-1
+  \label{eq:mpc-dyn}\\
+0 &\leq u^{(n)}(j) \leq u_{\max}, \qquad \forall n,\,\forall j
+  \label{eq:mpc-bounds}\\
+\sum_{j=k}^{k+H_p-1}\sum_{n=1}^{N} u^{(n)}(j) &\leq W_{\mathrm{remaining}}(k)
+  \label{eq:mpc-budget}
+\end{align}
+where $W_{\mathrm{remaining}}(k)$ is the water budget remaining at the start
+of timestep~$k$. The remainder of this section addresses three components of
+this formulation that require careful design: the cost function $J$
+(Section~\ref{ssec:ctrl-cost}), the symbolic Control-Oriented Model and
+NLP construction (Section~\ref{sec:ctrl-com}), and the choice of prediction
+horizon $H_p$ (Section~\ref{ssec:ctrl-horizon}).
+
+\subsection{Multi-Objective Cost Function}
+\label{ssec:ctrl-cost}
+
+The cost function is the principal design lever of the MPC. It encodes the
+agronomic and economic priorities traded off when allocating water across
+space and time. The formulation adopted here is a five-term sum:
+\begin{equation}
+J =
+  \underbrace{-\alpha_1 \cdot J_{\mathrm{biomass}}}_{\text{terminal reward}}
++ \underbrace{\alpha_2 \cdot J_{\mathrm{water}}}_{\text{economic cost}}
++ \underbrace{\alpha_3 \cdot J_{\mathrm{drought}}}_{\text{drought penalty}}
++ \underbrace{\alpha_5 \cdot J_{\Delta u}}_{\text{actuator regularizer}}
++ \underbrace{\alpha_6 \cdot J_{\mathrm{overFC}}}_{\text{FC-overshoot penalty}}
+\label{eq:cost-fn}
+\end{equation}
+A sixth term $\alpha_4 J_{\mathrm{ponding}}$ appeared in an initial
+formulation and is set to zero at the recommended operating point; its
+empirical falsification is the subject of
+Sections~\ref{ssec:ctrl-cost-overfc} and \ref{ssec:ctrl-sweep-joint}.
+
+\subsubsection*{Term 1 — Terminal Biomass}
+
+The terminal biomass reward is the principal positive driver of the cost:
+\begin{equation}
+J_{\mathrm{biomass}} = \frac{1}{N \cdot x_{4,\mathrm{ref}}}
+  \sum_{n=1}^{N} x_4^{(n)}(K)
+\label{eq:J-biomass}
+\end{equation}
+where $x_{4,\mathrm{ref}} = 1{,}000$~g/m$^2$ normalizes to unit order of
+magnitude at full agronomic potential. Within the receding-horizon loop, the
+end-of-horizon state $\mathbf{X}(k+H_p)$ replaces $\mathbf{X}(K)$,
+following standard Mayer-term MPC convention.
+
+\subsubsection*{Term 2 — Water Consumption (Economic Anchoring)}
+
+The water-cost term penalizes cumulative volumetric water applied over the
+horizon:
+\begin{equation}
+J_{\mathrm{water}} = \frac{1}{N \cdot u_{\max} \cdot H_p}
+  \sum_{j=k}^{k+H_p-1} \sum_{n=1}^{N} u^{(n)}(j)
+\label{eq:J-water}
+\end{equation}
+Unlike the other weights, $\alpha_2$ admits direct economic interpretation.
+Iranian water policy is structured around a four-tier volumetric tariff
+schedule~\cite{Mesgaran2018}. Setting $\alpha_2$ proportional to a chosen
+tariff tier allows the controller's behaviour to be interpreted as a response
+to a real economic price signal rather than an abstract regularization.
+The four operationally relevant tiers and their corresponding $\alpha_2$
+values are:
+\begin{itemize}
+  \item Subsidized agricultural ($\sim$175~Toman/m$^3$):
+    $\alpha_2 = 0.0004$
+  \item Domestic base ($\sim$7{,}000~Toman/m$^3$):
+    $\alpha_2 = 0.016$
+  \item Domestic high-consumption ($\sim$19{,}000~Toman/m$^3$):
+    $\alpha_2 = 0.044$
+  \item Industrial ($\sim$115{,}000~Toman/m$^3$):
+    $\alpha_2 = 0.265$
+\end{itemize}
+The recommended value $\alpha_2^* = 0.016$ corresponds to the domestic-base
+tier; the empirical justification is presented in
+Section~\ref{ssec:ctrl-sweep-a2}.
+
+\subsubsection*{Term 3 — Drought Stress}
+
+The drought-stress term penalizes per-day soil-moisture deficits below the
+agronomic stress threshold $\mathrm{ST} = \mathrm{FC}(1 - p)$, where $p = 0.20$
+is the FAO depletion fraction for rice~\cite{allen1998}:
+\begin{equation}
+J_{\mathrm{drought}} = \frac{1}{N \cdot H_p \cdot (\mathrm{ST} - \mathrm{WP})}
+  \sum_{j=k}^{k+H_p-1} \sum_{n=1}^{N}
+  \mathrm{smax}_{\varepsilon}\!\bigl(\mathrm{ST} - x_1^{(n)}(j),\, 0\bigr)
+\label{eq:J-drought}
+\end{equation}
+The smooth-max operator $\mathrm{smax}_{\varepsilon}(a,b) =
+\tfrac{1}{2}\bigl(a + b + \sqrt{(a-b)^2 + \varepsilon^2}\bigr)$ with
+$\varepsilon = 10^{-2}$ replaces the non-differentiable $\max(\cdot, 0)$,
+enabling second-order gradient information for the IPOPT solver while
+preserving $C^2$ continuity everywhere on $\mathbb{R}$. The denominator
+normalizes the term to $[0,1]$ when the soil is held continuously at the
+wilting point.
+
+\subsubsection*{Term 5 — Actuator Smoothing}
+
+Sudden swings in irrigation flow stress hardware and complicate operational
+scheduling. A quadratic penalty on the daily increment
+$\Delta u^{(n)}(j) = u^{(n)}(j) - u^{(n)}(j-1)$ smooths the control
+trajectory:
+\begin{equation}
+J_{\Delta u} = \frac{1}{N \cdot u_{\max}^2 \cdot H_p}
+  \sum_{j=k}^{k+H_p-1} \sum_{n=1}^{N}
+  \bigl(\Delta u^{(n)}(j)\bigr)^2
+\label{eq:J-deltau}
+\end{equation}
+The recommended value $\alpha_5^* = 0.005$ is small relative to the other
+path penalties; the term acts as a regularizer that breaks ties among
+otherwise equivalent control sequences without materially shifting the
+optimum.
+
+\subsubsection*{Term 6 — Field-Capacity Overshoot Penalty}
+\label{ssec:ctrl-cost-overfc}
+
+The two soft state penalties in \eqref{eq:cost-fn} are $J_{\mathrm{drought}}$
+(soil moisture below the stress threshold) and $J_{\mathrm{overFC}}$
+(soil moisture above field capacity). The latter addresses a controller
+pathology that emerged empirically from nominal MPC runs. The mechanism is
+described here; the supporting evidence is presented in
+Sections~\ref{ssec:ctrl-sweep-a4} and~\ref{ssec:ctrl-sweep-joint}.
+
+The initial cost-function formulation included an explicit ponding penalty on
+the surface state $x_5$:
+\begin{equation*}
+J_{\mathrm{ponding}} = \frac{1}{N \cdot x_{5,\mathrm{ref}} \cdot H_p}
+  \sum_{j=k}^{k+H_p-1} \sum_{n=1}^{N} x_5^{(n)}(j)
+\end{equation*}
+The motivation was that surface ponding causes root-zone oxygen deprivation,
+and $x_5$ and $x_1$ describe physically distinct hydrological compartments.
+Empirically, this expectation was falsified. Nominal runs at $H_p = 14$
+revealed that the controller systematically pushed water past the surface
+(suppressing $x_5$) into the root zone, where $x_1$ persistently exceeded
+field capacity for 21.6~agent-days at dry/100\%/$H_p = 14$ and
+61.1~agent-days at wet/100\%/$H_p = 14$, with peak $x_1$ reaching 205~mm.
+The agronomic consequence of $x_1 > \mathrm{FC}$ is root hypoxia within
+24--48~hours~\cite{setter1997}; the ponding penalty did not prevent this
+because it was targeting the wrong state variable.
+
+The diagnosis motivated a sixth cost term targeting $x_1 > \mathrm{FC}$
+directly:
+\begin{equation}
+J_{\mathrm{overFC}} = \frac{1}{N \cdot \mathrm{FC}^2 \cdot H_p}
+  \sum_{j=k}^{k+H_p-1} \sum_{n=1}^{N}
+  \mathrm{smax}_{\varepsilon}\!\bigl(x_1^{(n)}(j) - \mathrm{FC},\, 0\bigr)^2
+\label{eq:J-overfc}
+\end{equation}
+The quadratic form makes the penalty $C^2$-smooth and ensures that large
+overshoots are penalized strongly while small transient excursions are
+penalized lightly. Whether the original $J_{\mathrm{ponding}}$ term retains
+any independent agronomic role once $\alpha_6 > 0$ is tested in the joint
+factorial of Section~\ref{ssec:ctrl-sweep-joint}; the conclusion is that at
+sufficient $\alpha_6$ strength the ponding penalty contributes no measurable
+benefit and the cost function reduces to the five-term form
+\eqref{eq:cost-fn}. The $J_{\mathrm{ponding}}$ term is retained in the
+implementation but inactive at $\alpha_4 = 0$, leaving the formulation
+extensible.
+
+% =============================================================================
+\section{Control-Oriented Model and NLP Construction}
+\label{sec:ctrl-com}
+% =============================================================================
+
+The optimization \eqref{eq:mpc-ocp}--\eqref{eq:mpc-budget} is implemented
+in CasADi~\cite{andersson2019casadi}, a symbolic automatic-differentiation
+framework that constructs a single NLP for the entire prediction horizon.
+Three design decisions reduce the problem to a tractable size and enable
+efficient gradient evaluation.
+
+\subsection{State-Vector Reduction}
+\label{ssec:ctrl-state-reduction}
+
+Of the five ABM state variables, only $x_1$ (root-zone moisture) and $x_5$
+(surface ponding) are directly affected by the control input within a single
+timestep. The remaining states evolve from climate forcings alone:
+\begin{itemize}
+  \item $x_2$ (cumulative thermal time) is a function of temperature only,
+    deterministic over any forecast window.
+  \item $x_3$ (maturation index) accumulates $\theta_{11}(1-h_2)
+    + \theta_{12}(1-h_3)$ per day; both $h_2$ (heat stress) and $h_3$
+    (drought stress) are scalar functions of temperature and $x_1$,
+    respectively.
+  \item $x_4$ (biomass) accumulates as a function of $x_1$, $x_2$, $x_3$,
+    and shortwave radiation.
+\end{itemize}
+Within the NLP, $x_2$, $x_3$, and $x_4$ are computed by forward integration
+as symbolic expressions of the shooting states $x_1$ and $x_5$ rather than
+carried as independent decision variables. This reduces the shooting-state
+dimension from $5 \cdot N \cdot H_p$ to $2 \cdot N \cdot H_p$ at the cost
+of slightly more complex symbolic expressions. At $N = 130$ and $H_p = 8$,
+the NLP has $2 \cdot 130 \cdot 8 = 2{,}080$ state variables plus
+$130 \cdot 8 = 1{,}040$ action variables, for a total of \textbf{3,120
+decision variables} and \textbf{2,081 constraints} (1,040 bound constraints
+plus the single budget constraint at each of the 8 horizon steps, plus the
+2,080 state-transition equalities, minus double counting of shared horizon
+endpoints).
+
+\subsection{Deterministic Caching of Biological Nonlinearities}
+\label{ssec:ctrl-caching}
+
+The growth function $g(x_2)$, the heat-stress factor $h_2$, the
+cold-stress factor $h_7$, and the crop atmospheric demand $K_c \cdot
+\mathrm{ET}_0$ (denoted $\mathrm{ET}_c$) depend only on temperature,
+radiation, and thermal time --- all of which are deterministic functions of
+the forecast rather than of the irrigation action. These quantities are
+therefore precomputed over the full season for each scenario (or, in the
+randomized training mode, for each sampled historical year) and cached on
+disk as NumPy arrays. Within the NLP, they enter as fixed numeric constants
+rather than as symbolic expressions, substantially reducing the symbolic
+graph complexity and accelerating both function evaluations and gradient
+computations.
+
+Specifically, for each day $d$ of the season, the following quantities are
+precomputed:
+\begin{itemize}
+  \item $h_1^{(d)} = \max(T_{\mathrm{mean}}^{(d)} - \theta_7,\, 0)$,
+    the daily thermal increment;
+  \item $x_2^{(d)} = x_2(0) + \sum_{i=0}^{d-1} h_1^{(i)}$,
+    the cumulative thermal time;
+  \item $h_2^{(d)}$, the heat-stress factor;
+  \item $h_7^{(d)}$, the low-temperature stress factor;
+  \item $g_{\mathrm{base}}^{(d)} = g(x_2^{(d)})$ evaluated at
+    $x_3 = 0$ (the no-maturation-stress baseline);
+  \item $\mathrm{ET}_c^{(d)} = K_c \cdot \mathrm{ET}_0^{(d)}$,
+    the crop-specific atmospheric demand.
+\end{itemize}
+These six arrays are used both by the MPC (as NLP constants) and by the SAC
+observation builder (as features in the 707-dimensional observation vector),
+ensuring that both controllers operate on identical agronomic context signals.
+
+\subsection{Symbolic Topological Cascade Unrolling}
+\label{ssec:ctrl-cascade-unrolling}
+
+The runoff-routing graph $\mathcal{G}$ is statically known at NLP
+construction time. The agents are sorted topologically (highest elevation
+first) and the cascade is unrolled symbolically: each agent's surface-water
+balance is expressed as an explicit function of its own action $u^{(n)}(j)$
+and of the runoff contributions of its uphill neighbors, which have already
+been computed in the topological sweep. This produces a single forward pass
+per timestep with no implicit equations or iterative routing solvers. The
+resulting NLP is dense in the spatial dimension (each agent's state depends
+on all uphill agents' actions) but the symbolic graph is straight-line code
+that CasADi's automatic differentiation processes efficiently.
+
+\subsection{Smooth Approximations for Solver Convergence}
+\label{ssec:ctrl-smooth}
+
+The ABM contains several non-differentiable operations that must be smoothed
+for interior-point optimization. The smooth-max operator introduced in
+Section~\ref{ssec:ctrl-cost} ($\mathrm{smax}_\varepsilon$ with
+$\varepsilon = 0.01$) is applied uniformly wherever $\max(\cdot, 0)$,
+$\min(\cdot, \cdot)$, or clamp-to-bounds operations appear in the cost
+function and state-transition equations. The $C^2$-smooth approximation
+preserves the function value to within $\varepsilon/2 = 0.005$~mm across the
+relevant operating range and provides the twice-differentiable structure
+required by IPOPT's filter line-search globalization strategy.
+
+\subsection{NLP Solver Configuration}
+\label{ssec:ctrl-solver}
+
+The complete NLP is solved with IPOPT~\cite{wachter2006ipopt} at each
+receding-horizon step. The principal solver settings are:
+\begin{itemize}
+  \item Convergence tolerance: $\mathrm{tol} = 10^{-4}$
+  \item Acceptable tolerance: $\mathrm{acceptable\_tol} = 10^{-3}$
+  \item Maximum iterations: $500$
+  \item Warm-starting: the action sequence from the previous solve, shifted
+    by one timestep (last entry zero-initialized), is used as the
+    initial guess for the current solve (Section~\ref{ssec:ctrl-warmstart}).
+\end{itemize}
+These settings balance solver reliability against per-iteration latency. The
+relaxed primary tolerance is justified by the observation that the cost
+surface near the field-capacity saturation regime has small agronomic
+gradients, so a tight $10^{-8}$ tolerance produces only marginal changes
+in the optimal action while requiring substantially longer solve times.
+
+\paragraph{Observed convergence.}
+At the recommended operating point $\boldsymbol{\alpha}^*$ and $H_p = 8$,
+the mean per-day solve time across the six evaluated scenario/budget
+combinations is 25.9~s (median 22.1~s), with a worst-case of 274~s occurring
+in a high-rainfall wet-year iteration where the constraint surface is
+particularly complex. The total wall-clock time per 93-day season ranges
+from 22 to 51~minutes depending on scenario and budget, confirming practical
+feasibility for daily-dispatch agricultural systems. At $H_p = 14$, mean
+solve time rises to 292~s (5-fold increase) with a worst-case of 12{,}134~s
+in the wet/85\% configuration, a latency that exceeds practical dispatch
+windows for any system faster than daily scheduling.
+
+\subsection{Warm-Starting and Computational Acceleration}
+\label{ssec:ctrl-warmstart}
+
+At each timestep $k$, the initial guess for the NLP is constructed by
+taking the optimal action sequence from step $k-1$, removing the first
+element (which was applied), and appending a zero-action as the final entry.
+This shifted warm-start provides a feasible (or near-feasible) initial
+point that lies close to the true optimum by continuity of the optimal
+value function, reducing the number of IPOPT iterations required per solve.
+In practice, warm-started solves at $H_p = 8$ converge in a mean of
+112~iterations versus approximately 280~iterations from a cold start, a
+$2.5\times$ reduction in per-step compute.
+
+\subsection{Prediction Horizon}
+\label{ssec:ctrl-horizon}
+
+Three prediction horizons are evaluated: $H_p \in \{3, 8, 14\}$~days. The
+trade-off is fundamental. Short horizons produce small NLPs that solve in
+under one second ($H_p = 3$: mean 0.8~s) and respond quickly to forecast
+updates, but cannot anticipate multi-day rainfall events or stage water
+deliveries against a multi-week phenological schedule. Long horizons enable
+more strategic allocation but produce NLPs whose worst-case solve times
+exceed three hours at $H_p = 14$ in wet scenarios, and whose larger search
+space increases susceptibility to non-convex local-minimum traps.
+
+The choice of $H_p$ is informed by the empirical analysis of
+Section~\ref{sec:ctrl-recommended}. To anticipate that result briefly: under
+the original cost function ($\alpha_6 = 0$), $H_p = 14$ exhibited a
+horizon-inversion pathology in which yields were strictly worse than at
+shorter horizons, traceable to the field-capacity overshoot problem of
+Section~\ref{ssec:ctrl-cost-overfc}. Under the recommended cost function,
+this pathology is resolved and yields converge across horizons. The
+recommended horizon is $H_p^* = 8$, selected on the basis that yields are
+statistically equivalent across horizons at $\boldsymbol{\alpha}^*$ while
+per-step solve time at $H_p = 8$ is approximately $5\times$ faster than at
+$H_p = 14$ and the warm-start mechanism is most effective in the mid-range
+horizon.
+
+% =============================================================================
+\section{Weight-Sensitivity Analysis}
+\label{sec:ctrl-sweep}
+% =============================================================================
+
+This section presents the systematic sensitivity sweep that calibrated the
+cost-function weights $\boldsymbol{\alpha} = (\alpha_1, \ldots, \alpha_6)$
+and identified the recommended operating point. The sweep was conducted in
+four phases across 33 controller configurations and approximately 70~hours
+of compute. The four phases are:
+\begin{enumerate}
+  \item \textbf{One-at-a-time (OAT) sweep} of the four weights with
+    ambiguous economic or agronomic motivation ($\alpha_2, \alpha_3,
+    \alpha_4, \alpha_6$), Sections~\ref{ssec:ctrl-sweep-a2}--\ref{ssec:ctrl-sweep-a6}.
+  \item \textbf{Joint $(\alpha_4, \alpha_6)$ factorial} at the worst-case
+    wet/$H_p=14$ stress-test point, testing the redundancy hypothesis between
+    the two waterlogging penalties, Section~\ref{ssec:ctrl-sweep-joint}.
+  \item \textbf{Cross-scenario validation} of two candidate operating points
+    across the operating-point grid, Section~\ref{ssec:ctrl-sweep-validation}.
+  \item \textbf{Ceiling test} confirming that the recommended $\alpha_6 = 8$
+    sits at the asymptotic plateau of the weight-vs-performance response,
+    Section~\ref{ssec:ctrl-sweep-ceiling}.
+\end{enumerate}
+
+The nominal reference against which sweeps are compared is
+$\boldsymbol{\alpha}^{\mathrm{nom}} = (1.0, 0.01, 0.1, 0.5, 0.005, 0)$.
+This reference deactivates $J_{\mathrm{overFC}}$ entirely ($\alpha_6 = 0$)
+and uses an intermediate water-cost weight ($\alpha_2 = 0.01$), so that the
+price-tier sweep is not biased toward any specific tariff.
+
+\paragraph{Diagnostic metrics.} Each configuration is evaluated on the
+following metrics: terminal yield (kg/ha), total water applied (mm),
+waterlog-days per agent (days with $x_1 > \mathrm{FC} = 140$~mm),
+severe-waterlog-days per agent (days with $x_1 > 180$~mm, the root-hypoxia
+threshold), peak $x_1$ (mm), and worst-case per-day solve time (s).
+
+\subsection{\texorpdfstring{$\alpha_2$: Water-Price Tiers}{Alpha2: Water-Price Tiers}}
+\label{ssec:ctrl-sweep-a2}
+
+The $\alpha_2$ sweep evaluates the controller's response to the four Iranian
+water-pricing tiers at dry/100\%/$H_p = 8$. Results are summarized in
+Table~\ref{tab:sweep-a2}.
+
+\begin{table}[h]
+\centering
+\caption{$\alpha_2$ sweep: dry/100\%/$H_p=8$. Yield, water use, and
+waterlog-days as functions of the water-cost weight, mapped to Iranian
+water-pricing tiers.}
+\label{tab:sweep-a2}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Tier} & $\boldsymbol{\alpha_2}$
+  & \textbf{Yield (kg/ha)} & \textbf{Water (mm)} & \textbf{wlog-d} \\
+\midrule
+Subsidized agricultural & 0.0004 & 3{,}836 & 482.4 & 76.0 \\
+Domestic base           & 0.016  & 4{,}142 & 468.2 &  1.8 \\
+Domestic high           & 0.044  & 4{,}131 & 465.6 &  0.0 \\
+Industrial              & 0.265  & 1{,}495 &   6.0 &  0.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Three findings emerge. First, at the subsidized agricultural rate, the
+controller over-irrigates: water use is the highest in the sweep (482.4~mm)
+yet yield is the lowest (3{,}836~kg/ha) due to severe field-capacity
+overshoot — 76~waterlog-days, an order of magnitude worse than any other
+configuration. Cheap water actively damages the crop because the controller
+has no economic incentive to refrain from over-application. Second, at the
+domestic-base and domestic-high tiers, the controller curbs water use
+marginally while achieving yields above 4{,}100~kg/ha with negligible
+waterlogging. The moderate price discipline forces the controller into the
+agronomic sweet spot. Third, at the industrial tier, the controller adopts a
+rational-shutdown policy: water use collapses to 6~mm and yield drops to
+1{,}495~kg/ha, because the marginal water cost exceeds the marginal biomass
+revenue at the industrial price level. This response is economically correct:
+at industrial pricing, rice cultivation is no longer profitable.
+
+The recommended value $\alpha_2^* = 0.016$ corresponds to the domestic-base
+tier, which achieves the best yield-per-water trade-off without inducing
+either the over-application pathology or the rational-shutdown collapse.
+
+\subsection{\texorpdfstring{$\alpha_3$: Drought Stress Regularizer}{Alpha3: Drought Stress}}
+\label{ssec:ctrl-sweep-a3}
+
+The $\alpha_3$ sweep evaluates values of $\{0.03, 0.30\}$ at
+dry/100\%/$H_p = 8$, spanning a full order of magnitude around the nominal
+$\alpha_3 = 0.1$. Yield variations are below 1\% and water-use variations
+are below 1\%. The drought-stress term is agronomically redundant under the
+tested conditions because the implicit drought penalty embedded in the
+biomass increment (the $h_3$ multiplier in $\dot{x}_4$) already provides a
+strong gradient against drought. The explicit $\alpha_3$ term retains
+diagnostic utility under tight budget conditions: at 70\% budget where the
+controller cannot avoid drought, higher $\alpha_3$ values produce strongly
+positive ex-post cost values that flag the infeasibility to an operator.
+The default $\alpha_3 = 0.1$ is retained.
+
+\subsection{\texorpdfstring{$\alpha_4$: Surface-Ponding Penalty (Falsification)}{Alpha4: Surface Ponding}}
+\label{ssec:ctrl-sweep-a4}
+
+The $\alpha_4$ sweep evaluates values of $\{2.0, 5.0\}$ (versus nominal
+$0.5$) at wet/100\%/$H_p=14$, the operating regime where surface ponding is
+most prevalent. Results are summarized in Table~\ref{tab:sweep-a4}.
+
+\begin{table}[h]
+\centering
+\caption{$\alpha_4$ sweep at wet/100\%/$H_p=14$ with $\alpha_6 = 0$.
+Waterlog-days increase before decreasing; root-zone overshoot is
+unaffected: $\alpha_4$ alone does not resolve the wet-scenario pathology.}
+\label{tab:sweep-a4}
+\begin{tabular}{ccccc}
+\toprule
+$\boldsymbol{\alpha_4}$ & \textbf{Yield}
+  & \textbf{Water (mm)} & \textbf{wlog-d} & $x_5^{\mathrm{max}}$~\textbf{(mm)} \\
+\midrule
+0.5 (nominal) & 3{,}392 & 446.0 & 61.1 & 40.8 \\
+2.0           & 3{,}334 & 475.1 & 68.1 &  0.7 \\
+5.0           & 3{,}537 & 407.8 & 47.0 & 0.04 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+At $\alpha_4 = 2.0$, surface ponding is essentially eliminated
+($x_5^{\mathrm{max}}$ collapses from 40.8 to 0.7~mm), but root-zone
+waterlog-days \emph{increase} from 61 to 68. The controller has displaced
+the pathology from the surface to the subsurface: water is pushed past the
+surface and into the root zone where $\alpha_4$ cannot see it. Only at
+$\alpha_4 = 5.0$ does behaviour improve, and only by suppressing total water
+application (water use drops 38~mm) rather than by improved scheduling.
+The conclusion is that $\alpha_4$ alone cannot resolve the wet-scenario
+pathology because it targets $x_5$ instead of $x_1$.
+
+\subsection{\texorpdfstring{$\alpha_6$: Field-Capacity Overshoot}{Alpha6: FC Overshoot}}
+\label{ssec:ctrl-sweep-a6}
+
+The $\alpha_6$ sweep evaluates three values ($\{0.1, 0.5, 2.0\}$) at
+dry/$H_p = 8$ and one value ($\alpha_6 = 2.0$) at the horizon-inversion
+regime dry/$H_p = 14$. At $H_p = 8$, the FC-overshoot is small at the
+nominal weights (1.9~waterlog-days), and sweep values produce yield
+variations within 1\%. The penalty has nothing to act against in this regime,
+confirming that $\alpha_6$ is a horizon-conditional lever rather than a
+universally beneficial one.
+
+At $H_p = 14$, $\alpha_6 = 2.0$ reduces dry/100\% waterlog-days from 21.6
+to 13.9 (35\% reduction) and improves yield slightly. The mechanism works as
+designed at the horizon where the pathology is active. However, 13.9
+residual waterlog-days remain approximately $7\times$ the $H_p = 8$ baseline,
+indicating that $\alpha_6 = 2.0$ is insufficient, which motivates the broader
+joint sweep with higher $\alpha_6$ values.
+
+\subsection{\texorpdfstring{Joint $(\alpha_4, \alpha_6)$ Factorial}{Joint Alpha4 Alpha6 Factorial}}
+\label{ssec:ctrl-sweep-joint}
+
+The joint factorial tests whether $\alpha_4$ retains independent agronomic
+value once $\alpha_6$ is active. The factorial spans $\alpha_4 \in \{0, 0.5,
+2, 5\}$ and $\alpha_6 \in \{0, 2, 4, 8\}$ across nine new configurations at
+wet/100\%/$H_p=14$, combined with three preexisting runs at $\alpha_6 = 0$.
+Results are summarized in Table~\ref{tab:sweep-joint}.
+
+\begin{table}[h]
+\centering
+\caption{Joint $(\alpha_4, \alpha_6)$ factorial at wet/100\%/$H_p=14$.
+Sev-wlog reports days with $x_1 > 180$~mm. Sorted by waterlog-day count.}
+\label{tab:sweep-joint}
+\begin{tabular}{cccccc}
+\toprule
+$\boldsymbol{\alpha_4}$ & $\boldsymbol{\alpha_6}$
+  & \textbf{Yield} & \textbf{Water} & \textbf{wlog-d} & \textbf{sev-wlog} \\
+\midrule
+0   & 8 & 3{,}774 & 321.5 & 21.1 & 0.0 \\
+5   & 4 & 3{,}756 & 319.5 & 26.3 & 0.0 \\
+2   & 4 & 3{,}763 & 325.9 & 28.2 & 0.0 \\
+0   & 4 & 3{,}677 & 357.8 & 29.8 & 4.8 \\
+0.5 & 4 & 3{,}749 & 330.5 & 31.4 & 1.0 \\
+5   & 2 & 3{,}680 & 343.0 & 35.0 & 3.3 \\
+0   & 2 & 3{,}684 & 361.8 & 36.0 & 4.8 \\
+2   & 2 & 3{,}659 & 347.4 & 41.8 & 5.1 \\
+0   & 0 & 3{,}294 & 478.4 & 63.7 & 24.3 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Three findings determine the recommended cost function. First, the
+configuration $(\alpha_4 = 0, \alpha_6 = 8)$ achieves the highest yield,
+lowest waterlog-days, and zero severe waterlogging without any explicit
+ponding penalty. The mechanism is dynamical: surface water must eventually
+either infiltrate (raising $x_1$, penalized by $\alpha_6$) or drain
+off-farm. A sufficiently strong $\alpha_6$ therefore indirectly suppresses
+high-$x_5$ states by making the downstream infiltrated state expensive.
+Second, at intermediate $\alpha_6 = 4$, configurations with $\alpha_4 \geq 2$
+eliminate severe waterlogging while $\alpha_4 = 0$ leaves 4.8~days, showing
+that $\alpha_4$ retains marginal utility in the intermediate regime.
+Third, the $(\alpha_4 = 0, \alpha_6 = 0)$ baseline differs from the nominal
+$(\alpha_4 = 0.5, \alpha_6 = 0)$ by less than solver noise, demonstrating
+that the original $\alpha_4 = 0.5$ setting was operationally inactive.
+
+The factorial identifies two candidate operating points for cross-scenario
+validation: \textbf{Option~A} $(\alpha_4 = 0, \alpha_6 = 8)$, the
+parsimonious five-term cost function, and \textbf{Option~B}
+$(\alpha_4 = 2, \alpha_6 = 4)$, the joint six-term cost function.
+
+\subsection{Cross-Scenario Validation}
+\label{ssec:ctrl-sweep-validation}
+
+The cross-scenario validation evaluates Options A and B across ten
+configurations spanning the operating-point grid: dry, wet, and moderate
+scenarios; 100\%, 85\%, and 70\% budgets; and $H_p = 8$ and $H_p = 14$.
+Results are summarized in Table~\ref{tab:sweep-validation}.
+
+\begin{table}[h]
+\centering
+\caption{Cross-scenario validation of Option~A ($\alpha_4=0,\,\alpha_6=8$)
+and Option~B ($\alpha_4=2,\,\alpha_6=4$) vs.\ the nominal
+$(\alpha_4=0.5,\,\alpha_6=0)$.
+$\Delta y$: yield change vs.\ nominal (kg/ha);
+$\Delta\mathrm{w}$: waterlog-day change (\%).}
+\label{tab:sweep-validation}
+\begin{tabular}{lcrr cc rr}
+\toprule
+\textbf{Operating point} & \textbf{Option}
+  & \textbf{Yield} & $\boldsymbol{\Delta y}$
+  & \textbf{wlog-d} & $\boldsymbol{\Delta\mathrm{w}}$ \\
+\midrule
+dry / 100\% / $H_p$=14 & A & 4{,}256 & $+8$   & 7.0  & $-68\%$ \\
+dry / 100\% / $H_p$=14 & B & 4{,}256 & $+8$   & 8.7  & $-60\%$ \\
+dry / 100\% / $H_p$=8  & A & 4{,}188 & $-11$  & 4.1  & $+116\%$ \\
+dry / 100\% / $H_p$=8  & B & 4{,}208 & $+9$   & 5.8  & $+205\%$ \\
+wet / 100\% / $H_p$=8  & A & 3{,}762 & $+161$ & 19.1 & $-47\%$ \\
+wet / 100\% / $H_p$=8  & B & 3{,}707 & $+106$ & 25.4 & $-29\%$ \\
+moderate / 100\% / $H_p$=14 & A & 4{,}140 & $+38$  & 3.9 & $-66\%$ \\
+moderate / 100\% / $H_p$=14 & B & 4{,}143 & $+41$  & 3.6 & $-68\%$ \\
+wet / 85\% / $H_p$=14 & A  & 3{,}773 & $+372$ & 24.7 & $-62\%$ \\
+wet / 70\% / $H_p$=14 & A  & 3{,}768 & $+200$ & 16.0 & $-68\%$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The validation supports four conclusions. \textbf{Issue~1} (FC overshoot at
+$H_p = 14$) is fully resolved: at dry/100\%/$H_p=14$, both options reduce
+waterlog-days from 21.6 to 7--9 (60--68\% reduction) with yield preserved
+or improved.
+
+\textbf{Issue~3} (chronic waterlogging at wet/$H_p = 14$) is resolved
+across all budgets. Option~A reduces waterlog-days from 65 to 25 at the 85\%
+budget and from 50 to 16 at the 70\% budget. Notably, the wet/70\%/Option~A
+yield (3{,}768~kg/ha) exceeds the nominal full-budget wet/100\% yield
+(3{,}392~kg/ha) by 376~kg/ha: resolving the cost-function pathology means a
+30\% budget cut can produce \emph{higher} yield than the unconstrained
+original controller, because the recommended weights eliminate the
+over-irrigation that was damaging the crop.
+
+\textbf{An additional pathology at wet/$H_p=8$} is also resolved. Option~A
+produces $+161$~kg/ha yield, 47\% fewer waterlog-days, zero severe
+waterlogging, and 57~mm less water used: a strict Pareto improvement on every
+dimension.
+
+\textbf{The perturbation at dry/$H_p=8$ is acceptable.} Both options cause
+minor waterlog-day increases (to 4.1 and 5.8, respectively). Severe
+waterlogging remains at zero; yield is preserved within $\pm 20$~kg/ha; and
+residual waterlog-days remain within rice's documented 1--2-day tolerance
+window per event~\cite{setter1997}.
+
+Option~A is preferred on three grounds: (i) lower peak $x_1$ across all
+wet operating points; (ii) elimination of severe waterlogging in 9 of 10
+validation runs versus 8 of 10 for Option~B; (iii) reduction of the cost
+function from six to five active terms with no agronomic penalty.
+
+\subsection{Ceiling Test of \texorpdfstring{$\alpha_6$}{Alpha6}}
+\label{ssec:ctrl-sweep-ceiling}
+
+To verify that $\alpha_6 = 8$ does not sit at the lower edge of an
+asymptotic plateau, two further configurations were evaluated at
+wet/100\%/$H_p=14$: $\alpha_6 = 10$ and $\alpha_6 = 16$ (both with
+$\alpha_4 = 0$). Results are in Table~\ref{tab:sweep-ceiling}.
+
+\begin{table}[h]
+\centering
+\caption{Ceiling test of $\alpha_6$ at wet/100\%/$H_p=14$. Agronomic
+response saturates at $\alpha_6 = 8$; increasing beyond this value
+raises worst-case solve time without proportional benefit.}
+\label{tab:sweep-ceiling}
+\begin{tabular}{ccccccc}
+\toprule
+$\boldsymbol{\alpha_6}$ & \textbf{Yield} & \textbf{Water}
+  & \textbf{wlog-d} & \textbf{sev-wlog} & $x_1^{\mathrm{max}}$
+  & $t_{\mathrm{solve,max}}$~(s) \\
+\midrule
+ 8 & 3{,}774 & 321.5 & 21.1 & 0.0 & 163.3 &  921 \\
+10 & 3{,}766 & 321.1 & 22.4 & 0.2 & 166.9 &  971 \\
+16 & 3{,}769 & 320.1 & 18.0 & 0.2 & 163.0 & 1{,}596 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Increasing $\alpha_6$ from 8 to 10 produces no improvement on any metric.
+Increasing to 16 yields a 3-day waterlog-day reduction but increases
+worst-case solve time by 73\% and introduces 0.2~days of severe waterlogging,
+a signature of the solver becoming over-constrained on edge iterations. The
+ceiling test confirms that $\alpha_6^* = 8$ sits at the asymptotic plateau
+of the weight-vs-performance response and is the appropriate operating value.
+
+% =============================================================================
+\section{Recommended Operating Point}
+\label{sec:ctrl-recommended}
+% =============================================================================
+
+The four phases of the sensitivity analysis converge on the recommended
+operating point:
+\begin{equation}
+\boldsymbol{\alpha}^* = (\alpha_1, \alpha_2, \alpha_3, \alpha_4, \alpha_5,
+  \alpha_6)^*
+= (1.0,\; 0.016,\; 0.1,\; 0,\; 0.005,\; 8)
+\label{eq:alpha-star}
+\end{equation}
+with prediction horizon $H_p^* = 8$~days. Each value is the result of
+empirical falsification:
+\begin{itemize}
+  \item $\alpha_2^* = 0.016$ is anchored to the Iranian domestic-base water
+    tariff and validated against all four price tiers.
+  \item $\alpha_4^* = 0$ is the empirically falsified outcome of the joint
+    factorial: $J_{\mathrm{ponding}}$ targets the wrong state variable.
+  \item $\alpha_6^* = 8$ is identified by the factorial and confirmed by the
+    ceiling test.
+  \item $\alpha_3^*$ and $\alpha_5^*$ are retained at nominal values
+    because the sweep showed no sensitivity worth tuning.
+  \item $H_p^* = 8$ reflects equivalent yields across horizons at
+    $\boldsymbol{\alpha}^*$ combined with the $5\times$ solve-time advantage
+    at $H_p = 8$ relative to $H_p = 14$.
+\end{itemize}
+
+The cost function at $\boldsymbol{\alpha}^*$ resolves three pathologies
+identified in the original formulation: the FC-overshoot regime at $H_p = 14$
+(Issue~1), the chronic waterlogging in wet-year scenarios across all budgets
+(Issue~3), and a previously unrecognized waterlogging signature at
+wet/$H_p = 8$. The five-term formulation is the cost function used for the
+deployed MPC throughout the remainder of the thesis and serves as the
+foundation for the SAC reward design presented in the next section.
+
+% =============================================================================
+\section{Soft Actor-Critic Controller}
+\label{sec:ctrl-sac}
+% =============================================================================
+
+The SAC controller addresses the principal practical limitation of the MPC:
+the per-step computational burden of the online NLP. At $H_p = 8$, MPC mean
+solve times are on the order of 25~s per day; at $H_p = 14$, they reach
+292~s per day on average with worst-case latencies exceeding three hours in
+wet scenarios. After offline training, SAC produces a fixed-parameter neural
+network whose inference cost is sub-millisecond and independent of state or
+forecast complexity. The training cost is amortized over many environment
+interactions but pays off at every deployment step.
+
+\subsection{Markov Decision Process Formulation}
+\label{ssec:ctrl-sac-mdp}
+
+The constrained finite-horizon optimal control problem is reformulated as a
+Markov Decision Process (MDP) with the following components.
+
+\paragraph{State $\mathbf{s}_k$ (707-dimensional).}
+The state concatenates per-agent ABM observations and global scalars.
+\begin{itemize}
+  \item \textbf{Per-agent block} (5 $\times$ 130 = 650 entries): for each
+    agent $n$, the normalized root-zone moisture $x_1^{(n)}/\mathrm{FC}$,
+    normalized surface ponding $x_5^{(n)}/x_{5,\mathrm{ref}}$, normalized
+    biomass $x_4^{(n)}/x_{4,\mathrm{ref}}$, raw maturation index $x_3^{(n)}$,
+    and normalized elevation $\gamma^{(n)}$.
+  \item \textbf{Scalar block} (9 entries, indices 650--658): day fraction
+    $k/K$; remaining-budget fraction; budget-total normalization
+    $W_{\mathrm{total}}/W_{\mathrm{full}}$; cumulative burn rate (water
+    used per elapsed day, normalized to the daily-budget pace); today's
+    rainfall; today's $\mathrm{ET}_c$; heat-stress factor $h_2$;
+    cold-stress factor $h_7$; canopy growth function $g_{\mathrm{base}}$.
+  \item \textbf{Forecast block} (6 $\times$ $H_p$ = 48 entries at
+    $H_p = 8$, indices 659--706): $H_p$-day rolling window of rainfall,
+    $\mathrm{ET}_c$, shortwave radiation, $h_2$, $h_7$, and $g_{\mathrm{base}}$.
+    The forecast horizon $H_p = 8$ matches the MPC prediction horizon,
+    giving both controllers identical information over the same lookahead
+    window.
+\end{itemize}
+Total observation dimension: $650 + 9 + 48 = \mathbf{707}$.
+
+\paragraph{Action $\mathbf{a}_k$ (130-dimensional).}
+The action is a normalized irrigation vector $\mathbf{a}_k \in [0,1]^N$
+with $N = 130$. The applied volume per agent is
+$u^{(n)}_k = a^{(n)}_k \cdot u_{\max}$ with $u_{\max} = 12$~mm/day,
+matching the MPC actuator bound. Budget compliance is enforced by the
+same runner-layer clipping described in Section~\ref{sec:sys-eval}.
+
+\paragraph{Transition function.}
+The transition is the same ABM
+$\mathbf{s}_{k+1} = f(\mathbf{s}_k, \mathbf{a}_k, \mathbf{w}_k;\,\mathcal{G})$
+used by the MPC, ensuring that both controllers are evaluated on identical
+dynamics.
+
+\paragraph{Reward $r_k$.}
+The per-step reward is constructed to approximate the negation of the MPC
+path cost at $\boldsymbol{\alpha}^*$:
+\begin{align}
+r_k &= \;\alpha_1 \frac{\Delta\bar{x}_4(k)}{x_{4,\mathrm{ref}}}
+      - \alpha_2 \frac{\sum_n u^{(n)}_k}{N \cdot u_{\max}}
+      - \alpha_3 \frac{\sum_n \max(\mathrm{ST} - x_1^{(n)},\,0)}{N(\mathrm{ST}-\mathrm{WP})}
+      \notag\\
+    &\quad
+      - \alpha_5 \frac{\sum_n (\Delta u^{(n)}_k)^2}{N \cdot u_{\max}^2}
+      - \alpha_6 \frac{\sum_n \max(x_1^{(n)} - \mathrm{FC},\,0)^2}{N \cdot \mathrm{FC}^2}
+      - \lambda_{\mathrm{budget}} \max(\mathrm{burn\_rate}_k - 1,\,0)^2
+\label{eq:sac-reward-path}
+\end{align}
+where $\Delta\bar{x}_4(k) = \bar{x}_4(k) - \bar{x}_4(k-1)$ is the
+field-mean daily biomass increment, and $\mathrm{burn\_rate}_k$ is the ratio
+of cumulative water spent per elapsed day to the daily-budget pace. A
+terminal bonus is added at episode end:
+\begin{equation}
+r_K^{\mathrm{terminal}} = c_{\mathrm{term}} \cdot \alpha_1 \cdot
+  \frac{\bar{x}_4(K)}{x_{4,\mathrm{ref}}}
+\label{eq:sac-reward-terminal}
+\end{equation}
+with $c_{\mathrm{term}} = 5$ ensuring that a maximum-yield episode produces
+a strictly positive total return relative to the zero-action baseline. The
+terminal bonus fires on \emph{both} episode termination (budget exhausted
+before season end) and truncation (season ran to completion), preventing
+the hoard-water local minimum that arises when termination is penalized.
+
+The construction \eqref{eq:sac-reward-path} approximates, to within
+the entropy bonus introduced by the maximum-entropy framework, the negation
+of the MPC path cost at $\boldsymbol{\alpha}^*$. The approximation is exact
+in the limit $\gamma \to 1$; with the operating discount $\gamma = 0.99$
+over $K = 93$ steps, the effective weight on the terminal biomass term
+varies between 1.0 (step 0) and $0.99^{93} \approx 0.39$ (final step),
+introducing a known horizon-dependent scaling that slightly up-weights
+early biomass gains relative to the MPC Mayer term. This
+reward-equivalence design means that differences in MPC-vs-SAC performance
+in Chapter~\ref{chap:results} are attributable to the optimization mechanism
+(online NLP versus amortized neural network), not to differences in objective
+function.
+
+The budget soft-penalty coefficient $\lambda_{\mathrm{budget}} = 0.1$
+provides a gradient against approaching the budget boundary. A pilot
+training run with the initial value of 5.0 revealed that the penalty term
+was approximately $100\times$ larger than the agronomic reward components on
+any step where $\mathrm{burn\_rate} > 1$, causing entropy collapse in the
+SAC optimizer (described in Section~\ref{ssec:ctrl-sac-training}). The
+coefficient was calibrated to 0.1 to place the soft penalty on the same
+order of magnitude as the agronomic terms while preserving the gradient
+signal. The hard runner-layer budget clip guarantees constraint feasibility
+independently of this soft term.
+
+\paragraph{Discount factor.}
+$\gamma = 0.99$. Because the episode is finite ($K = 93$ steps) and bounded,
+the choice of $\gamma$ is less critical than in infinite-horizon problems,
+but a value below 1 stabilizes the temporal-difference targets for the
+critic.
+
+\subsection{SAC Objective}
+\label{ssec:ctrl-sac-objective}
+
+The SAC algorithm~\cite{haarnoja2018sac,haarnoja2019sac} optimizes the
+maximum-entropy objective:
+\begin{equation}
+J(\pi) = \mathbb{E}_{\pi}\!\Biggl[
+  \sum_{k=0}^{K-1} \gamma^k \Bigl(
+    r_k + \alpha_{\mathrm{ent}} \cdot
+    \mathcal{H}\bigl[\pi(\cdot\mid\mathbf{s}_k)\bigr]
+  \Bigr)
+\Biggr]
+\label{eq:sac-objective}
+\end{equation}
+where $\mathcal{H}[\pi(\cdot\mid\mathbf{s})]$ is the differential entropy
+of the policy at state $\mathbf{s}$. The maximum-entropy framework produces
+stochastic policies that explore effectively during training and capture
+multi-modal optima — a property of value in irrigation, where several
+distinct daily allocation profiles across 130 agents may achieve similar
+terminal yield. The temperature $\alpha_{\mathrm{ent}}$ is tuned
+automatically via a constrained dual gradient update targeting a specified
+entropy level~\cite{haarnoja2019sac}.
+
+\subsection{Gymnasium Environment Wrapper}
+\label{ssec:ctrl-sac-gym}
+
+The MDP is implemented as a Gymnasium~\cite{towers2024gymnasium}
+\texttt{Env} subclass (\texttt{IrrigationEnv}) that exposes the ABM
+through the standard \texttt{reset()} / \texttt{step()} interface required
+by Stable-Baselines3.
+
+\paragraph{Observation and action spaces.}
+The observation space is \texttt{Box($-\infty$, $+\infty$,
+shape=(707,), dtype=float32)}, matching the 707-dimensional state vector.
+The action space is \texttt{Box(0, 1, shape=(130,), dtype=float32)}, a
+130-dimensional unit hypercube scaled to physical irrigation volumes inside
+\texttt{step()}.
+
+\paragraph{Episode structure.}
+Each episode corresponds to one 93-day Hashemi cultivation season.
+\texttt{reset()} samples a training year from \texttt{TRAINING\_YEARS} and a
+budget percentage uniformly from $[70\%, 100\%]$ (see
+Section~\ref{ssec:ctrl-sac-training}), re-initializes the ABM to the field
+transplanting conditions of Section~\ref{sec:sys-init}, and returns the
+initial observation.
+
+\texttt{step()} receives a 130-dimensional action, clips it to the
+actuator bounds, scales it to irrigation volumes via $u^{(n)} = a^{(n)}
+\cdot 12$~mm, applies the runner-layer budget enforcement described in
+Section~\ref{sec:sys-eval}, advances the ABM by one day, and returns the
+next observation, the reward \eqref{eq:sac-reward-path}, a
+\texttt{terminated} flag (budget exhausted before season end), a
+\texttt{truncated} flag (season ran to completion), and a diagnostic
+\texttt{info} dictionary containing per-step yield, water use, and reward
+decomposition.
+
+\paragraph{Per-year precomputed quantities.}
+The six biological nonlinearity arrays ($h_1, x_2, h_2, h_7, g_{\mathrm{base}},
+\mathrm{ET}_c$) introduced in Section~\ref{ssec:ctrl-caching} are computed
+on-the-fly for each sampled training year using that year's actual temperature
+and ET data, and cached in a per-episode dictionary keyed by year integer.
+This ensures that the forecast features in the SAC observation ($h_2, h_7,
+g_{\mathrm{base}}, \mathrm{ET}_c$ in the scalar and forecast blocks) are
+consistent with the actual climate experienced by the ABM in the same
+episode. An earlier implementation used a single fixed set of precomputed
+values (from the dry year, 2022) regardless of which training year was
+sampled, introducing a Markov-property violation in which the observation
+and the ABM transition operated on different climate data. The
+per-year computation resolves this.
+
+\subsection{CTDE Actor-Critic Architecture}
+\label{ssec:ctrl-sac-ctde}
+
+The 130-agent structure motivates a Centralized Training, Decentralized
+Execution (CTDE) architecture~\cite{amato2024ctde}. CTDE separates the
+actor's information set (used both during training and at deployment) from
+the critic's information set (used only during training). The actor learns
+a policy conditioned only on per-agent local information and a global shared
+context; it is directly deployable to a distributed sensing-actuation system
+without inter-agent communication at inference time. The critic accesses the
+full joint state, enabling correct credit assignment across the 130 spatial
+agents during training.
+
+\paragraph{Actor: shared-parameter local policy.}
+The actor is a multi-layer perceptron that takes a \textbf{62-dimensional}
+input per agent:
+\begin{itemize}
+  \item 5 per-agent features ($x_1^{(n)}/\mathrm{FC}$, $x_5^{(n)}/x_{5,\mathrm{ref}}$,
+    $x_4^{(n)}/x_{4,\mathrm{ref}}$, $x_3^{(n)}$, $\gamma^{(n)}$)
+  \item 57 global features (9 scalars + 48 forecast dims)
+\end{itemize}
+and outputs the mean and log-standard-deviation of a Gaussian over the single-agent
+action $a^{(n)}_k$. The action mean is squashed by $\tanh$ to $[0, 1]$.
+The \textbf{same MLP weights are applied to all 130 agents in parallel}
+through a reshape-and-broadcast operation, producing a 130-dimensional joint
+action from a single forward pass. The MLP architecture is:
+$62 \to 128 \to 128 \to 1$ (mean) and $62 \to 128 \to 128 \to 1$ (log-std),
+with ReLU activations and log-std clamped to $[-20, 2]$.
+
+Parameter sharing imposes the inductive bias that all agents follow the same
+control policy modulo their local state and shared global context --- an
+appropriate prior for a homogeneous-crop, heterogeneous-terrain field.
+It reduces the actor parameter count from a naive $707 \to 130$ monolithic
+MLP ($\sim$$10^6$ parameters) to a $62 \to 1$ per-agent MLP ($\sim$$10^4$
+parameters), and it enforces spatial equivariance: permuting the agent index
+permutes the action in the same way.
+
+\paragraph{Critic: factorized value decomposition.}
+The critic is a twin-Q value decomposition network~\cite{sunehag2018vdn}
+adapted to continuous joint action spaces. Rather than mapping the full
+$837$-dimensional joint state-action vector to a scalar through a monolithic
+MLP, the critic decomposes the joint Q-value as a sum over per-agent local
+Q-values:
+\begin{equation}
+Q(\mathbf{s}_k, \mathbf{a}_k)
+\;=\;
+\sum_{n=1}^{N}
+Q_{\mathrm{loc}}\!\left(
+  \mathbf{s}_k^{(n,\mathrm{loc})},\;
+  \mathbf{s}_k^{(\mathrm{glob})},\;
+  a_k^{(n)}
+\right)
+\label{eq:vdn-critic}
+\end{equation}
+where $\mathbf{s}_k^{(n,\mathrm{loc})}$ is the 5-dimensional local state of
+agent $n$ (its own $x_1^{(n)}/\mathrm{FC}$, $x_5^{(n)}/x_{5,\mathrm{ref}}$,
+$x_4^{(n)}/x_{4,\mathrm{ref}}$, $x_3^{(n)}$, $\gamma^{(n)}$),
+$\mathbf{s}_k^{(\mathrm{glob})}$ is the 57-dimensional global context
+(9 scalars + 48 forecast dims) broadcast identically to every agent, and
+$a_k^{(n)}$ is the agent's scalar action. The local Q-function
+$Q_{\mathrm{loc}}: \mathbb{R}^{63} \to \mathbb{R}$ is a $63 \to 256 \to 256
+\to 1$ MLP with ReLU activations, and its parameters are shared across all
+$N = 130$ agents — mirroring the parameter-sharing strategy of the actor.
+Twin-Q is preserved as in standard SAC: two independent $Q_{\mathrm{loc}}$
+networks $Q_{\mathrm{loc}}^{(1)}$ and $Q_{\mathrm{loc}}^{(2)}$ each produce
+their own decomposed total, and the minimum is used in the Bellman
+target~\cite{haarnoja2018sac}.
+
+The factorization is motivated by the structure of the SAC reward
+\eqref{eq:sac-reward-path}, in which four of the five terms
+($J_{\mathrm{biomass}}$, $J_{\mathrm{water}}$, $J_{\mathrm{drought}}$,
+$J_{\mathrm{overFC}}$) decompose exactly as sums over per-agent
+contributions; only the budget-burn term $\lambda_{\mathrm{budget}}$
+introduces global coupling, and this coupling is small because the runner-layer
+budget clip enforces feasibility independently. Under such structurally
+additive rewards, the linearity of the gradient with respect to the local
+$Q_{\mathrm{loc}}$ contributions
+($\partial Q_{\mathrm{total}}/\partial Q_{\mathrm{loc}}^{(n)} = 1$)
+delivers a per-agent learning signal that the shared actor can convert into
+spatially differentiated policies — restoring the spatial credit-assignment
+property that the original 837-dim monolithic critic lacked. The choice and
+its empirical motivation are discussed in Section~\ref{ssec:ctrl-sac-critic-motivation}.
+
+Because the critic is used only during training, its computational cost
+does not affect deployment-time inference. The total critic parameter count
+is approximately 166{,}000 (two $63 \to 256 \to 256 \to 1$ MLPs), comparable
+to the $\sim$540{,}000 parameters of the equivalent monolithic critic, with
+the reduction arising from weight sharing across agents.
+
+\subsection{Motivation for Value Decomposition: Spatial Credit Assignment}
+\label{ssec:ctrl-sac-critic-motivation}
+
+An initial implementation of the SAC controller used a standard monolithic
+critic: the full $837$-dimensional joint state-action vector was passed
+through a single $837 \to 256 \to 256 \to 1$ MLP, producing a scalar
+$Q(\mathbf{s}, \mathbf{a})$. The parameter-shared actor described above was
+retained unchanged. Across 200{,}000 training steps, the resulting policy
+collapsed to a near-constant 2–3~mm/day irrigation rate applied uniformly to
+all 130 agents, ignoring both spatial topographical variation and the
+48-dimensional weather forecast. This homogenization persisted across all
+five training seeds and was independent of the test scenario at evaluation
+time: the policy applied 190~mm in the dry scenario and 231~mm in the wet
+scenario, the opposite of the rainfall-adaptive behaviour expected of a
+forecast-aware controller.
+
+The diagnostic finding was that the monolithic critic provides no per-agent
+learning signal: a single scalar Q-value cannot differentiate the relative
+contribution of agent $n$'s action $a_k^{(n)}$ from that of any other agent,
+so the gradient passed back to the shared actor is effectively a field-wide
+average. Because all 130 agents share the same actor parameters, the only
+mechanism by which the policy can produce agent-specific actions is through
+the per-agent local features in the actor input — but those features only
+influence the action if the critic rewards them differentially, which it does
+not under the monolithic formulation. The system therefore converges to the
+spatially-averaged policy that minimizes mean-field cost, regardless of how
+much spatial information is present in the observation.
+
+The decomposition \eqref{eq:vdn-critic} is the minimal architectural change
+that resolves this pathology while preserving the CTDE structure: the actor
+remains unchanged, the critic remains centralized at training time (each
+$Q_{\mathrm{loc}}^{(n)}$ sees the full global context), and inference cost
+remains sub-millisecond. The decomposition introduces no new hyperparameters
+and the local MLP architecture follows the same $256 \to 256$ width as the
+original monolithic critic. Empirical validation of the resulting policy
+behaviour is reported in Chapter~\ref{chap:results}.
+
+\subsection{Training Protocol}
+\label{ssec:ctrl-sac-training}
+
+\paragraph{Data split.}
+A three-way split of the 26-year NASA POWER record governs the experimental
+design:
+\begin{itemize}
+  \item \textbf{Training years (20)}: 2000, 2001, 2003--2015, 2017,
+    2019--2021, 2025. Sampled uniformly at each \texttt{reset()}.
+  \item \textbf{Development years (3)}: 2002 (27.1~mm, low-rainfall tercile),
+    2016 (77.0~mm, mid-rainfall tercile), 2023 (88.4~mm,
+    upper-mid-rainfall tercile). Used by the SB3 \texttt{EvalCallback}
+    during training for \texttt{best\_model} selection and learning-curve
+    monitoring. Chosen to span the training distribution by rainfall
+    tercile, providing a meaningful generalization signal at each evaluation.
+  \item \textbf{Test years (3)}: 2022 (dry), 2018 (moderate), 2024 (wet).
+    Touched only for the final thesis comparison in
+    Chapter~\ref{chap:results}. Never used during training or development-set
+    evaluation.
+\end{itemize}
+At each training episode, the environment samples a year uniformly from the
+20 training years and a budget percentage uniformly from $[70\%, 100\%]$,
+exposing the policy to the full range of deficit conditions during training.
+
+\paragraph{Hyperparameters.}
+The principal training hyperparameters are summarized in
+Table~\ref{tab:sac-hp}.
+
+\begin{table}[h]
+\centering
+\caption{SAC training hyperparameters (final operating values).}
+\label{tab:sac-hp}
+\begin{tabular}{llp{6.5cm}}
+\toprule
+\textbf{Parameter} & \textbf{Value} & \textbf{Rationale} \\
+\midrule
+Total timesteps     & 500{,}000       & Pilot run converged to stable plateau by step 25{,}000; 500{,}000 provides $20\times$ safety margin \\
+Replay buffer size  & 500{,}000       & Cycles $\approx$$1\times$ per run; avoids rapid stale-data churn \\
+Batch size          & 256             & Standard for continuous-action SAC \\
+Learning rate       & $3\!\times\!10^{-4} \to 5\!\times\!10^{-5}$ & Linear decay over total timesteps; stabilizes late-training updates \\
+$\gamma$            & 0.99            & See Section~\ref{ssec:ctrl-sac-mdp} \\
+$\tau$ (soft update)& 0.005           & Haarnoja et al.\ default \\
+$\alpha_{\mathrm{ent}}$ & 0.05 (fixed)& Auto-tuning disabled; see entropy-coefficient note \\
+$c_{\mathrm{term}}$ (terminal bonus) & 0 & Removed; see terminal-bonus note \\
+$\alpha_5$ (in SAC reward)            & 0 & Removed from RL reward; see actuator-smoothing note \\
+Gradient clip $\|\nabla\|_2$ & 1.0 & Caps critic update magnitude \\
+Gradient steps      & 1               & $\mathrm{gs}=2$ halved throughput (37 vs.\ 68~steps/s on T4) without convergence benefit \\
+Learning starts     & 1{,}000         & Random exploration before first update \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Terminal-bonus removal.}
+An initial implementation used a terminal bonus
+$r_K^{\mathrm{terminal}} = c_{\mathrm{term}} \alpha_1 \bar{x}_4(K)/x_{4,\mathrm{ref}}$
+with $c_{\mathrm{term}} = 5$ intended to ensure that maximum-yield episodes
+produced strictly positive total return. WandB telemetry from a
+$200{,}000$-step pilot revealed that the resulting per-step rewards
+($\mathcal{O}(10^{-2})$ to $\mathcal{O}(10^0)$) and the single terminal
+spike ($\approx 5 \cdot 1 \cdot 1 = 5$) differed by approximately
+$300\times$. Bellman bootstrapping of this large sparse signal back through
+the 93-step horizon produced compounding overestimation in the critic,
+manifested as a slow rise in $\mathcal{L}_Q$ from 0.67 (step 20{,}000) to
+84{,}693 by step 130{,}000 — a 126{,}000-fold escalation that destroyed the
+learned Q-function. The fix removes the terminal bonus entirely
+($c_{\mathrm{term}} = 0$): the per-step biomass reward
+$\alpha_1 \Delta \bar{x}_4(k)/x_{4,\mathrm{ref}}$ already integrates to the
+same total biomass signal over the 93-day season when summed, distributing
+the agronomic gradient signal smoothly across all timesteps rather than
+concentrating it in a single backwards-propagated spike.
+
+\paragraph{Entropy coefficient: fixed scalar.}
+The standard SB3 default sets target entropy to $-\dim(\mathbf{a}) = -130$
+and tunes $\alpha_{\mathrm{ent}}$ automatically via dual gradient. A pilot
+run at this value produced catastrophic entropy collapse: $\alpha_{\mathrm{ent}}$
+decayed from 0.17 to 0.004 within 14{,}000 steps as the agronomic reward
+gradients dominated. Reducing the target entropy to $-13$ (= $-0.1 \times \dim$)
+preserved early-training stability but introduced a different pathology: as
+the policy converged onto a low-variance schedule in late training, the
+actual policy entropy fell below the $-13$ target. The dual-gradient update
+responded by spiking $\alpha_{\mathrm{ent}}$ from 0.029 (step 87{,}000) to
+1.286 (step 130{,}000), injecting sudden random exploration into a critic
+that had been trained to evaluate a low-variance distribution. This
+distributional shock combined with the terminal-bonus bootstrap error to
+produce the Phase 3 explosion of the pilot training run. The operational
+fix is to bypass the dual-gradient mechanism entirely: $\alpha_{\mathrm{ent}}$
+is hardcoded to a fixed scalar value of $0.05$, providing a steady,
+non-adaptive exploration noise level. This eliminates the auto-tuner
+distribution shock at the cost of forgoing entropy adaptation across the
+training run; the loss is acceptable because the 130-dimensional action
+space at hardcoded $\alpha_{\mathrm{ent}} = 0.05$ retains sufficient
+exploration noise per agent throughout training.
+
+\paragraph{Actuator smoothing in the RL reward.}
+The MPC cost \eqref{eq:cost-fn} includes a $\Delta u$ regularization term
+$\alpha_5 J_{\Delta u}$ that penalizes step-to-step actuator changes. This
+term is appropriate for the MPC, which observes the full deterministic
+8-day forecast and can smoothly schedule action transitions around future
+weather events. For the SAC controller, this same penalty discourages the
+behavior the policy must learn — reactive switching of irrigation in
+response to rainfall events — because the policy cannot foresee that a
+sudden $\Delta u$ today will reduce the loss tomorrow. Empirically, the
+pilot policy learned that maintaining a constant 2~mm/day rate minimized
+the $\alpha_5$ penalty regardless of rainfall, and never developed
+rainfall-responsive behaviour. The $\alpha_5$ coefficient in the SAC reward
+\eqref{eq:sac-reward-path} is therefore set to zero. The MPC retains
+$\alpha_5 = 0.005$ unchanged. This is a deliberate asymmetry between the
+two controllers' objective functions, motivated by the asymmetry in their
+information access: only the MPC can plan smooth actuation around future
+weather.
+
+\paragraph{Gradient clipping and learning-rate decay.}
+Two additional stabilization measures complete the v2.6 training
+configuration. First, gradient clipping is applied to both actor and critic
+optimizer updates with $\|\nabla\|_2 \le 1$, preventing the positive-feedback
+loop in which a large critic loss produces large parameter updates that
+amplify estimation errors. Second, the learning rate decays linearly from
+$3\!\times\!10^{-4}$ at step~0 to $5\!\times\!10^{-5}$ at step~500{,}000,
+preserving early-training exploration speed while stabilizing the
+near-converged weights against late-training noise.
+
+\paragraph{Training infrastructure and convergence.}
+Training is conducted using Stable-Baselines3~\cite{raffin2021sb3} on the
+Gymnasium-compliant \texttt{IrrigationEnv}, with model checkpoints saved
+every 50{,}000 steps and an \texttt{EvalCallback} running 9 episodes on the
+development set every 25{,}000 steps. The rotating-buffer checkpoint strategy
+(overwriting the single replay-buffer file at each save interval) limits disk
+footprint to $\approx$3.5~GB regardless of run length, enabling deployment
+on Kaggle GPU instances with a 20~GB working-directory quota. A 50{,}000-step
+pilot run (seed~0, Colab T4, 17~minutes) demonstrated clean convergence: the
+policy transitioned from zero full-season completions (mean episode length
+$\approx$60 days, 22\% catastrophic episodes) to 100\% full-season
+completions with zero catastrophic episodes by step 25{,}000, with
+development-set reward stabilizing in the range $[-2.5, -1.5]$ per episode.
+The final 25{,}000 steps show no degradation, confirming that 500{,}000 steps
+provides sufficient margin for stable convergence.
+
+Training is conducted across 5 independent random seeds (0--4) to
+characterize policy variance. The five seeds are run in parallel on separate
+Kaggle GPU notebooks. Chapter~\ref{chap:results} reports mean and standard
+deviation across seeds on the test set.
+
+% =============================================================================
+\section{Meteorological Forecast Noise Model}
+\label{sec:ctrl-forecast-noise}
+% =============================================================================
+
+Both the MPC and the SAC controller receive an 8-day weather forecast as
+part of their information set. In the perfect-forecast mode used for the
+primary comparisons, this forecast equals the true future climate. To
+evaluate robustness to realistic forecast errors, a meteorological noise
+model is introduced and applied to both controllers for a separate
+robustness analysis in Chapter~\ref{chap:results}.
+
+\subsection{AR(1) Multiplicative Noise Model}
+\label{ssec:ctrl-noise-model}
+
+Operational numerical weather prediction (NWP) forecast errors are not
+independent across consecutive forecast issuances: short-range ensemble
+systems exhibit strong day-to-day persistence of forecast errors, with daily
+precipitation forecast-error autocorrelation of $\rho \approx 0.6$ at
+lead times of 1--5 days~\cite{buizza2005}. A common failure of naive noise
+injection is to redraw independent errors at each timestep, causing the
+controller's view of (e.g.) day $d+5$ to jump randomly between consecutive
+solves on days $d$, $d+1$, $d+2$ — physically unrealistic behavior that
+induces erratic MPC responses because the controller treats each forecast as
+if all previous information had been discarded.
+
+The model adopted here uses first-order autoregressive (AR(1)) multiplicative
+noise, providing realistic temporal persistence:
+\begin{equation}
+\hat{w}(t+j \mid t) = w(t+j) \cdot \bigl(1 + \varepsilon_j(t)\bigr),
+\qquad j = 1, \ldots, H_p
+\label{eq:noisy-forecast}
+\end{equation}
+where $w(t+j)$ is the true future weather, $\hat{w}(t+j \mid t)$ is the
+forecast issued at time $t$ for day $t+j$, and $\varepsilon_j(t)$ is the
+lead-time-dependent error:
+\begin{align}
+\varepsilon_j(t) &\sim \mathcal{N}(0,\, \sigma_j^2) \quad \text{marginally},
+  \quad \sigma_j = \sigma_{\mathrm{base}} \sqrt{j}
+  \label{eq:noise-marginal}\\
+\varepsilon_j(t+1) &= \rho \cdot \varepsilon_j(t)
+  + \sqrt{1 - \rho^2} \cdot \eta_j(t), \quad
+  \eta_j(t) \sim \mathcal{N}(0,\, \sigma_j^2)
+  \label{eq:noise-ar1}
+\end{align}
+The $\sqrt{j}$ scaling in $\sigma_j$ models the degradation of forecast
+skill with lead time; the AR(1) update \eqref{eq:noise-ar1} preserves the
+stationary marginal variance $\sigma_j^2$ while introducing temporal
+persistence $\rho$.
+
+The operating parameters are $\sigma_{\mathrm{base}} = 0.15$ (15\% error at
+1-day lead) and $\rho = 0.6$, following the Buizza et al.\ ensemble
+skill analysis~\cite{buizza2005}. Noise is applied multiplicatively to
+rainfall and $\mathrm{ET}_c$, with the result clipped to non-negative values
+(rainfall and ET are physically non-negative). A single noise process is
+shared between the two variables because their forecast errors are physically
+correlated through synoptic-scale weather systems: a wet disturbance
+simultaneously increases rain and decreases reference ET through increased
+humidity and reduced solar radiation.
+
+\subsection{Application to MPC and SAC}
+\label{ssec:ctrl-noise-application}
+
+For the \textbf{MPC}, the NoisyForecast model replaces the perfect forecast
+passed to the NLP at each receding-horizon step. The controller solves the
+NLP using corrupted rainfall and $\mathrm{ET}_c$ values; the ABM transition
+still uses the true climate, so the gap between expected and actual crop
+response drives deviations from the perfect-forecast MPC trajectory. This is
+the standard operational mode for any model-based predictive controller
+deployed without perfect future weather information.
+
+For the \textbf{SAC controller}, the noisy forecast is injected into the
+48-dimensional forecast block of the 707-dimensional observation vector at
+evaluation time: the same AR(1) noise is applied to the rainfall and
+$\mathrm{ET}_c$ sub-vectors before they are passed to the policy network.
+The ABM transition again uses the true climate. The policy receives the same
+quality of corrupted information as the MPC, enabling a fair robustness
+comparison. Importantly, this evaluation is performed \emph{without
+retraining}: the same policy trained on perfect forecasts from 20 historical
+years is evaluated under noisy forecasts, directly testing its inherent
+robustness to information degradation.
+
+To ensure that performance differences between MPC and SAC in the
+robustness analysis are attributable to policy quality rather than to
+different noise realizations, both controllers use the same noise seed
+($\mathrm{seed} = 42$ by default), ensuring that the AR(1) noise trajectory
+is identical across all comparative runs. The Chapter~\ref{chap:results}
+robustness analysis reports the performance degradation of each controller
+relative to its own perfect-forecast baseline, isolating the specific
+contribution of forecast noise to the performance gap.
+
+% =============================================================================
+\section{Chapter Summary}
+\label{sec:ctrl-summary}
+% =============================================================================
+
+This chapter has presented the complete design and calibration of the four
+controller architectures evaluated in Chapter~\ref{chap:results}.
+
+The \textbf{MPC controller} solves a constrained finite-horizon NLP at each
+of the 93 daily timesteps using a five-term cost function calibrated through
+a 33-configuration, four-phase sensitivity sweep. The recommended operating
+point $\boldsymbol{\alpha}^* = (1.0, 0.016, 0.1, 0, 0.005, 8)$ resolves
+three pathologies of the initial formulation and anchors the water-cost weight
+to the Iranian domestic-base water tariff (7{,}000~Toman/m$^3$). At
+$H_p^* = 8$, mean per-day solve time is 25.9~s (worst-case 274~s) with
+total season wallclock of 22--51~minutes per cell.
+
+The \textbf{SAC controller} addresses the per-step computational burden
+through amortized offline training. The CTDE architecture exploits spatial
+symmetry through a parameter-shared actor ($62 \to 128 \to 128 \to 1$ per
+agent) that produces 130-dimensional joint actions in a single forward pass,
+paired with a twin-Q value decomposition network~\cite{sunehag2018vdn}
+critic that decomposes $Q(\mathbf{s},\mathbf{a}) = \sum_{n=1}^{130}
+Q_{\mathrm{loc}}(\mathbf{s}^{(n,\mathrm{loc})}, \mathbf{s}^{(\mathrm{glob})},
+a^{(n)})$ using a shared $63 \to 256 \to 256 \to 1$ local MLP. The
+factorization restores per-agent credit assignment that a monolithic critic
+cannot provide under the reward's additively-decomposable structure, and
+preserves CTDE because each local Q-value still sees the full global context
+at training time. The reward is constructed as an approximate negation of
+the MPC path cost at $\boldsymbol{\alpha}^*$, exact under $\gamma = 1$. Training uses a 20/3/3
+train/dev/test year split from the 26-year NASA POWER record, with budget
+randomized over $[70\%, 100\%]$ per episode, for 500{,}000 steps across
+5 independent seeds on Kaggle T4 hardware ($\approx$2~hours per seed).
+After training, SAC inference cost is sub-millisecond and constant,
+irrespective of state or forecast complexity.
+
+Both controllers are evaluated under both perfect and noisy weather forecasts
+in Chapter~\ref{chap:results}. The AR(1) multiplicative noise model
+($\sigma_{\mathrm{base}} = 0.15$, $\rho = 0.6$) is applied identically to
+both controllers, enabling a direct comparison of the robustness of model-based
+receding-horizon optimization against amortized neural-network control under
+realistic forecast uncertainty. The test set (dry 2022, moderate 2018,
+wet 2024) $\times$ three budget levels provides a 9-cell grid on which the
+four controllers are compared in Chapter~\ref{chap:results}.
