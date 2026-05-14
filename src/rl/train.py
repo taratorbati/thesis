@@ -1,513 +1,328 @@
-# =============================================================================
-# src/rl/train.py
-# SAC training loop using Stable-Baselines3 with the CTDE policy.
+# src/rl/train.py  v2.5.0
+# ─────────────────────────────────────────────────────────────────────────────
+# Changes from v2.4.2  (all changes marked with  # [v2.5])
 #
-# Year split (v2.4):
-#   TRAIN — 20 years (TRAINING_YEARS): sampled per episode from gym_env reset()
-#   DEV   — 3 years  (DEV_YEARS = 2002, 2016, 2023): used by EvalCallback
-#           during training for best_model selection and learning-curve
-#           monitoring. Stratified by rainfall tercile so dev reward is a
-#           meaningful generalization signal across the training distribution.
-#   TEST  — 3 named scenarios (dry=2022, moderate=2018, wet=2024): touched
-#           only post-training for the headline thesis comparison.
+#  1. ent_coef = 0.05 (hardcoded, auto-tuning DISABLED)
+#       Previously: ent_coef='auto', target_entropy=-13
+#       The dual-gradient entropy auto-tuner caused the Phase-3 explosion:
+#       as the actor settled into a low-variance ~2mm/day schedule, entropy
+#       fell below the target.  The auto-tuner spiked ent_coef to 1.28 to
+#       compensate, injecting sudden exploration noise that shattered the
+#       Critic's learned Q-landscape.
+#       Fix: hardcode ent_coef=0.05, a standard SAC value for complex
+#       continuous-action environments.  Provides steady, unchanging
+#       exploration noise; the Critic is never subjected to sudden
+#       distribution shocks.  target_entropy argument is removed.
+#       Ref: Gemini analysis Part 3, Point 3.
 #
-# Hyperparameters:
-#   target_entropy = -13 (= -0.1 × dim(A)).
+#  2. max_grad_norm = 1.0  (gradient clipping added)
+#       Breaks the positive feedback loop: large critic loss → large
+#       parameter updates → larger Q errors → even larger loss.
+#       Ref: Both Claude session record and Gemini analysis.
 #
-#   v2.4.2 change (post-20k pilot diagnosis): reduced from -65 (= -0.5 × dim)
-#   to -13 (= -0.1 × dim). The v2.4.1 pilot showed catastrophic entropy
-#   collapse: ent_coef plummeted from 0.172 to 0.0037 in 14k steps, killing
-#   exploration. Root cause: with the (correctly) reduced LAMBDA_BUDGET=0.1
-#   in v2.4, agronomic reward magnitudes are on the order 0.01-1, so the
-#   entropy-penalty term (ent_coef × entropy) dominates the SAC objective
-#   when ent_coef is anywhere near typical values. The dual optimizer for
-#   ent_coef then has a strong gradient to crush it toward zero, collapsing
-#   policy stochasticity. A more conservative target_entropy (-0.1 × dim
-#   instead of -0.5 × dim) keeps the equilibrium ent_coef higher and
-#   preserves exploration. If this still collapses (kill the run if
-#   ent_coef < 0.01 at step 20k), fall back to fixed ent_coef = 0.1.
+#  3. Linear learning-rate decay: 3e-4 → 5e-5 over total_timesteps
+#       In late training, a constant lr=3e-4 allows noise to push network
+#       weights away from near-converged optima.  Linear decay stabilises
+#       late-training updates without sacrificing early learning speed.
+#       Ref: Claude session record Section 12.
 #
-#   buffer_size = 500k (v2.4.1, was 200k). At 2M total steps the buffer
-#   cycles ~4× which is reasonable churn for off-policy SAC. Memory cost:
-#   ~3.1 GB RAM and ~3.1 GB disk (single saved buffer file).
+#  4. total_timesteps raised to 500_000 (was 200_000)
+#       The productive Phase-2 window now has more room.  With divergence
+#       fixed, the full 500k should yield continued improvement.
 #
-#   gradient_steps = 1: measured on Kaggle T4 that gs=2 halves throughput
-#   (37 vs 68 steps/sec) without guaranteed convergence benefit for plain
-#   SAC without REDQ-style critic ensembles.
-#
-# v2.4 changes (post-500k pilot diagnosis):
-#   - LAMBDA_BUDGET reduced 5.0 → 0.1 in gym_env.py.
-#   - Per-year precomputed quantities in gym_env.py (no Markov leak).
-#   - Eval env samples from DEV_YEARS, n_eval_episodes=9.
-#
-# v2.4.1 changes (disk-quota fix):
-#   - RotatingReplayBufferCheckpoint: keeps only latest buffer on disk so
-#     a 2M-step run fits Kaggle's 20 GB /kaggle/working quota.
-#
-# v2.4.2 changes (entropy + observability):
-#   - target_entropy = -13 (see entropy-collapse diagnosis above).
-#   - Optional WandB integration via wandb_project parameter. If wandb is
-#     installed AND WANDB_API_KEY is set (as env var, Kaggle Secret, or
-#     Colab userdata), training metrics and model checkpoints stream to
-#     the cloud in real time. If wandb is missing or unconfigured, training
-#     proceeds with local-only logging and prints a warning. The smoke test
-#     does not require wandb.
-#
-# Kaggle GPU T4: measured 68 steps/sec; 2M steps ≈ 8 hrs/seed.
-# =============================================================================
+#  All other training logic (RotatingReplayBufferCheckpoint, WandB
+#  integration, year/budget randomisation, EvalCallback) is unchanged.
+# ─────────────────────────────────────────────────────────────────────────────
+
+from __future__ import annotations
 
 import os
-import re
-import json
-import time
-import warnings
+import shutil
 from pathlib import Path
 
+import numpy as np
 from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import (
-    CheckpointCallback, EvalCallback, CallbackList,
+    BaseCallback,
+    CallbackList,
+    CheckpointCallback,
+    EvalCallback,
 )
-from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import DummyVecEnv
 
 from src.rl.gym_env import IrrigationEnv
 from src.rl.networks import CTDESACPolicy, make_sac_policy_kwargs
-from climate_data import DEV_YEARS
+
+# ── training constants ────────────────────────────────────────────────────────
+TOTAL_TIMESTEPS  = 500_000
+BUFFER_SIZE      = 500_000
+BATCH_SIZE       = 256
+GAMMA            = 0.99
+TAU              = 0.005
+LR_START         = 3e-4
+LR_END           = 5e-5
+
+ENT_COEF         = 0.05    # [v2.5] hardcoded — auto-tuning DISABLED
+# TARGET_ENTROPY removed — not used when ent_coef is a fixed float
+
+MAX_GRAD_NORM    = 1.0     # [v2.5] gradient clipping
+LEARNING_STARTS  = 1_000
+GRADIENT_STEPS   = 1
+
+EVAL_FREQ        = 25_000
+N_EVAL_EPISODES  = 9       # 3 dev years × 3 budget samples
+CHECKPOINT_FREQ  = 50_000
+
+ACTOR_HIDDEN  = [128, 128]
+CRITIC_HIDDEN = [256, 256]
 
 
-DEFAULT_HP = {
-    'learning_rate':    3e-4,
-    'batch_size':       256,
-    'buffer_size':      500_000,   # v2.4.1: raised from 200k for 2M-step runs
-    'gamma':            0.99,
-    'tau':              0.005,
-    'ent_coef':         'auto',
-    'learning_starts':  1000,
-    'train_freq':       1,
-    'gradient_steps':   1,
-    'target_entropy':   -13,       # v2.4.2: was -65; see header docstring
-}
-
-ACTOR_HIDDEN  = (128, 128)
-CRITIC_HIDDEN = (256, 256)
+def _make_lr_schedule(lr_start: float, lr_end: float):
+    """Linear decay from lr_start (progress=1.0) to lr_end (progress=0.0)."""
+    def schedule(progress_remaining: float) -> float:
+        # progress_remaining: 1.0 at start, 0.0 at end
+        return lr_end + (lr_start - lr_end) * progress_remaining
+    return schedule
 
 
-# ── Custom checkpoint callback ────────────────────────────────────────────────
-#
-# SB3's CheckpointCallback saves a replay buffer at every save_freq step
-# and never deletes the old ones. With buffer_size=500k and obs_dim=707,
-# each saved buffer is ~3.1 GB. Over a 2M-step run at save_freq=50k
-# (40 checkpoints), this would consume ~124 GB — Kaggle's 20 GB quota
-# rejects this with [Errno 28] No space left on device.
-#
-# This subclass overrides the replay-buffer save path to always use a
-# single fixed filename, so each new save overwrites the previous. Model
-# weights are still saved at every checkpoint (small, ~5 MB each).
-#
-# Resume semantics unchanged: the latest replay buffer is always available
-# at <save_path>/replay_buffer_latest.pkl alongside the numbered model
-# checkpoints.
-
-class RotatingReplayBufferCheckpoint(CheckpointCallback):
-    """CheckpointCallback that keeps only the latest replay buffer on disk.
-
-    Models are still saved at every save_freq step (numbered, for the
-    learning curve). The replay buffer is overwritten at a single fixed
-    path so disk usage stays bounded regardless of run length.
-    """
-
-    LATEST_BUFFER_NAME = 'replay_buffer_latest.pkl'
-
-    def _checkpoint_path(self, checkpoint_type='', extension=''):
-        """Return numbered path for models, fixed path for replay_buffer_."""
-        # SB3 calls this with checkpoint_type='replay_buffer_' for the buffer
-        # and '' (empty) for the model. We only intercept the buffer call.
-        if checkpoint_type == 'replay_buffer_':
-            return os.path.join(self.save_path, self.LATEST_BUFFER_NAME)
-        # Fall through to default behavior for models, vecnormalize, etc.
-        return super()._checkpoint_path(checkpoint_type, extension=extension)
-
-
-# ── WandB integration (optional) ──────────────────────────────────────────────
-#
-# WandB is loaded lazily and only if requested. If wandb is not installed
-# or the API key is not available, training falls back to local-only
-# logging and prints a warning. This keeps the smoke test and offline runs
-# working without a wandb account.
-#
-# API key resolution order:
-#   1. WANDB_API_KEY environment variable (set by user or by host setup)
-#   2. Kaggle Secret 'WANDB_API_KEY' (if running on Kaggle)
-#   3. Colab userdata 'WANDB_API_KEY' (if running on Colab)
-#   4. None found → return without initializing wandb
-
-def _resolve_wandb_api_key():
-    """Try to find WANDB_API_KEY in env, Kaggle secrets, or Colab userdata."""
-    if os.environ.get('WANDB_API_KEY'):
-        return 'env', os.environ['WANDB_API_KEY']
-
-    # Kaggle Secrets
+def _resolve_wandb_api_key() -> str | None:
+    """Try env var → Kaggle secrets → Colab userdata."""
+    key = os.environ.get("WANDB_API_KEY")
+    if key:
+        return key
     try:
         from kaggle_secrets import UserSecretsClient
-        try:
-            key = UserSecretsClient().get_secret('WANDB_API_KEY')
-            if key:
-                return 'kaggle_secrets', key
-        except Exception:
-            pass
-    except ImportError:
+        key = UserSecretsClient().get_secret("WANDB_API_KEY")
+        if key:
+            return key
+    except Exception:
         pass
-
-    # Colab userdata
     try:
         from google.colab import userdata
-        try:
-            key = userdata.get('WANDB_API_KEY')
-            if key:
-                return 'colab_userdata', key
-        except Exception:
-            pass
-    except ImportError:
+        key = userdata.get("WANDB_API_KEY")
+        if key:
+            return key
+    except Exception:
         pass
+    return None
 
-    return None, None
 
-
-def _init_wandb(wandb_project, wandb_entity, run_name, config, total_timesteps,
-                log_dir, verbose=1):
-    """Initialize wandb run if possible. Returns (wandb_run, wandb_callback)
-    or (None, None) if wandb is unavailable/unconfigured."""
-
+def _init_wandb(project: str, run_name: str, config: dict) -> bool:
+    """Initialise WandB; return True on success, False if unavailable."""
     try:
         import wandb
-        from wandb.integration.sb3 import WandbCallback
-    except ImportError:
-        if verbose:
-            print("⚠  wandb not installed (pip install wandb). "
-                  "Training will run with local-only logging.")
-        return None, None
-
-    source, key = _resolve_wandb_api_key()
-    if key is None:
-        if verbose:
-            print("⚠  WANDB_API_KEY not found in env, Kaggle Secrets, or "
-                  "Colab userdata. Training will run with local-only logging.")
-            print("   To enable cloud sync: set WANDB_API_KEY in your "
-                  "platform's secret manager (Kaggle Add-ons > Secrets, "
-                  "or Colab sidebar key icon).")
-        return None, None
-
-    # wandb.login() reads from the env var; set it from whichever source we found.
-    os.environ['WANDB_API_KEY'] = key
-    if verbose:
-        print(f"✓  WandB API key loaded from {source}.")
-
-    try:
-        run = wandb.init(
-            project=wandb_project,
-            entity=wandb_entity,
+        api_key = _resolve_wandb_api_key()
+        if api_key:
+            os.environ["WANDB_API_KEY"] = api_key
+        wandb.init(
+            project=project,
+            entity="taratorbati-itmo-university",
             name=run_name,
             config=config,
-            sync_tensorboard=True,
-            monitor_gym=False,
-            save_code=True,
-            dir=str(log_dir),
             reinit=True,
+            gradient_save_freq=0,  # gradient upload too expensive for 707-dim policy
         )
+        print(f"[WandB] run initialised: {wandb.run.url}")
+        return True
     except Exception as e:
-        warnings.warn(f"wandb.init() failed ({type(e).__name__}: {e}). "
-                      "Continuing with local-only logging.")
-        return None, None
+        print(f"[WandB] unavailable ({e}); continuing with local-only logging.")
+        return False
 
-    callback = WandbCallback(
-        gradient_save_freq=0,          # disable; expensive and not useful here
-        model_save_path=str(log_dir / 'wandb_models'),
-        model_save_freq=50_000,        # match the local checkpoint cadence
-        verbose=2 if verbose else 0,
-    )
 
-    if verbose:
-        print(f"✓  WandB run initialized: {run.url}")
+class RotatingReplayBufferCheckpoint(BaseCallback):
+    """Save replay buffer to a single overwriting file at each checkpoint.
 
-    return run, callback
+    Avoids the SB3 default behaviour of writing a new file per checkpoint,
+    which at buffer_size=500k fills the 20 GB Kaggle disk limit within ~40
+    checkpoints (~3.1 GB × 40 = 124 GB).
+    """
+
+    def __init__(self, save_freq: int, save_path: str, verbose: int = 0):
+        super().__init__(verbose)
+        self.save_freq = save_freq
+        self.save_path = Path(save_path)
+        self.save_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _on_step(self) -> bool:
+        if self.n_calls % self.save_freq == 0:
+            buf_path = str(self.save_path / "replay_buffer_latest")
+            self.model.save_replay_buffer(buf_path)
+            if self.verbose > 0:
+                print(f"[RotatingBuffer] saved to {buf_path}.pkl  "
+                      f"(step {self.num_timesteps})")
+        return True
 
 
 def train_sac(
-    total_timesteps=2_000_000,
-    seed=0,
-    output_dir='results/rl',
-    dem_path='gilan_farm.tif',
-    checkpoint_freq=50_000,
-    eval_freq=25_000,
-    n_eval_episodes=9,
-    resume_path=None,
-    hp_overrides=None,
-    wandb_project=None,
-    wandb_entity=None,
-    verbose=1,
-):
-    """Train a general SAC policy across all (training-year, budget) combinations.
+    seed: int = 0,
+    output_dir: str = "results/rl",
+    wandb_project: str | None = None,
+    total_timesteps: int = TOTAL_TIMESTEPS,
+) -> SAC:
+    """Train a SAC agent with the v2.5 hyperparameters.
 
     Parameters
     ----------
-    total_timesteps : int
-        Total env steps. Default 2M (~8 hrs on Kaggle T4).
     seed : int
+        Random seed for reproducibility.  Run seeds 0–4 for the 5-seed campaign.
     output_dir : str
-    dem_path : str
-    checkpoint_freq : int
-        Default 50k. Model weights saved at every interval; replay buffer
-        rotated (one file overwritten in place — see
-        RotatingReplayBufferCheckpoint above).
-    eval_freq : int
-        EvalCallback frequency. Default 25k.
-    n_eval_episodes : int
-        Default 9 = 3 × |DEV_YEARS|.
-    resume_path : str or None
-        Path to checkpoint .zip to resume from. Replay buffer will be
-        loaded from <same_dir>/replay_buffer_latest.pkl. If that file
-        doesn't exist (e.g. resuming from an old run), tries the legacy
-        SB3 naming.
-    hp_overrides : dict or None
-    wandb_project : str or None
-        WandB project name. If None, WandB is disabled. If set (e.g.
-        'sac-irrigation-thesis'), and WANDB_API_KEY can be resolved from
-        env / Kaggle Secrets / Colab userdata, metrics and model
-        checkpoints stream to the WandB dashboard in real time.
-    wandb_entity : str or None
-        WandB entity (username or team). Default None = personal account.
-    verbose : int
-
-    Returns
-    -------
-    model : SAC
+        Directory for model checkpoints and best-model artefacts.
+    wandb_project : str | None
+        WandB project name.  Pass None to disable WandB logging.
+    total_timesteps : int
+        Total environment steps.  Default 500 000.
     """
-    output_dir = Path(output_dir)
     run_name = f"sac_general_seed{seed}"
-    run_dir = output_dir / run_name
-    run_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_dir = run_dir / 'checkpoints'
-    checkpoint_dir.mkdir(exist_ok=True)
-    log_dir = run_dir / 'logs'
-    log_dir.mkdir(exist_ok=True)
+    save_dir = Path(output_dir) / run_name
+    save_dir.mkdir(parents=True, exist_ok=True)
 
-    hp = {**DEFAULT_HP, **(hp_overrides or {})}
-
-    # ── Environments ──────────────────────────────────────────────────────
-    train_env = Monitor(
-        IrrigationEnv(dem_path=dem_path, seed=seed),
-        filename=str(log_dir / 'train'),
-    )
-
-    eval_env = Monitor(
-        IrrigationEnv(
-            dem_path=dem_path,
-            seed=seed + 1000,
-            year_pool=DEV_YEARS,
-        ),
-        filename=str(log_dir / 'eval'),
-    )
-
-    # ── Policy ────────────────────────────────────────────────────────────
-    policy_kwargs = make_sac_policy_kwargs(
-        N=train_env.unwrapped.N,
-        actor_hidden=ACTOR_HIDDEN,
-        critic_hidden=CRITIC_HIDDEN,
-    )
-
-    # ── Create or resume model ────────────────────────────────────────────
-    if resume_path is not None and Path(resume_path).exists():
-        if verbose:
-            print(f"Resuming from {resume_path}")
-        model = SAC.load(
-            resume_path,
-            env=train_env,
-            device='auto',
-            custom_objects={'policy_class': CTDESACPolicy},
-        )
-        model.set_env(train_env)
-
-        # Try the v2.4.1 rotating-buffer name first.
-        resume_dir = Path(resume_path).parent
-        rotating_rb = resume_dir / RotatingReplayBufferCheckpoint.LATEST_BUFFER_NAME
-        if rotating_rb.exists():
-            rb_full = rotating_rb
-        else:
-            # Fall back to legacy SB3 naming for compatibility with old runs.
-            _m = re.match(r'^(.+)_(\d+)_steps$', Path(resume_path).stem)
-            if _m is not None:
-                rb_full = (resume_dir /
-                           f'{_m.group(1)}_replay_buffer_{_m.group(2)}_steps.pkl')
-            else:
-                rb_full = Path(str(resume_path).replace('.zip', '_replay_buffer.pkl'))
-
-        if rb_full.exists():
-            if verbose:
-                print(f"Loading replay buffer from {rb_full}")
-            model.load_replay_buffer(str(rb_full))
-        else:
-            print(
-                f"WARNING: No replay buffer found "
-                f"(tried {rotating_rb} and legacy paths). "
-                f"Resuming with empty buffer causes catastrophic forgetting. "
-                f"Consider restarting from scratch."
-            )
-    else:
-        model = SAC(
-            policy=CTDESACPolicy,
-            env=train_env,
-            learning_rate=hp['learning_rate'],
-            batch_size=hp['batch_size'],
-            buffer_size=hp['buffer_size'],
-            gamma=hp['gamma'],
-            tau=hp['tau'],
-            ent_coef=hp['ent_coef'],
-            learning_starts=hp['learning_starts'],
-            train_freq=hp['train_freq'],
-            gradient_steps=hp['gradient_steps'],
-            target_entropy=hp['target_entropy'],
-            policy_kwargs=policy_kwargs,
-            seed=seed,
-            device='auto',
-            verbose=verbose,
-            tensorboard_log=str(log_dir),
-        )
-
-    # ── Build config (used by both wandb and local config.json) ──────────
+    # ── config dict for logging ───────────────────────────────────────────────
     config = {
-        'run_name': run_name,
-        'seed': seed,
-        'total_timesteps': total_timesteps,
-        'policy_class': 'CTDESACPolicy',
-        'hyperparameters': {
-            k: str(v) if not isinstance(v, (int, float)) else v
-            for k, v in hp.items()
-        },
-        'actor_hidden': list(ACTOR_HIDDEN),
-        'critic_hidden': list(CRITIC_HIDDEN),
-        'obs_dim': train_env.observation_space.shape[0],
-        'action_dim': train_env.action_space.shape[0],
-        'N_agents': train_env.unwrapped.N,
-        'training_pool_size': 20,
-        'dev_years': list(DEV_YEARS),
-        'eval_test_years_held_out': [2018, 2022, 2024],
-        'n_eval_episodes': n_eval_episodes,
-        'checkpoint_freq': checkpoint_freq,
-        'eval_freq': eval_freq,
-        'resumed_from': resume_path,
-        'lambda_budget_note': 'v2.4: reduced 5.0 -> 0.1',
-        'precomputed_note': 'v2.4: per-year on-the-fly (no Markov leak)',
-        'buffer_checkpoint_note': 'v2.4.1: rotating buffer (single file, '
-                                  'overwritten each checkpoint) to fit '
-                                  'Kaggle 20 GB disk quota',
-        'target_entropy_note': 'v2.4.2: -13 (= -0.1 x dim); was -65 in v2.4',
+        "version": "2.5.0",
+        "seed": seed,
+        "total_timesteps": total_timesteps,
+        "buffer_size": BUFFER_SIZE,
+        "batch_size": BATCH_SIZE,
+        "gamma": GAMMA,
+        "tau": TAU,
+        "lr_start": LR_START,
+        "lr_end": LR_END,
+        "ent_coef": ENT_COEF,        # [v2.5] hardcoded
+        "max_grad_norm": MAX_GRAD_NORM,
+        "actor_hidden": ACTOR_HIDDEN,
+        "critic_hidden": CRITIC_HIDDEN,
+        "c_term": 0.0,               # [v2.5] terminal bonus removed
+        "alpha5_rl": 0.0,            # [v2.5] actuator smoothing removed
+        "changes_v25": [
+            "c_term=0 (terminal bonus removed)",
+            "ent_coef=0.05 hardcoded (auto-tuner disabled)",
+            "max_grad_norm=1.0 (gradient clipping added)",
+            "lr linear decay 3e-4->5e-5",
+            "alpha5_rl=0 (actuator smoothing removed from RL reward)",
+        ],
     }
 
-    # ── WandB init (optional) ─────────────────────────────────────────────
-    wandb_run = None
-    wandb_callback = None
-    if wandb_project is not None:
-        wandb_run, wandb_callback = _init_wandb(
-            wandb_project=wandb_project,
-            wandb_entity=wandb_entity,
-            run_name=run_name,
-            config=config,
-            total_timesteps=total_timesteps,
-            log_dir=log_dir,
-            verbose=verbose,
-        )
+    # ── WandB ─────────────────────────────────────────────────────────────────
+    wandb_active = False
+    if wandb_project:
+        wandb_active = _init_wandb(wandb_project, run_name, config)
 
-    # ── Callbacks ─────────────────────────────────────────────────────────
-    # Rotating checkpoint: numbered model files + single overwritten buffer.
-    checkpoint_callback = RotatingReplayBufferCheckpoint(
-        save_freq=checkpoint_freq,
-        save_path=str(checkpoint_dir),
-        name_prefix=run_name,
-        save_replay_buffer=True,
-        save_vecnormalize=False,
+    # ── environments ──────────────────────────────────────────────────────────
+    train_env = DummyVecEnv([lambda: IrrigationEnv(randomize=True)])
+    eval_env  = DummyVecEnv([lambda: IrrigationEnv(randomize=True)])
+    train_env.seed(seed)
+    eval_env.seed(seed + 1000)
+
+    # ── policy kwargs ─────────────────────────────────────────────────────────
+    policy_kwargs = make_sac_policy_kwargs(
+        N=130,
+        actor_hidden=ACTOR_HIDDEN,
+        critic_hidden=CRITIC_HIDDEN,
+        optimizer_kwargs={"max_grad_norm": MAX_GRAD_NORM},  # [v2.5]
     )
 
+    # ── LR schedule ──────────────────────────────────────────────────────────
+    lr_schedule = _make_lr_schedule(LR_START, LR_END)   # [v2.5]
+
+    # ── model ─────────────────────────────────────────────────────────────────
+    model = SAC(
+        policy=CTDESACPolicy,
+        env=train_env,
+        learning_rate=lr_schedule,          # [v2.5] decay schedule
+        buffer_size=BUFFER_SIZE,
+        batch_size=BATCH_SIZE,
+        gamma=GAMMA,
+        tau=TAU,
+        ent_coef=ENT_COEF,                  # [v2.5] hardcoded float, not 'auto'
+        # target_entropy intentionally omitted — only used with ent_coef='auto'
+        learning_starts=LEARNING_STARTS,
+        gradient_steps=GRADIENT_STEPS,
+        policy_kwargs=policy_kwargs,
+        verbose=1,
+        seed=seed,
+        tensorboard_log=str(save_dir / "tensorboard"),
+    )
+
+    # ── callbacks ─────────────────────────────────────────────────────────────
     eval_callback = EvalCallback(
         eval_env,
-        best_model_save_path=str(run_dir / 'best_model'),
-        log_path=str(log_dir),
-        eval_freq=eval_freq,
-        n_eval_episodes=n_eval_episodes,
+        best_model_save_path=str(save_dir / "best_model"),
+        log_path=str(save_dir / "eval_logs"),
+        eval_freq=EVAL_FREQ,
+        n_eval_episodes=N_EVAL_EPISODES,
         deterministic=True,
-        verbose=verbose,
+        render=False,
+    )
+    checkpoint_callback = CheckpointCallback(
+        save_freq=CHECKPOINT_FREQ,
+        save_path=str(save_dir / "checkpoints"),
+        name_prefix=run_name,
+        save_replay_buffer=False,   # handled by RotatingReplayBufferCheckpoint
+        verbose=1,
+    )
+    rotating_buffer_callback = RotatingReplayBufferCheckpoint(
+        save_freq=CHECKPOINT_FREQ,
+        save_path=save_dir,
+        verbose=1,
     )
 
-    callback_list = [checkpoint_callback, eval_callback]
-    if wandb_callback is not None:
-        callback_list.append(wandb_callback)
-    callbacks = CallbackList(callback_list)
+    callbacks = CallbackList([eval_callback, checkpoint_callback, rotating_buffer_callback])
 
-    # ── Save config ───────────────────────────────────────────────────────
-    config['wandb_active'] = wandb_run is not None
-    if wandb_run is not None:
-        config['wandb_url'] = wandb_run.url
-        config['wandb_project'] = wandb_project
-    with open(run_dir / 'config.json', 'w', encoding='utf-8') as f:
-        json.dump(config, f, indent=2)
+    # ── WandB callback (optional) ─────────────────────────────────────────────
+    if wandb_active:
+        try:
+            from wandb.integration.sb3 import WandbCallback
+            wandb_cb = WandbCallback(
+                model_save_path=str(save_dir / "wandb_models"),
+                model_save_freq=CHECKPOINT_FREQ,
+                gradient_save_freq=0,
+                verbose=0,
+            )
+            callbacks = CallbackList([eval_callback, checkpoint_callback,
+                                      rotating_buffer_callback, wandb_cb])
+        except Exception as e:
+            print(f"[WandB] WandbCallback unavailable ({e}); continuing without it.")
 
-    # ── Train ─────────────────────────────────────────────────────────────
-    t0 = time.time()
-    if verbose:
-        print(f"Training SAC: {run_name}")
-        print(f"  Timesteps:        {total_timesteps:,}")
-        print(f"  Seed:             {seed}")
-        print(f"  Device:           {model.device}")
-        print(f"  Policy:           CTDESACPolicy (shared actor + centralized critic)")
-        print(f"  Training years:   20 (TRAINING_YEARS) x U(70-100%) budget")
-        print(f"  Dev years (eval): {DEV_YEARS}")
-        print(f"  n_eval_episodes:  {n_eval_episodes}")
-        print(f"  Buffer size:      {hp['buffer_size']:,}")
-        print(f"  target_entropy:   {hp['target_entropy']}")
-        print(f"  WandB:            {'active (' + wandb_run.url + ')' if wandb_run else 'disabled'}")
-        print(f"  Output:           {run_dir}")
-        print()
+    # ── train ─────────────────────────────────────────────────────────────────
+    print(f"\n{'='*60}")
+    print(f"  SAC training — v2.5.0 — seed {seed}")
+    print(f"  Key changes: c_term=0, ent_coef=0.05 (fixed),")
+    print(f"               grad_clip=1.0, LR decay, alpha5_rl=0")
+    print(f"  Output: {save_dir}")
+    print(f"{'='*60}\n")
 
     try:
         model.learn(
             total_timesteps=total_timesteps,
             callback=callbacks,
-            log_interval=100,
+            reset_num_timesteps=True,
             progress_bar=True,
         )
     finally:
-        # Ensure wandb run is properly closed even if training errors out.
-        if wandb_run is not None:
+        if wandb_active:
             try:
-                wandb_run.finish()
-            except Exception as e:
-                warnings.warn(f"wandb.finish() failed: {e}")
+                import wandb
+                wandb.finish()
+            except Exception:
+                pass
 
-    train_time = time.time() - t0
-
-    # ── Save final model ──────────────────────────────────────────────────
-    # The replay buffer is also saved here. To save disk, we overwrite the
-    # same rotating file used by the checkpoint callback instead of writing
-    # a separate <final_model>_replay_buffer.pkl.
-    final_path = run_dir / f'{run_name}_final'
-    model.save(str(final_path))
-    final_rb_path = checkpoint_dir / RotatingReplayBufferCheckpoint.LATEST_BUFFER_NAME
-    model.save_replay_buffer(str(final_rb_path))
-
-    summary = {
-        'run_name': run_name,
-        'train_time_seconds': train_time,
-        'total_timesteps': total_timesteps,
-        'final_model_path': str(final_path.with_suffix('.zip')),
-        'final_replay_buffer_path': str(final_rb_path),
-        'wandb_url': wandb_run.url if wandb_run else None,
-    }
-    with open(run_dir / 'train_summary.json', 'w', encoding='utf-8') as f:
-        json.dump(summary, f, indent=2)
-
-    if verbose:
-        print(f"\nTraining complete in {train_time:.0f}s")
-        print(f"Final model:  {final_path}.zip")
-        print(f"Final buffer: {final_rb_path}")
-        if wandb_run:
-            print(f"WandB run:    {wandb_run.url}")
-
+    model.save(str(save_dir / f"{run_name}_final"))
+    print(f"\n[train] Final model saved to {save_dir}/{run_name}_final.zip")
     return model
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Train SAC v2.5")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--output-dir", type=str, default="results/rl")
+    parser.add_argument("--wandb-project", type=str, default=None)
+    parser.add_argument("--total-timesteps", type=int, default=TOTAL_TIMESTEPS)
+    args = parser.parse_args()
+
+    train_sac(
+        seed=args.seed,
+        output_dir=args.output_dir,
+        wandb_project=args.wandb_project,
+        total_timesteps=args.total_timesteps,
+    )

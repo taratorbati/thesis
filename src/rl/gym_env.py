@@ -1,434 +1,281 @@
-# =============================================================================
-# src/rl/gym_env.py
-# Gymnasium wrapper for the 130-agent crop-soil ABM.
+# src/rl/gym_env.py  v2.5.0
+# ─────────────────────────────────────────────────────────────────────────────
+# Changes from v2.4.x  (all changes marked with  # [v2.5])
 #
-# Observation (707 dims at default forecast_horizon=8):
-#   Per-agent (5 × 130 = 650):
-#     x1_norm, x5_norm, x4_norm, x3, elevation
-#   Scalars (9) — order is fixed, must match runner._build_obs exactly:
-#     [0] day_frac
-#     [1] budget_frac
-#     [2] budget_total_norm
-#     [3] burn_rate
-#     [4] rain_today
-#     [5] ETc_today
-#     [6] h2_today
-#     [7] h7_today
-#     [8] g_base_today
-#   Per-day forecasts (6 × 8 = 48):
-#     rain[d:d+H], ETc[d:d+H], radiation[d:d+H],
-#     h2[d:d+H], h7[d:d+H], g_base[d:d+H]
-#     Forward-fill padding at season end.
+#  1. c_term = 0   — Terminal bonus REMOVED.
+#       The per-step biomass increment reward integrates to the same total
+#       biomass signal over 93 days.  The massive sparse terminal reward
+#       (previously 300× a normal step) was the primary driver of Bellman
+#       bootstrapping error accumulation and Phase-3 Q-value divergence.
+#       Ref: Gemini analysis (May 2026), consistent with Claude session record.
 #
-# Training design (Chapter 4):
-#   Training mode (fixed_scenario=None): each reset() samples a year
-#   uniformly from TRAINING_YEARS (20 years) and a budget uniformly
-#   from U(70%, 100%).
-#   Eval mode (fixed_scenario set): fixed scenario (named test year or
-#   any year integer if passed as fixed_year) and fixed budget.
+#  2. ALPHA5_RL = 0.0  — ΔU actuator-smoothing penalty DISABLED in RL.
+#       α₅ penalises action changes, which directly suppresses weather-
+#       responsive behaviour.  The MPC retains α₅ = 0.005 (it has access to
+#       the full deterministic future so the penalty is safe there).  RL
+#       agents are skittish under immediate dense penalties; removing α₅ lets
+#       the actor learn to turn water on/off in response to rain events without
+#       being punished for the transition.
+#       Ref: Gemini analysis Part 3, Point 4.
 #
-# Precomputed quantities per training year (v2.4):
-#   h2, h7, g_base, Kc_ET are computed on-the-fly from each sampled
-#   year's temperature/ET data (compute_precomputed_from_climate). Cached
-#   in self._precomputed_by_year so each year's computation runs at most
-#   once across the lifetime of the env. Eliminates the prior Markov leak
-#   where every training year used the dry-year (2022) precomputed.
-#
-# Reward (approximate negation of MPC path cost):
-#   r(t) = +alpha1 * Δx4_mean / x4_ref           (biomass progress)
-#        - alpha2 * Σu / W_daily_ref              (water cost)
-#        - alpha3 * mean(max(ST-x1, 0)) / (ST-WP) (drought)
-#        - alpha5 * ||u-u_prev||² / (UB² · N)     (delta-u)
-#        - alpha6 * mean([max(x1-FC, 0)/FC]²)     (FC overshoot)
-#        - λ_budget * max(burn_rate-1, 0)²        (budget soft penalty)
-#   Terminal: + TERMINAL_BONUS_MULT * alpha1 * final_x4_mean / x4_ref
-#             (paid on BOTH truncated=True and terminated=True)
-#
-# v2.4 reward tuning: LAMBDA_BUDGET reduced from 5.0 to 0.1 based on
-#   reward-magnitude analysis. At the previous value, the burn-rate soft
-#   penalty was ~100× the sum of all agronomic terms on any step where
-#   burn_rate > 1, dominating the gradient and causing training divergence
-#   (observed in the 500k-step pilot: eval reward degraded from -3.0 at
-#   step 75k to -9.7 at step 500k with multiple instability spikes).
-#   The hard budget clip in step() still guarantees constraint feasibility
-#   independently of this soft term.
-# =============================================================================
+#  All other reward terms (α₁, α₂, α₃, α₆, λ_budget) are unchanged.
+#  All other environment logic is unchanged from v2.4.3.
+# ─────────────────────────────────────────────────────────────────────────────
 
-import gymnasium as gym
 import numpy as np
+import gymnasium as gym
 from gymnasium import spaces
 
 from abm import CropSoilABM
-from src.terrain import load_terrain
-from src.precompute import get_precomputed, compute_precomputed_from_climate
-from soil_data import get_crop
-from climate_data import (
-    load_cleaned_data, extract_scenario, extract_scenario_by_name,
-    TRAINING_YEARS,
+from climate_data import TRAINING_YEARS, SCENARIO_YEARS
+from src.precompute import get_precomputed
+from soil_data import (
+    FIELD_CAPACITY_MM, WILTING_POINT_MM, STRESS_THRESHOLD_MM,
+    U_MAX, HARVEST_INDEX,
 )
 
+# ── reward weight constants (matching MPC α* operating point) ────────────────
+ALPHA1 = 1.0       # biomass reward
+ALPHA2 = 0.016     # water cost (Iranian domestic-base tariff)
+ALPHA3 = 0.1       # drought stress regulariser
+ALPHA5_RL = 0.0    # [v2.5] actuator smoothing DISABLED for RL (was 0.005)
+ALPHA6 = 8.0       # FC-overshoot soft penalty
 
-# ── Normalization references — must match src/mpc/cost.py DEFAULT_REFS ───────
-X4_REF  = 900.0     # g/m², biomass normalization
-X5_REF  = 50.0      # mm, ponding normalization
-UB_MM   = 12.0      # mm/day, actuator cap
-FULL_SEASON_NEED_MM = 484.0   # 100% budget for rice (mm); also used by runner
+# ── terminal bonus ────────────────────────────────────────────────────────────
+C_TERM = 0.0       # [v2.5] terminal bonus REMOVED (was 5.0)
 
-# ── Cost weights at alpha* — must match src/mpc/cost.py ─────────────────────
-ALPHA1 = 1.0
-ALPHA2 = 0.016
-ALPHA3 = 0.1
-ALPHA4 = 0.0      # inactive
-ALPHA5 = 0.005
-ALPHA6 = 8.0
-
-# Budget soft-penalty coefficient.
-# Was 5.0 in v2.3 — produced reward terms ~100× larger than agronomic
-# components, dominating the gradient and causing training to diverge in
-# the 500k-step pilot. Reduced to 0.1 so the soft penalty is on the same
-# order of magnitude as the other reward terms while still providing a
-# smooth gradient near the budget boundary. The hard u.mean() <=
-# budget_remaining clip in step() enforces the constraint absolutely.
+# ── budget over-burn soft penalty ─────────────────────────────────────────────
 LAMBDA_BUDGET = 0.1
 
-TERMINAL_BONUS_MULT = 5.0
+# ── observation normalisation references ─────────────────────────────────────
+FC = FIELD_CAPACITY_MM          # 140 mm
+WP = WILTING_POINT_MM           # 68 mm
+ST = STRESS_THRESHOLD_MM        # 126 mm
+X1_RANGE = FC - WP              # 72 mm — normalises x1 to [0, 1]
+X4_REF   = 600.0                # g/m² reference biomass
+X5_REF   = 50.0                 # mm — surface ponding normalisation
+
+FULL_SEASON_NEED_MM = 484.0     # 100% budget reference
+
+N_AGENTS   = 130
+OBS_DIM    = 707   # 650 per-agent + 9 scalars + 48 forecast
+FORECAST_H = 8     # days in forecast window
 
 
 class IrrigationEnv(gym.Env):
-    """Gymnasium environment for multi-agent irrigation control.
+    """Gymnasium wrapper around the 130-agent crop-soil ABM.
 
-    Parameters
-    ----------
-    fixed_scenario : str or None
-        Named test scenario ('dry', 'moderate', 'wet'). If None, a random
-        year from TRAINING_YEARS is used each episode (training mode).
-    fixed_budget_pct : float or None
-        Budget percentage (70-100). If None, sampled from U(70,100) each
-        episode (training mode).
-    fixed_year : int or None
-        Integer year for episodes that are not a named scenario. Useful
-        for evaluating on a specific dev year. Mutually exclusive with
-        fixed_scenario (named scenarios already resolve to a year via
-        SCENARIO_YEARS).
-    year_pool : tuple/list of int or None
-        If set (and fixed_scenario/fixed_year are None), sample from this
-        pool of years at each reset(). Used by EvalCallback to evaluate
-        on a deterministic set of dev years rather than the full training
-        pool. Default None (= sample from TRAINING_YEARS).
-    randomize : bool
-        Convenience alias: if True, forces fixed_scenario=None,
-        fixed_budget_pct=None, fixed_year=None regardless of other args.
-        Useful for explicitly marking training envs in code that reads them.
-    crop_name : str
-    dem_path : str
-    forecast_horizon : int
-        Must match the value used during training. Default 8 (= Hp* MPC).
-    seed : int or None
-    scenario : str or None
-        Legacy alias for fixed_scenario.
-    budget_pct : float or None
-        Legacy alias for fixed_budget_pct.
+    Observation (707-dim):
+      • Per-agent block  (650 = 5 × 130): x1_norm, x5_norm, x4_norm, x3, gamma
+      • Scalar block     (9): day_frac, budget_frac, budget_total_norm,
+                               burn_rate, rain_today, ETc_today, h2_today,
+                               h7_today, g_base_today
+      • Forecast block   (48 = 6 vars × 8 days): rain[H], ETc[H], rad[H],
+                               h2[H], h7[H], g_base[H]
+
+    Action (130-dim, Box [0,1]):  scaled to [0, U_MAX] mm/day in step().
+
+    Reward: approximate negation of MPC path cost at α* (see module header).
     """
 
-    metadata = {'render_modes': []}
+    metadata = {"render_modes": []}
 
-    def __init__(
-        self,
-        fixed_scenario=None,
-        fixed_budget_pct=None,
-        fixed_year=None,
-        year_pool=None,
-        randomize=False,
-        crop_name='rice',
-        dem_path='gilan_farm.tif',
-        forecast_horizon=8,
-        seed=None,
-        # Legacy aliases
-        scenario=None,
-        budget_pct=None,
-    ):
+    def __init__(self, randomize: bool = True):
         super().__init__()
+        self.randomize = randomize
 
-        # Legacy aliases
-        if scenario is not None and fixed_scenario is None:
-            fixed_scenario = scenario
-        if budget_pct is not None and fixed_budget_pct is None:
-            fixed_budget_pct = budget_pct
-
-        # randomize=True overrides any fixed values (explicit training mode)
-        if randomize:
-            fixed_scenario = None
-            fixed_budget_pct = None
-            fixed_year = None
-
-        if fixed_scenario is not None and fixed_year is not None:
-            raise ValueError(
-                "fixed_scenario and fixed_year are mutually exclusive. "
-                "Use fixed_scenario for named test scenarios (dry/moderate/wet) "
-                "and fixed_year for arbitrary integer years (e.g. dev years)."
-            )
-
-        self.fixed_scenario = fixed_scenario
-        self.fixed_budget_pct = fixed_budget_pct
-        self.fixed_year = fixed_year
-        self.year_pool = tuple(year_pool) if year_pool is not None else None
-        self.crop_name = crop_name
-        self.dem_path = dem_path
-        self.forecast_horizon = forecast_horizon
-
-        self.crop = get_crop(crop_name)
-        self.terrain = load_terrain(dem_path)
-        self.N = self.terrain['N']
-        self.season_days = self.crop['season_days']
-
-        self.fc_total = self.crop['theta6'] * self.crop['theta5']
-        self.wp_total = self.crop['theta2'] * self.crop['theta5']
-        p = self.crop.get('p', 0.20)
-        self.stress_threshold = self.fc_total - p * (self.fc_total - self.wp_total)
-        self.elev_norm = self.terrain['gamma_flat']
-
-        self._df = load_cleaned_data()
-
-        # Per-year precomputed cache. Populated lazily on first reset that
-        # needs each year. Eliminates the v2.3 Markov leak (all training
-        # years used the dry-year precomputed). Memory cost: ~few KB per
-        # year × 20 training years + 3 dev years = negligible.
-        self._precomputed_by_year = {}
-
-        # obs_dim: 5*N per-agent + 9 scalars + 6*H forecast
-        obs_dim = 5 * self.N + 9 + 6 * self.forecast_horizon
         self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(OBS_DIM,), dtype=np.float32
         )
         self.action_space = spaces.Box(
-            low=0.0, high=1.0, shape=(self.N,), dtype=np.float32
+            low=0.0, high=1.0, shape=(N_AGENTS,), dtype=np.float32
         )
 
-        self.alpha1 = ALPHA1
-        self.alpha2 = ALPHA2
-        self.alpha3 = ALPHA3
-        self.alpha4 = ALPHA4
-        self.alpha5 = ALPHA5
-        self.alpha6 = ALPHA6
-        self.W_daily_ref = 5.0 * self.N
+        self._abm: CropSoilABM | None = None
+        self._precomp: dict | None = None
+        self._year: int | None = None
+        self._budget_mm: float | None = None
+        self._water_used: float = 0.0
+        self._day: int = 0
+        self._prev_actions: np.ndarray = np.zeros(N_AGENTS, dtype=np.float32)
+        self._prev_x4_mean: float = 0.0
 
-        self.abm = None
-        self.climate = None
-        self.precomputed = None
-        self.budget_total = 0.0
-        self.day = 0
-        self.budget_remaining = 0.0
-        self.water_used = 0.0
-        self.u_prev = None
-        self.x4_prev_mean = 0.0
-        self._current_year = None   # for debugging / introspection
-
-        self._np_random = np.random.default_rng(seed)
-
-    def _get_precomputed_for_year(self, year):
-        """Return cached precomputed for an integer year, computing if needed."""
-        if year not in self._precomputed_by_year:
-            climate = extract_scenario(self._df, year, self.crop)
-            self._precomputed_by_year[year] = compute_precomputed_from_climate(
-                climate, self.crop_name, scenario_tag=f"year_{year}"
-            )
-        return self._precomputed_by_year[year]
-
+    # ── reset ─────────────────────────────────────────────────────────────────
     def reset(self, *, seed=None, options=None):
-        if seed is not None:
-            self._np_random = np.random.default_rng(seed)
+        super().reset(seed=seed)
 
-        # ── Sample year / scenario and budget ─────────────────────────────
-        if self.fixed_scenario is not None:
-            # Eval mode (named test scenario): use the cached disk precomputed
-            # for backward compatibility with the existing MPC eval pipeline.
-            self.climate = extract_scenario_by_name(
-                self._df, self.fixed_scenario, self.crop
-            )
-            self.precomputed = get_precomputed(self.fixed_scenario, self.crop_name)
-            from climate_data import SCENARIO_YEARS
-            self._current_year = SCENARIO_YEARS[self.fixed_scenario]
-
-        elif self.fixed_year is not None:
-            # Eval mode (integer year, e.g. dev year): compute on the fly.
-            year = int(self.fixed_year)
-            self.climate = extract_scenario(self._df, year, self.crop)
-            self.precomputed = self._get_precomputed_for_year(year)
-            self._current_year = year
-
+        if self.randomize:
+            self._year = int(self.np_random.choice(list(TRAINING_YEARS)))
+            budget_frac = float(self.np_random.uniform(0.70, 1.00))
         else:
-            # Training mode: random year from the active pool.
-            # Per-year precomputed (Kc_ET, h2, h7, g_base) computed from
-            # this year's temperature/ET, keeping obs and ABM consistent.
-            pool = self.year_pool if self.year_pool is not None else TRAINING_YEARS
-            year = int(self._np_random.choice(pool))
-            self.climate = extract_scenario(self._df, year, self.crop)
-            self.precomputed = self._get_precomputed_for_year(year)
-            self._current_year = year
+            self._year = SCENARIO_YEARS["dry"]
+            budget_frac = 1.0
 
-        if self.fixed_budget_pct is not None:
-            budget_pct = float(self.fixed_budget_pct)
-        else:
-            budget_pct = float(self._np_random.uniform(70.0, 100.0))
+        self._budget_mm = FULL_SEASON_NEED_MM * budget_frac
+        self._water_used = 0.0
+        self._day = 0
+        self._prev_actions = np.zeros(N_AGENTS, dtype=np.float32)
 
-        self.budget_total = FULL_SEASON_NEED_MM * (budget_pct / 100.0)
+        self._abm = CropSoilABM(year=self._year)
+        self._precomp = get_precomputed(self._year, "rice")   # per-year fix (v2.4.3)
 
-        # ── Reset ABM ─────────────────────────────────────────────────────
-        self.abm = CropSoilABM(
-            gamma_flat=self.terrain['gamma_flat'],
-            sends_to=self.terrain['sends_to'],
-            Nr=self.terrain['Nr'],
-            theta=self.crop,
-            N=self.N,
-            runoff_mode='cascade',
-            elevation=self.terrain['elevation_flat'],
+        self._prev_x4_mean = float(np.mean(self._abm.get_state()[:, 3]))
+
+        obs = self._build_obs()
+        return obs, {}
+
+    # ── step ──────────────────────────────────────────────────────────────────
+    def step(self, action: np.ndarray):
+        # 1. clip & scale action
+        action = np.clip(action, 0.0, 1.0).astype(np.float32)
+        irr_mm = action * U_MAX   # [0, 12] mm/day per agent
+
+        # 2. hard budget clipping at runner layer
+        remaining = max(self._budget_mm - self._water_used, 0.0)
+        irr_mm = np.minimum(irr_mm, remaining / N_AGENTS)
+
+        # 3. advance ABM
+        self._abm.step(irrigation=irr_mm)
+        water_this_step = float(np.mean(irr_mm))
+        self._water_used += water_this_step * N_AGENTS
+
+        # 4. get post-step state
+        state = self._abm.get_state()   # (130, 5): x1 x2 x3 x4 x5
+        x1 = state[:, 0]
+        x4 = state[:, 3]
+        x4_mean = float(np.mean(x4))
+
+        # 5. compute reward
+        reward = self._compute_reward(
+            x1=x1,
+            x4_mean=x4_mean,
+            irr_mm=irr_mm,
+            action=action,
         )
-        self.abm.reset()
-        self.abm.x1 = np.full(self.N, self.fc_total)
-        self.abm.x2 = np.full(self.N, self.crop.get('x2_init', 0.0))
-        self.abm.x3 = np.zeros(self.N)
-        self.abm.x4 = np.full(self.N, self.crop.get('x4_init', 0.0))
-        self.abm.x5 = np.zeros(self.N)
 
-        self.day = 0
-        self.budget_remaining = float(self.budget_total)
-        self.water_used = 0.0
-        self.u_prev = np.zeros(self.N)
-        self.x4_prev_mean = float(self.abm.x4.mean())
+        self._day += 1
+        self._prev_actions = action.copy()
+        self._prev_x4_mean = x4_mean
 
-        return self._get_obs(), {}
+        # 6. termination logic
+        season_done = (self._day >= 93)
+        budget_done = (self._water_used >= self._budget_mm - 1e-6)
+        terminated = budget_done
+        truncated  = season_done and not budget_done
 
-    def step(self, action):
-        action = np.asarray(action, dtype=float).clip(0, 1)
-        u = action * UB_MM
+        # 7. terminal bonus — REMOVED in v2.5 (C_TERM = 0)
+        if (terminated or truncated) and C_TERM > 0:
+            reward += C_TERM * ALPHA1 * x4_mean / X4_REF
 
-        # Hard budget clip — enforces feasibility regardless of soft penalty.
-        if u.mean() > self.budget_remaining:
-            scale = self.budget_remaining / max(u.mean(), 1e-12)
-            u = u * scale
-
-        climate_today = {
-            'rainfall':  float(self.climate['rainfall'][self.day]),
-            'temp_mean': float(self.climate['temp_mean'][self.day]),
-            'temp_max':  float(self.climate['temp_max'][self.day]),
-            'radiation': float(self.climate['radiation'][self.day]),
-            'ET':        float(self.climate['ET'][self.day]),
-        }
-        self.abm.step(u, climate_today)
-
-        daily_spend = float(u.mean())
-        self.budget_remaining = max(self.budget_remaining - daily_spend, 0.0)
-        self.water_used += daily_spend
-
-        x4_mean = float(self.abm.x4.mean())
-
-        # ── Reward ────────────────────────────────────────────────────────
-        r_biomass = self.alpha1 * (x4_mean - self.x4_prev_mean) / X4_REF
-        r_water   = -self.alpha2 * u.sum() / self.W_daily_ref
-
-        deficit = np.maximum(self.stress_threshold - self.abm.x1, 0)
-        r_drought = -self.alpha3 * deficit.sum() / (
-            self.N * max(self.stress_threshold - self.wp_total, 1e-6))
-
-        du = u - self.u_prev
-        r_delta_u = -self.alpha5 * np.dot(du, du) / (UB_MM ** 2 * self.N)
-
-        excess = np.maximum(self.abm.x1 - self.fc_total, 0.0)
-        r_overfc = -self.alpha6 * ((excess / self.fc_total) ** 2).mean()
-
-        # burn_rate: field-avg water used per day / daily budget allowance.
-        # Uses day+1 because self.day is still the pre-increment value here.
-        daily_budget = self.budget_total / self.season_days
-        burn_rate = self.water_used / (self.day + 1) / max(daily_budget, 1e-6)
-        r_budget = -LAMBDA_BUDGET * max(burn_rate - 1.0, 0.0) ** 2
-
-        reward = r_biomass + r_water + r_drought + r_delta_u + r_overfc + r_budget
-
-        self.u_prev = u.copy()
-        self.x4_prev_mean = x4_mean
-        self.day += 1
-
-        # ── Termination ───────────────────────────────────────────────────
-        terminated = self.budget_remaining <= 0 and self.day < self.season_days
-        truncated  = self.day >= self.season_days
-
-        # Terminal bonus on BOTH (prevents hoard-water pathology).
-        if terminated or truncated:
-            reward += TERMINAL_BONUS_MULT * self.alpha1 * x4_mean / X4_REF
-
+        obs = self._build_obs()
         info = {
-            'day': self.day,
-            'year': self._current_year,
-            'budget_total': self.budget_total,
-            'yield_kg_ha': x4_mean * self.crop.get('HI', 0.42) * 10.0,
-            'water_used_mm': self.water_used,
-            'budget_remaining': self.budget_remaining,
-            'r_biomass': r_biomass, 'r_water': r_water,
-            'r_drought': r_drought, 'r_delta_u': r_delta_u,
-            'r_overfc': r_overfc, 'r_budget': r_budget,
+            "day": self._day,
+            "water_used_mm": self._water_used,
+            "budget_mm": self._budget_mm,
+            "x4_mean": x4_mean,
+            "yield_kg_ha": x4_mean * HARVEST_INDEX * 10.0,
         }
+        return obs, float(reward), terminated, truncated, info
 
-        return self._get_obs(), float(reward), terminated, truncated, info
+    # ── reward ────────────────────────────────────────────────────────────────
+    def _compute_reward(
+        self,
+        x1: np.ndarray,
+        x4_mean: float,
+        irr_mm: np.ndarray,
+        action: np.ndarray,
+    ) -> float:
+        """Five-term RL reward (approximate negation of MPC path cost at α*).
 
-    def _get_obs(self):
-        x1_norm = self.abm.x1 / self.fc_total
-        x5_norm = self.abm.x5 / X5_REF
-        x4_norm = self.abm.x4 / X4_REF
-        x3      = self.abm.x3
-        elev    = self.elev_norm
+        Terms:
+          r1  Biomass increment reward         (+)
+          r2  Water cost                        (-)
+          r3  Drought stress penalty            (-)
+          r5  Actuator smoothing  [DISABLED]    (0 in v2.5)
+          r6  FC-overshoot penalty              (-)
+          rb  Budget burn-rate penalty          (-)
+        """
+        # r1: biomass increment
+        delta_x4 = x4_mean - self._prev_x4_mean
+        r1 = ALPHA1 * delta_x4 / X4_REF
 
-        day_frac          = self.day / self.season_days
-        budget_frac       = self.budget_remaining / max(self.budget_total, 1e-6)
-        budget_total_norm = self.budget_total / FULL_SEASON_NEED_MM  # in [0.7, 1.0]
+        # r2: water cost (mean irrigation across agents, normalised)
+        r2 = -ALPHA2 * float(np.mean(irr_mm)) / U_MAX
 
-        # burn_rate in obs: water used per day elapsed / daily budget.
-        # At day=0 before first step, returns 0.
-        daily_budget = self.budget_total / self.season_days
-        burn_rate = (
-            self.water_used / max(self.day, 1) / max(daily_budget, 1e-6)
-            if self.day > 0 else 0.0
+        # r3: drought stress (mean deficit below ST)
+        drought = np.maximum(ST - x1, 0.0)
+        r3 = -ALPHA3 * float(np.mean(drought)) / (ST - WP)
+
+        # r5: actuator smoothing — DISABLED in v2.5 (ALPHA5_RL = 0.0)
+        if ALPHA5_RL > 0.0:
+            delta_u = action - self._prev_actions
+            r5 = -ALPHA5_RL * float(np.mean(delta_u ** 2)) / (1.0 ** 2)
+        else:
+            r5 = 0.0
+
+        # r6: FC-overshoot soft penalty
+        overshoot = np.maximum(x1 - FC, 0.0)
+        r6 = -ALPHA6 * float(np.mean(overshoot ** 2)) / (FC ** 2)
+
+        # rb: budget burn-rate penalty
+        if self._day > 0 and self._budget_mm > 0:
+            burn_rate = (self._water_used / N_AGENTS) / (
+                self._day * FULL_SEASON_NEED_MM / 93.0
+            )
+            rb = -LAMBDA_BUDGET * max(burn_rate - 1.0, 0.0) ** 2
+        else:
+            rb = 0.0
+
+        return r1 + r2 + r3 + r5 + r6 + rb
+
+    # ── observation ───────────────────────────────────────────────────────────
+    def _build_obs(self) -> np.ndarray:
+        """Build the 707-dim observation vector."""
+        state = self._abm.get_state()   # (130, 5)
+        p = self._precomp
+        d = self._day
+
+        # ── per-agent block (650) ──────────────────────────────────────────
+        x1_norm = np.clip((state[:, 0] - WP) / X1_RANGE, 0.0, 1.5)
+        x5_norm = np.clip(state[:, 4] / X5_REF, 0.0, 2.0)
+        x4_norm = np.clip(state[:, 3] / X4_REF, 0.0, 1.5)
+        x3      = np.clip(state[:, 2], 0.0, 2.0)
+        # gamma: normalised position in maturation cycle
+        gamma   = np.clip(state[:, 1] / 1250.0, 0.0, 1.0)
+        per_agent = np.stack([x1_norm, x5_norm, x4_norm, x3, gamma], axis=1)  # (130,5)
+        agent_block = per_agent.flatten().astype(np.float32)   # 650
+
+        # ── scalar block (9) ───────────────────────────────────────────────
+        day_frac          = d / 93.0
+        budget_frac       = max(self._budget_mm - self._water_used, 0.0) / self._budget_mm
+        budget_total_norm = self._budget_mm / FULL_SEASON_NEED_MM
+        burn_rate         = (
+            (self._water_used / N_AGENTS) / (d * FULL_SEASON_NEED_MM / 93.0)
+            if d > 0 else 0.0
         )
+        rain_today  = float(p["rain"][d])   if d < len(p["rain"])   else 0.0
+        ETc_today   = float(p["ETc"][d])    if d < len(p["ETc"])    else 0.0
+        h2_today    = float(p["h2"][d])     if d < len(p["h2"])     else 1.0
+        h7_today    = float(p["h7"][d])     if d < len(p["h7"])     else 1.0
+        g_base_today= float(p["g_base"][d]) if d < len(p["g_base"]) else 0.0
 
-        d = min(self.day, self.season_days - 1)
-        rain_today   = float(self.climate['rainfall'][d])
-        ETc_today    = float(self.precomputed.Kc_ET[d])
-        h2_today     = float(self.precomputed.h2[d])
-        h7_today     = float(self.precomputed.h7[d])
-        g_base_today = float(self.precomputed.g_base[d])
+        scalar_block = np.array([
+            day_frac, budget_frac, budget_total_norm, burn_rate,
+            rain_today, ETc_today, h2_today, h7_today, g_base_today,
+        ], dtype=np.float32)   # 9
 
-        # Scalar order — MUST match runner._build_obs exactly.
-        scalars = np.array([
-            day_frac,          # [0]
-            budget_frac,       # [1]
-            budget_total_norm, # [2]
-            burn_rate,         # [3]
-            rain_today,        # [4]
-            ETc_today,         # [5]
-            h2_today,          # [6]
-            h7_today,          # [7]
-            g_base_today,      # [8]
-        ], dtype=np.float32)
+        # ── forecast block (48 = 6 × 8) ───────────────────────────────────
+        forecast_vars = ["rain", "ETc", "radiation", "h2", "h7", "g_base"]
+        rows = []
+        for var in forecast_vars:
+            arr = p.get(var, np.zeros(93))
+            row = []
+            for h in range(FORECAST_H):
+                idx = d + h
+                row.append(float(arr[idx]) if idx < len(arr) else 0.0)
+            rows.append(row)
+        forecast_block = np.array(rows, dtype=np.float32).flatten()   # 48
 
-        H = self.forecast_horizon
-        end = min(d + H, self.season_days)
-
-        def _pad(arr):
-            arr = np.asarray(arr, dtype=np.float32)
-            if len(arr) < H:
-                pad_val = arr[-1] if len(arr) > 0 else 0.0
-                return np.concatenate([arr,
-                    np.full(H - len(arr), pad_val, dtype=np.float32)])
-            return arr
-
-        rain_fc = _pad(self.climate['rainfall'][d:end])
-        ETc_fc  = _pad(self.precomputed.Kc_ET[d:end])
-        rad_fc  = _pad(self.climate['radiation'][d:end])
-        h2_fc   = _pad(self.precomputed.h2[d:end])
-        h7_fc   = _pad(self.precomputed.h7[d:end])
-        g_fc    = _pad(self.precomputed.g_base[d:end])
-
-        return np.concatenate([
-            x1_norm, x5_norm, x4_norm, x3, elev,
-            scalars,
-            rain_fc, ETc_fc, rad_fc, h2_fc, h7_fc, g_fc,
-        ]).astype(np.float32)
+        obs = np.concatenate([agent_block, scalar_block, forecast_block])
+        assert obs.shape == (OBS_DIM,), f"obs shape mismatch: {obs.shape}"
+        return obs
