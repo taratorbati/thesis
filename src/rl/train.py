@@ -41,6 +41,7 @@ import shutil
 from pathlib import Path
 
 import numpy as np
+import torch
 from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import (
     BaseCallback,
@@ -120,7 +121,6 @@ def _init_wandb(project: str, run_name: str, config: dict) -> bool:
             name=run_name,
             config=config,
             reinit=True,
-            gradient_save_freq=0,  # gradient upload too expensive for 707-dim policy
         )
         print(f"[WandB] run initialised: {wandb.run.url}")
         return True
@@ -150,6 +150,27 @@ class RotatingReplayBufferCheckpoint(BaseCallback):
             if self.verbose > 0:
                 print(f"[RotatingBuffer] saved to {buf_path}.pkl  "
                       f"(step {self.num_timesteps})")
+        return True
+
+
+class GradClipCallback(BaseCallback):
+    """Clip gradient norms after every SAC update step.
+
+    SB3 does not expose a max_grad_norm parameter on SAC.  Passing it via
+    optimizer_kwargs crashes because it is not an Adam argument.  This
+    callback clips in-place after each gradient step, which is equivalent
+    to the standard PyTorch pattern and has no effect on the loss landscape.
+    """
+
+    def __init__(self, max_grad_norm: float = 1.0):
+        super().__init__(verbose=0)
+        self.max_grad_norm = max_grad_norm
+
+    def _on_step(self) -> bool:
+        if self.model is not None and hasattr(self.model, "policy"):
+            torch.nn.utils.clip_grad_norm_(
+                self.model.policy.parameters(), self.max_grad_norm
+            )
         return True
 
 
@@ -218,7 +239,9 @@ def train_sac(
         N=130,
         actor_hidden=ACTOR_HIDDEN,
         critic_hidden=CRITIC_HIDDEN,
-        optimizer_kwargs={"max_grad_norm": MAX_GRAD_NORM},  # [v2.5]
+        # optimizer_kwargs intentionally omitted — max_grad_norm is NOT an Adam
+        # argument and crashes if passed via optimizer_kwargs.  Gradient clipping
+        # is applied by GradClipCallback after each update step instead.
     )
 
     # ── LR schedule ──────────────────────────────────────────────────────────
@@ -266,7 +289,9 @@ def train_sac(
         verbose=1,
     )
 
-    callbacks = CallbackList([eval_callback, checkpoint_callback, rotating_buffer_callback])
+    grad_clip_callback = GradClipCallback(max_grad_norm=MAX_GRAD_NORM)
+    callbacks = CallbackList([eval_callback, checkpoint_callback,
+                              rotating_buffer_callback, grad_clip_callback])
 
     # ── WandB callback (optional) ─────────────────────────────────────────────
     if wandb_active:
@@ -275,11 +300,11 @@ def train_sac(
             wandb_cb = WandbCallback(
                 model_save_path=str(save_dir / "wandb_models"),
                 model_save_freq=CHECKPOINT_FREQ,
-                gradient_save_freq=0,
                 verbose=0,
             )
             callbacks = CallbackList([eval_callback, checkpoint_callback,
-                                      rotating_buffer_callback, wandb_cb])
+                                      rotating_buffer_callback,
+                                      grad_clip_callback, wandb_cb])
         except Exception as e:
             print(f"[WandB] WandbCallback unavailable ({e}); continuing without it.")
 
