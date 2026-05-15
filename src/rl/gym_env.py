@@ -192,10 +192,14 @@ class IrrigationEnv(gym.Env):
         action = np.clip(action, 0.0, 1.0).astype(np.float32)
         irr_mm = action * UB_MM
 
-        # 2. hard per-agent budget cap
-        remaining     = max(self._budget_mm - self._water_used, 0.0)
-        per_agent_cap = remaining / N_AGENTS
-        irr_mm        = np.minimum(irr_mm, per_agent_cap)
+        # 2. hard cap so the FIELD-MEAN irrigation this step does not push
+        #    the cumulative field-mean water past the budget.
+        #    Budget and _water_used are field-mean depths in mm.
+        #    Cap each agent at the remaining budget (so even if every agent
+        #    were at the cap, mean(irr_mm) <= remaining and the field-mean
+        #    accumulator stays within budget).
+        remaining = max(self._budget_mm - self._water_used, 0.0)
+        irr_mm    = np.minimum(irr_mm, remaining)
 
         # 3. climate dict for today
         d = min(self._day, _K - 1)
@@ -207,10 +211,10 @@ class IrrigationEnv(gym.Env):
             'ET':        float(self._climate['ET'][d]),
         }
 
-        # 4. advance ABM
-        new_state      = self._abm.step(irr_mm, climate_today)
-        water_step     = float(np.mean(irr_mm))
-        self._water_used += water_step * N_AGENTS
+        # 4. advance ABM, accumulate FIELD-MEAN depth (NOT per-agent times N)
+        new_state         = self._abm.step(irr_mm, climate_today)
+        water_step_field  = float(np.mean(irr_mm))    # mm of field-mean depth
+        self._water_used += water_step_field          # mm of cumulative depth
 
         # 5. extract state arrays
         x1      = new_state['x1']
@@ -272,9 +276,10 @@ class IrrigationEnv(gym.Env):
 
         rb = 0.0
         if self._day > 0 and self._budget_mm > 0:
-            daily_pace     = FULL_SEASON_NEED_MM / _K
-            water_per_agent = self._water_used / N_AGENTS
-            burn_rate      = water_per_agent / max(self._day * daily_pace, 1e-6)
+            # All quantities are field-mean depths in mm.  burn_rate compares
+            # cumulative field-mean water against the linear expected pace.
+            daily_pace = FULL_SEASON_NEED_MM / _K
+            burn_rate  = self._water_used / max(self._day * daily_pace, 1e-6)
             rb = -LAMBDA_BUDGET * max(burn_rate - 1.0, 0.0) ** 2
 
         return r1 + r2 + r3 + r5 + r6 + rb
@@ -301,9 +306,8 @@ class IrrigationEnv(gym.Env):
         budget_frac       = budget_remaining / max(self._budget_mm, 1e-6)
         budget_total_norm = self._budget_mm / FULL_SEASON_NEED_MM
         if self._day > 0:
-            daily_pace      = FULL_SEASON_NEED_MM / _K
-            water_per_agent = self._water_used / N_AGENTS
-            burn_rate = water_per_agent / max(self._day * daily_pace, 1e-6)
+            daily_pace = FULL_SEASON_NEED_MM / _K
+            burn_rate  = self._water_used / max(self._day * daily_pace, 1e-6)
         else:
             burn_rate = 0.0
 

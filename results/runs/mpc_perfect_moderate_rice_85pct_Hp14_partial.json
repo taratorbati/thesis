@@ -2,9 +2,9 @@
   "scenario": "moderate",
   "crop": "Rice",
   "controller": "mpc_perfect_Hp14",
-  "budget_total": 484.0,
+  "budget_total": 411.4,
   "seed": 0,
   "last_completed_day": 19,
   "completed_at": null,
-  "checkpointed_at": "2026-05-14T19:55:00"
+  "checkpointed_at": "2026-05-16T01:00:35"
 }
