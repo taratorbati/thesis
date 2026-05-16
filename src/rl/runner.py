@@ -58,58 +58,71 @@ from src.rl.gym_env import (
 from src.rl.networks import (
     CTDESACPolicy,          # noqa: F401 (registration side-effect)
     MonolithicCTDESACPolicy,
+    WrappedVDNCTDESACPolicy,
 )
 
 
-def _detect_critic_input_dim(model_path: Path) -> int:
-    """Peek at the first critic weight in a saved SB3 zip and return its input dim.
+def _detect_critic_arch(model_path: Path):
+    """Peek inside a saved SB3 zip and return (input_dim, key_format).
 
     Returns
     -------
-    int
-        Input dimension of the first critic Linear layer:
-        - 837  → monolithic architecture (obs 707 + actions 130, pre-VDN)
-        - 63   → factorized VDN architecture (per-agent: 5 local + 57 global + 1 action)
+    (int, str)
+        input_dim   : first Linear layer's input dimension
+                       837 → monolithic   (obs 707 + actions 130)
+                        63 → VDN factorized
+        key_format  : 'flat'    → critic.qf0.0.weight  (nn.Sequential subclass)
+                      'wrapped' → critic.qf0.local_q_net.0.weight  (nn.Module + wrapper)
     """
     with zipfile.ZipFile(str(model_path)) as zf:
-        # SB3 stores network weights in 'policy.pth'
         with zf.open('policy.pth') as f:
             state_dict = torch.load(io.BytesIO(f.read()), map_location='cpu',
                                     weights_only=False)
-    # Find the first critic weight — works for both monolithic and factorized key formats
-    for key in ('critic.qf0.0.weight', 'critic.qf0.local_q_net.0.weight'):
-        if key in state_dict:
-            return state_dict[key].shape[1]
+    if 'critic.qf0.0.weight' in state_dict:
+        return state_dict['critic.qf0.0.weight'].shape[1], 'flat'
+    if 'critic.qf0.local_q_net.0.weight' in state_dict:
+        return state_dict['critic.qf0.local_q_net.0.weight'].shape[1], 'wrapped'
     raise KeyError(
         f"Cannot detect critic architecture from {model_path}. "
-        f"Available keys starting with 'critic.qf0': "
+        f"Keys starting with 'critic.qf0': "
         f"{[k for k in state_dict if k.startswith('critic.qf0')]}"
     )
+
+
+def _detect_critic_input_dim(model_path: Path) -> int:
+    """Backwards-compat wrapper — returns only the input dim."""
+    dim, _ = _detect_critic_arch(model_path)
+    return dim
 
 
 def _load_sac_model(model_path: Path, device: str = 'cpu') -> SAC:
     """Load a SAC model, auto-selecting the matching policy class.
 
-    Handles both the pre-VDN monolithic architecture (trained on Colab
-    2026-05-16) and the factorized VDN architecture (v2.6 onwards).
+    Three known checkpoint variants:
+      dim=837, flat     → MonolithicCTDESACPolicy   (model.zip, final 500k)
+      dim=63,  wrapped  → WrappedVDNCTDESACPolicy   (best_model.zip, step 350k)
+      dim=63,  flat     → CTDESACPolicy             (future VDN checkpoints)
     """
-    dim = _detect_critic_input_dim(model_path)
+    dim, key_fmt = _detect_critic_arch(model_path)
     if dim == 837:
-        # Monolithic critic (pre-VDN checkpoint)
         policy_class = MonolithicCTDESACPolicy
-    elif dim == 63:
-        # Factorized VDN critic (v2.6+)
+        label = 'monolithic (pre-VDN)'
+    elif dim == 63 and key_fmt == 'wrapped':
+        policy_class = WrappedVDNCTDESACPolicy
+        label = 'VDN factorized – local_q_net wrapper (best_model.zip)'
+    elif dim == 63 and key_fmt == 'flat':
         policy_class = CTDESACPolicy
+        label = 'VDN factorized – flat keys (v2.6+)'
     else:
         raise ValueError(
-            f"Unexpected critic first-layer input dim {dim} in {model_path}. "
-            f"Expected 837 (monolithic) or 63 (factorized VDN)."
+            f"Unrecognised critic architecture: dim={dim}, key_format={key_fmt!r}. "
+            f"Expected (837, flat), (63, wrapped), or (63, flat)."
         )
     return SAC.load(
         str(model_path),
         device=device,
         custom_objects={"policy_class": policy_class},
-    )
+    ), label
 
 DEFAULT_FORECAST_HORIZON = 8
 
@@ -169,11 +182,9 @@ class RLController(Controller):
         self.noise_rho = noise_rho
         self.noise_seed = noise_seed
         self.verbose = verbose
-        self.model = _load_sac_model(self.model_path, device='cpu')
+        self.model, _arch_label = _load_sac_model(self.model_path, device='cpu')
         if self.verbose:
-            dim = _detect_critic_input_dim(self.model_path)
-            arch = 'monolithic (pre-VDN)' if dim == 837 else 'factorized VDN (v2.6+)'
-            print(f"  Loaded checkpoint: critic architecture = {arch}")
+            print(f"  Loaded checkpoint: critic architecture = {_arch_label}")
         self._inference_times = []
         self._noisy_forecast = None   # initialized in reset()
 

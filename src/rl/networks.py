@@ -374,6 +374,77 @@ class CTDESACPolicy(SACPolicy):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+#  LEGACY VDN POLICY — VDN critic with local_q_net wrapper (best_model.zip)
+#  Used for checkpoints where _FactorizedQNet stored layers as self.local_q_net
+#  (keys: critic.qf0.local_q_net.0.weight, shape [256, 63]).
+# ═════════════════════════════════════════════════════════════════════════════
+class _FactorizedQNetWrapped(nn.Module):
+    """_FactorizedQNet with named local_q_net wrapper — matches best_model.zip keys."""
+
+    def __init__(self, N: int, net_arch: List[int],
+                 activation_fn: Type[nn.Module] = nn.ReLU):
+        super().__init__()
+        self.N = N
+        layers = create_mlp(input_dim=PER_AGENT_CRITIC_INPUT_DIM, output_dim=1,
+                             net_arch=net_arch, activation_fn=activation_fn)
+        self.local_q_net = nn.Sequential(*layers)
+
+    def forward(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+        B, N = obs.shape[0], self.N
+        local_obs       = obs[:, :N_AGENT_FEATURES * N].reshape(B, N, N_AGENT_FEATURES)
+        global_expanded = obs[:, N_AGENT_FEATURES * N:].unsqueeze(1).expand(-1, N, -1)
+        local_actions   = actions.reshape(B, N, 1)
+        local_inputs    = torch.cat([local_obs, global_expanded, local_actions], dim=-1)
+        local_q = self.local_q_net(
+            local_inputs.reshape(B * N, PER_AGENT_CRITIC_INPUT_DIM)
+        ).reshape(B, N, 1)
+        return local_q.sum(dim=1)
+
+
+class _WrappedFactorizedCritic(ContinuousCritic):
+    """Twin-Q critic using _FactorizedQNetWrapped — matches best_model.zip."""
+
+    def __init__(self, observation_space, action_space, net_arch, features_extractor,
+                 features_dim, activation_fn=nn.ReLU, normalize_images=False,
+                 n_critics=2, share_features_extractor=True, N=N_AGENTS_DEFAULT, **kwargs):
+        super(ContinuousCritic, self).__init__(
+            observation_space, action_space,
+            features_extractor=features_extractor, normalize_images=normalize_images)
+        self.share_features_extractor = share_features_extractor
+        self.n_critics = n_critics
+        self.N = N
+        self.q_networks: List[_FactorizedQNetWrapped] = []
+        for idx in range(n_critics):
+            q_net = _FactorizedQNetWrapped(N=N, net_arch=net_arch, activation_fn=activation_fn)
+            self.add_module(f"qf{idx}", q_net)
+            self.q_networks.append(q_net)
+
+    def forward(self, obs, actions):
+        with torch.set_grad_enabled(not self.share_features_extractor):
+            features = self.extract_features(obs, self.features_extractor)
+        return tuple(q(features, actions) for q in self.q_networks)
+
+    def q1_forward(self, obs, actions):
+        with torch.no_grad():
+            features = self.extract_features(obs, self.features_extractor)
+        return self.q_networks[0](features, actions)
+
+
+class WrappedVDNCTDESACPolicy(SACPolicy):
+    """CTDESACPolicy for best_model.zip (VDN, local_q_net keys, dim=63)."""
+
+    def make_actor(self, features_extractor=None):
+        kw = self._update_features_extractor(self.actor_kwargs, features_extractor)
+        kw["N"] = get_action_dim(self.action_space)
+        return SharedActor(**kw).to(self.device)
+
+    def make_critic(self, features_extractor=None):
+        kw = self._update_features_extractor(self.critic_kwargs, features_extractor)
+        kw["N"] = get_action_dim(self.action_space)
+        return _WrappedFactorizedCritic(**kw).to(self.device)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 #  LEGACY POLICY — monolithic 837-dim twin-Q critic
 #  Used ONLY for loading checkpoints that were trained before the VDN upgrade.
 #  The Colab run on 2026-05-16 used this architecture (first Linear layer
