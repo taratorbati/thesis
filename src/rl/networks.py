@@ -202,8 +202,15 @@ class SharedActor(Actor):
 # ═════════════════════════════════════════════════════════════════════════════
 #  FACTORIZED CRITIC  (Value Decomposition Network)
 # ═════════════════════════════════════════════════════════════════════════════
-class _FactorizedQNet(nn.Module):
+class _FactorizedQNet(nn.Sequential):
     """Single Q-network that decomposes Q_total = Σ_n Q_local(s_n, g, a_n).
+
+    Inherits from nn.Sequential so that the MLP layers are registered
+    directly as numeric children (0, 1, 2, …) instead of being nested
+    inside an extra ``local_q_net`` attribute.  This matches the
+    state-dict key naming used by the original training run
+    (e.g. ``critic.qf0.0.weight``) and keeps SB3 checkpoint loads
+    backwards-compatible.
 
     The local MLP is shared across all N agents.  Input per agent:
       • 5  local state features
@@ -211,7 +218,7 @@ class _FactorizedQNet(nn.Module):
       • 1  local action
     → 63 inputs, scalar output (Q_n).
 
-    Q_total is the sum of Q_n across the 130 agents.
+    Q_total is the sum of Q_n across the N agents.
     """
 
     def __init__(
@@ -220,20 +227,19 @@ class _FactorizedQNet(nn.Module):
         net_arch: List[int],
         activation_fn: Type[nn.Module] = nn.ReLU,
     ):
-        super().__init__()
-        self.N = N
         layers = create_mlp(
             input_dim=PER_AGENT_CRITIC_INPUT_DIM,
             output_dim=1,
             net_arch=net_arch,
             activation_fn=activation_fn,
         )
-        self.local_q_net = nn.Sequential(*layers)
+        super().__init__(*layers)
+        self.N = N
 
     def forward(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
         """
         obs:     (B, 707)   flat batched observation
-        actions: (B, 130)   joint action
+        actions: (B, N)     joint action  (N = self.N)
 
         returns: (B, 1)     Q_total = Σ_n Q_local(s_n, g, a_n)
         """
@@ -252,9 +258,10 @@ class _FactorizedQNet(nn.Module):
             [local_obs, global_expanded, local_actions], dim=-1
         )                                                                # (B, N, 63)
 
-        # apply shared MLP to all N agents in parallel
+        # apply the shared MLP to all N agents in parallel via nn.Sequential's
+        # own forward (super().forward applies the registered child modules).
         local_inputs_flat = local_inputs.reshape(B * N, PER_AGENT_CRITIC_INPUT_DIM)
-        local_q = self.local_q_net(local_inputs_flat).reshape(B, N, 1)
+        local_q = nn.Sequential.forward(self, local_inputs_flat).reshape(B, N, 1)
 
         # Σ across the agent dimension
         q_total = local_q.sum(dim=1)                                     # (B, 1)
@@ -364,6 +371,39 @@ class CTDESACPolicy(SACPolicy):
         )
         critic_kwargs["N"] = get_action_dim(self.action_space)
         return FactorizedContinuousCritic(**critic_kwargs).to(self.device)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  LEGACY POLICY — monolithic 837-dim twin-Q critic
+#  Used ONLY for loading checkpoints that were trained before the VDN upgrade.
+#  The Colab run on 2026-05-16 used this architecture (first Linear layer
+#  shape [256, 837] in the saved checkpoint).
+# ═════════════════════════════════════════════════════════════════════════════
+class MonolithicCTDESACPolicy(SACPolicy):
+    """CTDESACPolicy with the original monolithic 837-dim twin-Q critic.
+
+    Identical to the pre-VDN architecture:
+      - Actor: SharedActor (unchanged)
+      - Critic: standard SB3 ContinuousCritic(837 → 256 → 256 → 1) × 2
+
+    Use this as the custom_objects override when loading a checkpoint that
+    was saved before the factorized critic was committed:
+
+        SAC.load(path, custom_objects={"policy_class": MonolithicCTDESACPolicy})
+    """
+
+    def make_actor(
+        self, features_extractor: Optional[BaseFeaturesExtractor] = None
+    ) -> SharedActor:
+        actor_kwargs = self._update_features_extractor(
+            self.actor_kwargs, features_extractor
+        )
+        actor_kwargs["N"] = get_action_dim(self.action_space)
+        return SharedActor(**actor_kwargs).to(self.device)
+
+    # make_critic is NOT overridden → falls back to SACPolicy's standard
+    # ContinuousCritic which takes the full (obs + action) concatenation as
+    # input, producing the [256, 837] first-layer shape seen in the checkpoint.
 
 
 # ═════════════════════════════════════════════════════════════════════════════
