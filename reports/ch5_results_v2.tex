@@ -1,0 +1,751 @@
+% ============================================================
+%  Chapter 5 – Results and Discussion
+%  Thesis: Modern Control Methods for Agricultural Irrigation
+%  Author: Tara Torbati — ITMO University, R4237c
+%  Supervisor: Peregudin A. A.
+%
+%  PLACEHOLDER convention
+%  \TODO{description} marks every value / figure that requires
+%  a pending experiment to be completed before final submission.
+%  Grep for \TODO before submitting.
+% ============================================================
+
+\newcommand{\TODO}[1]{\textbf{\textcolor{red}{[TODO: #1]}}}
+
+\chapter{Results and Discussion}
+\label{ch:results}
+
+% ============================================================
+\section{Introduction}
+\label{sec:results_intro}
+% ============================================================
+
+This chapter presents the complete empirical evaluation of the four control strategies
+developed and described in Chapters~3 and~4: the no-irrigation baseline, the fixed-schedule
+heuristic, the Model Predictive Controller (MPC), and the Soft Actor-Critic Reinforcement
+Learning agent (SAC).
+All controllers are evaluated on the same validated Agent-Based Model (ABM) of the
+6-hectare Hashemi rice field in Gilan Province, Iran, across three climatically distinct
+test years — dry (2022, 39.7~mm seasonal rainfall), moderate (2018, 108.8~mm), and
+wet (2024, 176.8~mm) — and three seasonal water budget levels: 100\%, 85\%, and 70\%
+of the agronomically derived full-need budget of 484~mm.
+These nine scenario--budget cells constitute the primary evaluation grid.
+
+The comparative analysis is organised around three hypotheses motivated by the theoretical
+properties of each controller and by the three axes of evaluation specified by the
+supervising committee:
+
+\begin{description}
+  \item[H1 (Axis~1 — controller design)] The MPC, operating under a perfect weather
+        forecast with the calibrated five-term cost function and prediction horizon
+        $H_p = 8$~days, achieves substantially higher seasonal biomass yields and lower
+        waterlogging stress than the fixed-schedule heuristic, at the cost of significant
+        online computational effort.
+
+  \item[H2 (Axis~1 — training and architecture)] An initial SAC implementation with a
+        standard monolithic centralized critic exhibits a characteristic three-phase
+        learning trajectory and converges to a spatially-homogeneous, scenario-invariant
+        policy. The diagnostic root causes — terminal-bonus bootstrapping, entropy
+        auto-tuner divergence, and per-agent credit-assignment failure under a
+        $\mathbb{R}^{837} \to \mathbb{R}^1$ critic — are resolved by a value
+        decomposition network (VDN) critic and the associated hyperparameter changes
+        documented in Chapter~4. The corrected policy is expected to produce
+        spatially differentiated and rainfall-responsive irrigation comparable to
+        the MPC at sub-millisecond inference latency.
+
+  \item[H3 (Axis~2 — disturbances)] The introduction of realistic forecast noise
+        (AR(1) model, $\sigma = 0.15$, $\rho = 0.6$ on rainfall and ET$_c$) degrades
+        MPC performance measurably, while the SAC policy — which does not rely on the
+        forecast for its irrigation decisions in the same deterministic way — is more
+        robust to forecast corruption.
+\end{description}
+
+Section~\ref{sec:metrics} defines the evaluation metrics and statistical methodology.
+Sections~\ref{sec:baseline}--\ref{sec:sac} present the results for each controller
+individually. Section~\ref{sec:noise} evaluates forecast robustness.
+Section~\ref{sec:headtohead} presents the head-to-head comparison.
+Section~\ref{sec:discussion} interprets the results in economic and practical terms,
+and identifies the limitations of the study.
+
+% ============================================================
+\section{Evaluation Metrics and Statistical Methods}
+\label{sec:metrics}
+% ============================================================
+
+\subsection{Primary Performance Metrics}
+
+The following metrics are recorded for every simulation run and reported in all
+comparison tables.
+
+\textbf{Seasonal yield} ($Y$, kg/ha) is the primary agronomic objective.
+It is computed from the field-averaged terminal biomass as
+$Y = \bar{x}_4(T) \times \mathrm{HI} \times 10$,
+where $\mathrm{HI} = 0.45$ is the harvest index for Hashemi rice and the factor of 10
+converts g/m$^2$ to kg/ha.
+
+\textbf{Total water applied} ($W$, mm) is the sum of irrigation decisions over the
+93-day season, averaged across all 130 agents.  This is compared against the seasonal
+budget to compute budget utilisation (\% budget used).
+
+\textbf{Waterlogging-days} (Wlog-d) counts agent-days on which root-zone soil moisture
+$x_1$ exceeds field capacity (FC $= 140$~mm).  Sustained waterlogging reduces oxygen
+availability and causes root damage in rice.
+
+\textbf{Drought-days} (Drought-d) counts agent-days on which $x_1$ falls below the
+stress threshold ST $= 126$~mm (corresponding to a readily available water depletion
+fraction $p = 0.20$ per FAO-56~\cite{allen1998crop}).
+
+\textbf{Wall-clock solve time} (Wall-min, or Wall-ms for SAC inference) measures the
+online computational cost.  For the MPC, this is the cumulative IPOPT solver time per
+season.  For the SAC, the per-step neural network inference time is reported as it
+determines suitability for real-time edge deployment.
+
+\subsection{Statistical Methods for SAC Multi-Seed Results}
+
+Because the SAC policy is stochastic (due to training randomness), all final SAC results
+are intended to be reported as mean $\pm$ standard deviation across five independently
+seeded training runs (seeds 0--4).
+Where seed-0 results are presented in isolation, this is explicitly noted as a
+preliminary single-seed evaluation pending completion of the full five-seed training
+campaign.
+Statistical significance of yield differences between the SAC and MPC is assessed with
+the two-sided Mann-Whitney $U$ test ($\alpha = 0.05$) applied to the five SAC seed
+outcomes versus the deterministic MPC result for each test cell.
+\TODO{Report Mann-Whitney U test p-values per cell once seeds 1--4 are complete.}
+
+% ============================================================
+\section{Baseline Performance}
+\label{sec:baseline}
+% ============================================================
+
+\subsection{No-Irrigation Baseline}
+
+Table~\ref{tab:no_irrigation} summarises the no-irrigation baseline, which represents the
+agronomic lower bound for each scenario.  In all three test years the simulated Hashemi
+rice crop experiences near-total drought stress for the majority of the 93-day season,
+confirming that supplemental irrigation is agronomically necessary even in the relatively
+humid wet year.
+
+\begin{table}[ht]
+\centering
+\caption{No-irrigation baseline results for all three test scenarios.}
+\label{tab:no_irrigation}
+\begin{tabular}{lccc}
+\hline
+\textbf{Scenario (Year)} & \textbf{Yield (kg/ha)} & \textbf{Drought-d/agent} & \textbf{Water applied (mm)} \\
+\hline
+Dry   (2022, 39.7~mm)   & 1\,462 & 87.0 & 0 \\
+Moderate (2018, 108.8~mm) & 1\,478 & 89.8 & 0 \\
+Wet   (2024, 176.8~mm)   & 2\,243 & 82.7 & 0 \\
+\hline
+\end{tabular}
+\end{table}
+
+The wet-year no-irrigation yield (2\,243~kg/ha) is notably higher than the dry-year result
+(1\,462~kg/ha), reflecting the additional rainfall-supplied moisture available to the crop.
+Nevertheless, even in the wet year the crop spends 82.7~days/agent under drought stress,
+indicating that natural rainfall alone is insufficient to meet the Hashemi cultivar's
+high water demand (Kc $= 1.15$).
+
+\subsection{Fixed-Schedule Heuristic}
+
+The fixed-schedule controller distributes the entire seasonal budget uniformly across
+93~days, applying a constant daily irrigation depth regardless of antecedent soil
+moisture, crop stage, or weather forecast.  Table~\ref{tab:fixed_schedule} reports
+results for all nine evaluation cells.
+
+\begin{table}[ht]
+\centering
+\caption{Fixed-schedule heuristic results across all nine test cells.
+         Budget levels 100\%, 85\%, and 70\% correspond to 484, 411, and 339~mm.}
+\label{tab:fixed_schedule}
+\begin{tabular}{llcccc}
+\hline
+\textbf{Scenario} & \textbf{Budget} & \textbf{Yield (kg/ha)} & \textbf{Water (mm)} & \textbf{Wlog-d} & \textbf{Drought-d} \\
+\hline
+Dry      & 100\% & 3\,607 & 484.0 & 54.0 & 28.0 \\
+Dry      & 85\%  & 3\,394 & 411.0 & 42.1 & 31.8 \\
+Dry      & 70\%  & 3\,118 & 339.0 & 31.6 & 36.4 \\
+Moderate & 100\% & 3\,302 & 484.0 & 53.4 & 22.5 \\
+Moderate & 85\%  & 3\,089 & 411.0 & 43.7 & 27.3 \\
+Moderate & 70\%  & 2\,841 & 339.0 & 33.2 & 31.8 \\
+Wet      & 100\% & 2\,790 & 484.0 & 83.7 &  4.2 \\
+Wet      & 85\%  & 2\,901 & 411.0 & 68.3 &  5.1 \\
+Wet      & 70\%  & 3\,024 & 339.0 & 52.1 &  6.3 \\
+\hline
+\end{tabular}
+\end{table}
+
+Two structural pathologies of fixed-schedule irrigation are apparent from these results.
+In the dry year, the uniform schedule cannot respond to dry spells, leaving agents in
+drought stress for up to 36 days despite consuming the full budget.
+In the wet year, the pathology is reversed: the schedule over-irrigates by continuing
+to apply water during periods of natural rainfall, producing 83.7~waterlogging-days per
+agent at 100\% budget — the highest waterlogging count of any controller in the
+entire evaluation.  Paradoxically, reducing the budget to 70\% in the wet year
+\emph{increases} yield from 2\,790 to 3\,024~kg/ha, because less irrigation reduces
+root oxygen stress.  This counterintuitive result underscores the fundamental
+inadequacy of open-loop scheduling in a climatically variable environment and
+establishes the motivation for closed-loop predictive control.
+
+% ============================================================
+\section{MPC Performance Under Perfect Forecast}
+\label{sec:mpc}
+% ============================================================
+
+\subsection{Summary of Calibration Outcomes}
+
+The MPC cost function and control-oriented model were calibrated through a four-phase,
+33-configuration sensitivity sweep, detailed in Chapter~4.  The recommended operating
+point is $\boldsymbol{\alpha}^* = (1.0,\; 0.016,\; 0.1,\; 0,\; 0.005,\; 8.0)$,
+corresponding to the five active terms: terminal biomass reward, water cost at the
+Iranian domestic-base tariff (7\,000~toman/m$^3$), drought stress regulariser, actuator
+smoothing, and a soft FC-overshoot penalty.
+The prediction horizon was set to $H_p^* = 8$~days, representing the best yield-per-unit-compute
+point: equivalent yield to $H_p = 14$ at approximately $11\times$ lower mean solve time.
+
+The NLP solved at each time step has 3\,120 decision variables and 2\,081 constraints
+for $H_p = 8$, $N = 130$ agents.  IPOPT warm-starting from the previous solution
+reduces the mean per-step iteration count from approximately 280~(cold) to 112~(warm),
+a 2.5$\times$ speedup.
+
+\subsection{MPC Results Under Perfect Forecast}
+
+Table~\ref{tab:mpc_perfect} presents the full MPC evaluation results.
+Dry- and wet-year cells are complete; moderate-year Hp=8 results are pending
+completion of the Kaggle CPU run.
+
+\begin{table}[ht]
+\centering
+\caption{MPC performance under perfect forecast, $\alpha^*$, $H_p = 8$.
+         Wall-min is the cumulative IPOPT solve time for the 93-day season.}
+\label{tab:mpc_perfect}
+\begin{tabular}{llccccc}
+\hline
+\textbf{Scenario} & \textbf{Budget} & \textbf{Yield (kg/ha)} & \textbf{Water (mm)} & \textbf{Wlog-d} & \textbf{Drought-d} & \textbf{Wall-min} \\
+\hline
+Dry      & 100\% & 4\,145 & 469.1 &  0.8 & — &  44.1 \\
+Dry      & 85\%  & 4\,069 & 409.9 &  0.3 & — &  32.7 \\
+Dry      & 70\%  & 3\,766 & 338.7 &  1.4 & — &  22.0 \\
+Moderate & 100\% & \TODO{run exp\_mpc --scenario moderate --budget 100 --horizon 8} & — & — & — & — \\
+Moderate & 85\%  & \TODO{run exp\_mpc --scenario moderate --budget 85 --horizon 8}  & — & — & — & — \\
+Moderate & 70\%  & \TODO{run exp\_mpc --scenario moderate --budget 70 --horizon 8}  & — & — & — & — \\
+Wet      & 100\% & 3\,759 & 310.2 & 19.0 & — &  43.1 \\
+Wet      & 85\%  & 3\,743 & 308.3 & 16.9 & — &  48.3 \\
+Wet      & 70\%  & 3\,754 & 307.8 & 18.2 & — &  51.0 \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsection{Analysis of MPC Behaviour}
+
+\textbf{Dry year.}
+Under the dry scenario, the MPC achieves 4\,145~kg/ha at 100\% budget — a 14.9\%
+improvement over the fixed-schedule (3\,607~kg/ha) at effectively the same water
+expenditure (469.1 vs.\ 484.0~mm).
+Waterlogging is essentially eliminated ($\leq 1.4$~days across all budget levels),
+confirming that the FC-overshoot penalty $\alpha_6 = 8.0$ is effective at preventing
+over-irrigation even when the solver has budget headroom.
+Under 70\% budget the MPC achieves 3\,766~kg/ha compared to 3\,118~kg/ha for the
+fixed schedule under the same constraint — a yield premium of 648~kg/ha from
+schedule optimisation alone.
+
+\textbf{Wet year.}
+The MPC's advantage is most visible in the wet year: 3\,759~kg/ha vs.\ 2\,790~kg/ha
+for the fixed schedule at 100\% budget (34.7\% improvement) and, notably, a dramatically
+lower waterlogging count (19.0~days vs.\ 83.7~days).
+The MPC recognises approaching rainfall events and withholds irrigation preemptively,
+a behaviour impossible for an open-loop scheduler.
+The wet-year MPC water consumption is striking: only 310.2~mm out of the available
+484~mm (64.1\% utilisation) — the controller voluntarily returns budget to allow natural
+precipitation to carry the crop, strictly satisfying the budget constraint while
+maximising yield.
+Budget level has negligible effect on yield in the wet year (3\,759, 3\,743,
+3\,754~kg/ha across 100/85/70\%), because rainfall alone comes close to satisfying
+demand and the MPC adapts its drawdown rate accordingly.
+
+\textbf{Moderate year.}
+\TODO{Insert analysis of moderate year results once MPC Hp=8 runs complete.
+Reference the Hp=3 indicative results: 3,698 / 3,694 / 3,598 kg/ha at 100/85/70\%
+as a lower bound for the Hp=8 moderate cell.}
+
+\textbf{Computational cost.}
+Mean solve time per season ranges from 22.0 to 51.0~wall-minutes across the nine cells,
+with individual solver calls as long as 274~seconds (worst-case for a dry/100\% day).
+While feasible in an offline simulation setting, this latency is prohibitive for
+real-time deployment on low-power edge hardware at a per-day control frequency.
+This computational cost is the primary motivation for investigating SAC as an
+online-efficient alternative.
+
+% ============================================================
+\section{SAC Performance}
+\label{sec:sac}
+% ============================================================
+
+\subsection{Architecture Recap}
+
+The SAC agent uses a Centralised Training, Decentralised Execution (CTDE) architecture
+with a parameter-shared actor network and a value-decomposition critic.
+Each of the 130 irrigation valves receives a
+62-dimensional per-agent observation (5 local states plus 57 global features drawn from
+the 707-dimensional joint observation), and produces a scalar irrigation action in
+[0, 12]~mm/day via a shared 62$\to$128$\to$128$\to$1 network.
+At inference time the actor performs a single vectorised forward pass producing all 130
+actions simultaneously, requiring approximately 1~ms on a standard CPU — over
+25\,000$\times$ faster than the MPC's mean per-step solve time.
+During training, the critic uses a Value Decomposition Network (VDN) factorisation:
+$Q(\mathbf{s},\mathbf{a}) = \sum_{n=1}^{130} Q_{\mathrm{loc}}(\mathbf{s}^{(n,\mathrm{loc})},
+\mathbf{s}^{(\mathrm{glob})}, a^{(n)})$, where the local Q-function is a shared
+$63 \to 256 \to 256 \to 1$ MLP (twin Q for clipped double-Q estimation). The
+factorisation restores per-agent learning signal that a monolithic $837 \to 1$ critic
+cannot provide, as discussed in Chapter~4 and Section~\ref{sec:discussion} below.
+The critic is used only during training and does not affect deployment-time inference.
+
+\subsection{Training Trajectory}
+
+A pilot training run was first conducted with the initial architecture (monolithic critic,
+auto-tuned entropy, terminal bonus $c_{\mathrm{term}} = 5$, RL actuator smoothing
+$\alpha_5 = 0.005$).  Training on a Kaggle T4 GPU at approximately 68~steps/second, the
+$200\,000$-step pilot revealed three distinct phases that motivated the architectural and
+hyperparameter changes documented in Chapter~4.
+
+\begin{description}
+  \item[Phase 1 (steps 0–25\,000): Healthy convergence.]
+        The critic loss fell rapidly from 2\,713 to a minimum of 0.67 at step 20\,500.
+        The entropy coefficient decreased from 0.30 to 0.004, reflecting the agent
+        learning a near-deterministic initial irrigation strategy.
+        All evaluation episodes achieved full 93-day season completion by step 25\,000.
+
+  \item[Phase 2 (steps 25\,000–100\,000): Productive plateau.]
+        Critic loss rose slowly (0.67$\to$112), while evaluation reward reached its
+        peak of $-0.37$ at step 96\,000.
+
+  \item[Phase 3 (steps 100\,000–200\,000): Q-value divergence.]
+        Critic loss escalated from 112 to 84\,693 (629$\times$ increase).
+        Actor loss became increasingly negative ($-500\to-19\,195$), and the entropy
+        coefficient spiked from 0.029 to 1.286 as the dual-gradient optimizer
+        attempted to escape the emerging instability through entropy injection.
+\end{description}
+
+Beyond the divergence pathology, the pilot policy at its peak (step~96\,000,
+\texttt{best\_model.zip}) exhibited a separate but equally fundamental issue:
+spatially homogeneous behaviour. The pilot policy applied a near-constant
+$2$--$3$~mm/day irrigation rate to all 130 agents, independent of agent location,
+local soil moisture, or weather scenario. Budget utilisation ranged from 39\,\% to
+70\,\% across the nine evaluation cells (i.e., the policy never approached the
+constraint boundary), and water consumption actually \emph{increased} from 190~mm in
+the dry scenario to 231~mm in the wet scenario — the opposite of forecast-aware
+behaviour.
+
+The root cause of both pathologies was identified, the corrective changes (VDN critic
+factorisation, terminal-bonus removal, fixed entropy coefficient, RL-side $\alpha_5
+= 0$ removal, gradient clipping, learning-rate decay) were implemented as documented
+in Chapter~4, and a $500\,000$-step training campaign across five independent seeds was
+launched on Kaggle T4 hardware. The results below are from the corrected v2.6 training
+run.
+
+\TODO{Insert Figure~\ref{fig:training_curves}: side-by-side comparison of the v2.4
+pilot (200k steps) and the v2.6 corrected runs (500k steps), showing critic loss and
+ent\_coef trajectories. Source: \texttt{wandb/run-*/files/media/} from the
+sac-irrigation-thesis WandB project.}
+
+\TODO{Report 5-seed mean $\pm$ std training curves once seeds 1--4 are complete.
+Expected: critic loss bounded below $\sim$100 throughout 500\,k steps; ent\_coef
+constant at 0.05; mean per-episode reward continuing to improve through 500\,k steps
+rather than peaking at $\sim$96\,k.}
+
+\subsection{Evaluation Results}
+
+Table~\ref{tab:sac_perfect} reports the SAC evaluation results across all nine test
+cells. The values reproduced below are from the v2.4 pilot policy (seed 0,
+\texttt{best\_model.zip} at step $\sim$96\,000), included here as a baseline against
+which the v2.6 corrected campaign will be compared.
+
+\TODO{Replace pilot-run values with mean $\pm$ std across seeds 0--4 of the v2.6
+corrected training campaign once those runs complete.}
+
+\begin{table}[ht]
+\centering
+\caption{SAC evaluation results — v2.4 pilot policy (seed 0, best model at
+$\sim$step 96\,000), perfect forecast. To be replaced with v2.6 5-seed results.}
+\label{tab:sac_perfect}
+\begin{tabular}{llcccccc}
+\hline
+\textbf{Scenario} & \textbf{Budget} & \textbf{Budget (mm)} & \textbf{Yield (kg/ha)} & \textbf{Water (mm)} & \textbf{\% Used} & \textbf{Drought-d} & \textbf{Wlog-d} \\
+\hline
+Dry      & 100\% & 484 & 2\,477 & 190.5 & 39.4 & 81.2 & 3.4 \\
+Dry      & 85\%  & 411 & 2\,484 & 192.3 & 46.8 & 81.0 & 3.6 \\
+Dry      & 70\%  & 339 & 2\,501 & 195.7 & 57.7 & 80.8 & 4.1 \\
+Moderate & 100\% & 484 & 2\,376 & 221.6 & 45.8 & 69.0 & 9.2 \\
+Moderate & 85\%  & 411 & 2\,380 & 223.0 & 54.2 & 69.0 & 9.5 \\
+Moderate & 70\%  & 339 & 2\,391 & 224.8 & 66.4 & 69.0 & 9.7 \\
+Wet      & 100\% & 484 & 3\,145 & 231.1 & 47.8 & 51.4 & 23.9 \\
+Wet      & 85\%  & 411 & 3\,148 & 232.9 & 56.6 & 50.8 & 24.3 \\
+Wet      & 70\%  & 339 & 3\,155 & 235.5 & 69.5 & 50.1 & 24.9 \\
+\hline
+\end{tabular}
+\end{table}
+
+\TODO{Replace pilot-run point estimates with v2.6 mean $\pm$ std across seeds 0--4
+once 5-seed corrected campaign is complete. Replace Drought-d column once all seeds
+confirm the pattern.}
+
+\subsection{Pilot-Run Policy Behaviour Analysis}
+
+The pilot policy's spatial behaviour is the central motivation for the v2.6
+architectural changes documented in Chapter~4. Inspection of the day-by-day irrigation
+schedule reveals that the v2.4 pilot policy applies a near-constant low-rate
+irrigation of approximately 2--3~mm/day throughout the season,
+independent of the prevailing weather scenario.
+In the dry/100\% cell, the root-zone soil moisture $x_1$ declines from FC (140~mm) at
+transplanting to approximately 77~mm by day 56, then oscillates in the 77--94~mm band
+for the remainder of the season.
+Critically, $x_1$ remains below the stress threshold ST (126~mm) for 83 of 93~days, yet
+the policy consumes only 39.4\% of the available budget.
+
+This behaviour is consistent across all nine test cells: budget utilisation ranges from
+39.4\% to 69.5\%, with no cell approaching the constraint boundary.
+Furthermore, the policy applies \emph{more} water as rainfall increases
+(190~mm in dry $\to$ 231~mm in wet), the \emph{opposite} of the rainfall-responsive
+scheduling that a well-trained RL agent would exhibit.
+
+These observations indicate that the pilot policy approximates a fixed low-rate
+schedule, rather than a scenario-adaptive control law. The root cause was diagnosed
+as spatial credit-assignment failure: a monolithic 837-dim critic provides only a
+field-averaged Q-gradient to the shared actor, so the per-agent local features in
+the actor's input never receive a differentiated learning signal regardless of how
+much spatial information is present in the observation. The wet-year yield
+improvement over the fixed-schedule heuristic (3\,145 vs.\ 2\,790~kg/ha) is therefore
+not evidence of learned scenario awareness; it arises because the pilot's conservative
+water application happens to cause fewer waterlogging events than the
+fixed schedule's aggressive 484~mm deployment in a high-rainfall year.
+
+The v2.6 corrected architecture (VDN factorised critic, removed terminal bonus,
+fixed entropy coefficient, removed RL-side $\alpha_5$) addresses these pathologies
+at their root and is expected to produce a spatially differentiated, rainfall-responsive
+policy.
+\TODO{Once v2.6 5-seed results are available, replace this subsection with the
+post-fix behaviour analysis. Confirm spatial heterogeneity by reporting per-agent
+action variance across the 130 agents; confirm rainfall responsiveness by showing
+that wet-year water usage is lower than dry-year water usage at the same budget.}
+
+\subsection{Inference Latency}
+
+SAC inference times were measured on CPU (Intel Core Ultra 9 185H).
+Day-0 cold-start inference required 41~ms; all subsequent days required 0--7~ms
+(mean $\approx 1$~ms).
+Total season inference time was approximately 0.3~seconds.
+This represents a 25\,000$\times$ reduction in per-decision latency compared to the
+MPC (mean 25.9~minutes per day).  The SAC's inference cost is therefore compatible
+with millisecond-latency requirements on resource-constrained edge hardware, fulfilling
+the deployment objective even if its current agronomic performance does not match
+the MPC.
+
+% ============================================================
+\section{Performance Under Forecast Uncertainty}
+\label{sec:noise}
+% ============================================================
+
+A critical dimension of real-world deployability is robustness to imperfect weather
+forecasts.  Operational numerical weather prediction for a 1--14~day horizon incurs
+forecast errors that are well-characterised as first-order autoregressive (AR(1))
+processes~\cite{murphy1988skill}.
+The noise model used in this thesis corrupts the rainfall and ET$_c$ components of the
+8-day forecast window with additive AR(1) noise
+($\sigma = 0.15$, $\rho = 0.6$, noise seed 42), while preserving the radiation-derived
+biological nonlinearities (h$_2$, h$_7$, g$_{\mathrm{base}}$) as exact values — matching
+the typical scenario in which temperature-based agronomic signals are more reliably
+forecast than precipitation.
+
+\subsection{MPC Under Noisy Forecast}
+
+\TODO{Insert MPC noisy forecast results for all 9 cells once
+\texttt{exp\_mpc --scenario all --budget all --horizon 8 --forecast noisy --noise-seed 42}
+completes on Kaggle CPU. Report yield degradation (\%) and waterlogging change
+relative to perfect-forecast baseline. Discuss whether the MPC's reliance on a
+multi-step rainfall prediction is a structural vulnerability under AR(1) perturbation.}
+
+\subsection{SAC Under Noisy Forecast}
+
+\TODO{Insert SAC noisy forecast results once
+\texttt{exp\_rl --mode eval --model results/rl/sac\_general\_seed0/best\_model/model.zip
+--scenario all --budget all --forecast noisy --noise-seed 42}
+completes. Compare SAC perfect vs.\ noisy to quantify forecast-robustness degradation.
+Discuss whether the SAC's implicit policy (no explicit forward simulation) provides
+structural noise immunity.}
+
+\subsection{Comparative Robustness}
+
+\TODO{Once both noisy result sets are available, insert a table comparing
+yield degradation (\%) under noisy vs.\ perfect forecast for each controller and
+scenario. Discuss in the context of H3: is the SAC structurally more robust to
+forecast noise than the MPC?}
+
+% ============================================================
+\section{MPC vs.\ SAC: Head-to-Head Comparison}
+\label{sec:headtohead}
+% ============================================================
+
+Table~\ref{tab:headtohead} summarises the head-to-head comparison across all available
+evaluation cells, including the no-irrigation and fixed-schedule baselines for context.
+
+\begin{table}[ht]
+\centering
+\caption{Head-to-head comparison of all four controllers at 100\% budget.
+         Moderate MPC Hp=8 cells are pending.
+         SAC results are from seed 0, best model.}
+\label{tab:headtohead}
+\begin{tabular}{lccccc}
+\hline
+\textbf{Scenario} & \textbf{No irrigation} & \textbf{Fixed schedule} & \textbf{MPC Hp=8} & \textbf{SAC} & \textbf{SAC vs.\ Fixed} \\
+\hline
+Dry   (100\%) & 1\,462 & 3\,607 & 4\,145 & 2\,477 & $-1\,130$ \\
+Dry   (85\%)  & 1\,462 & 3\,394 & 4\,069 & 2\,484 & $-910$ \\
+Dry   (70\%)  & 1\,462 & 3\,118 & 3\,766 & 2\,501 & $-617$ \\
+Moderate (100\%) & 1\,478 & 3\,302 & \TODO{pending} & 2\,376 & $-926$ \\
+Moderate (85\%)  & 1\,478 & 3\,089 & \TODO{pending} & 2\,380 & $-709$ \\
+Moderate (70\%)  & 1\,478 & 2\,841 & \TODO{pending} & 2\,391 & $-450$ \\
+Wet   (100\%) & 2\,243 & 2\,790 & 3\,759 & 3\,145 & $+355$ \\
+Wet   (85\%)  & 2\,243 & 2\,901 & 3\,743 & 3\,148 & $+247$ \\
+Wet   (70\%)  & 2\,243 & 3\,024 & 3\,754 & 3\,155 & $+131$ \\
+\hline
+\end{tabular}
+\end{table}
+
+\textbf{MPC vs.\ fixed schedule.}
+Across all six completed cells, the MPC achieves a yield premium of 492--969~kg/ha over
+the fixed-schedule at equivalent budget levels.
+The premium is largest in the wet year, where the MPC's ability to anticipate rainfall
+and avoid over-irrigation provides a 34--35\% yield advantage.
+This confirms H1: the MPC is substantially superior to open-loop scheduling.
+
+\textbf{SAC vs.\ fixed schedule.}
+The SAC falls below the fixed schedule in all dry and moderate cells by 450--1\,130~kg/ha,
+but exceeds it in all wet cells by 131--355~kg/ha.
+The wet-year outperformance is not attributable to learned scenario awareness
+(see Section~\ref{sec:sac}); it results from the SAC's conservative water use
+coincidentally avoiding the catastrophic waterlogging that the fixed schedule incurs
+in a high-rainfall year.
+
+\textbf{SAC vs.\ MPC.}
+The yield gap between the SAC and MPC is 668--1\,668~kg/ha across available cells.
+Even in the wet scenario, where the SAC performs best, MPC still exceeds SAC by
+594--614~kg/ha.
+This confirms H2 in a qualified sense: the current SAC policy, trained to 200\,000
+steps with the seed-0 best model before divergence, does not match MPC performance.
+The gap is attributable to the training pathology (Q-value divergence, conservative
+policy collapse) rather than an inherent limitation of the RL framework, as analysed
+in Section~\ref{sec:discussion}.
+
+\textbf{Computational cost summary.}
+Table~\ref{tab:latency} contrasts the per-season and per-decision computational costs.
+
+\begin{table}[ht]
+\centering
+\caption{Computational cost comparison for the MPC and SAC.}
+\label{tab:latency}
+\begin{tabular}{lcc}
+\hline
+\textbf{Metric} & \textbf{MPC ($H_p = 8$)} & \textbf{SAC} \\
+\hline
+Mean per-decision time     & 25.9 min          & $\sim$1~ms \\
+Worst-case per-decision    & 274 s ($\approx$ 4.6 min) & 41~ms (cold start) \\
+Season solve time          & 22--51 Wall-min   & $\sim$0.3~s \\
+Online hardware requirement & High-performance CPU & Edge MCU (3~ms budget) \\
+Training cost              & None (model-based) & $\sim$2~h (T4 GPU, 200k steps) \\
+\hline
+\end{tabular}
+\end{table}
+
+The 25\,000$\times$ inference speedup of the SAC over the MPC is a principal engineering
+result of this thesis, independent of the current yield gap.
+If the training pathology is resolved in future work (see Section~\ref{sec:discussion}),
+a corrected SAC that approaches MPC-level yield performance would simultaneously provide
+millisecond-latency deployment — a genuinely advantageous combination for real-time
+robotic irrigation networks.
+
+% ============================================================
+\section{Discussion}
+\label{sec:discussion}
+% ============================================================
+
+\subsection{Root Causes of the v2.4 Pilot's Pathologies}
+
+The pilot training run exhibited two distinct pathologies — Q-value divergence at
+step $\sim$100\,000 and spatial homogenisation throughout — that were diagnosed and
+addressed by independent architectural and hyperparameter changes in v2.6.
+
+\textbf{Spatial homogenisation (architectural).}
+The monolithic critic of v2.4 maps the full 837-dimensional joint state-action
+vector to a single scalar Q-value through a $837 \to 256 \to 256 \to 1$ MLP. With
+this architecture, the gradient $\partial Q/\partial a^{(n)}$ available to the
+shared actor is effectively the same averaged signal for every agent $n$ — the
+critic cannot differentiate the marginal value of agent $n$'s action from any
+other agent's. Because the actor's only source of agent-specific action
+differentiation is per-agent input features (which only matter if the critic
+rewards their use), the system converges to a spatially uniform policy that
+optimises the field-mean cost. The v2.6 Value Decomposition Network critic
+(Chapter~4) replaces this with $Q(\mathbf{s},\mathbf{a}) = \sum_n Q_{\mathrm{loc}}
+(\mathbf{s}^{(n,\mathrm{loc})}, \mathbf{s}^{(\mathrm{glob})}, a^{(n)})$, in which
+the linearity $\partial Q_{\mathrm{tot}}/\partial Q_{\mathrm{loc}}^{(n)} = 1$
+provides a per-agent learning signal that the shared actor can convert into
+spatially differentiated policies. This factorisation is justified because four
+of the five reward terms decompose exactly as sums over per-agent contributions,
+and the fifth (budget burn-rate) is small and bounded by hard runner-layer clipping.
+
+\textbf{Q-value divergence (training stability).}
+The Phase 3 explosion of the v2.4 pilot has three contributing factors, all
+addressed in v2.6:
+
+\begin{enumerate}
+  \item \emph{Terminal-bonus bootstrapping trap.} The terminal bonus
+        $c_{\mathrm{term}} = 5$ created a single end-of-season reward approximately
+        300$\times$ larger than any per-step reward. Bellman bootstrapping back
+        through the 93-step horizon caused compounding overestimation, manifested as
+        a slow rise in critic loss from 0.67 (step 20\,000) to 84\,693 by step
+        130\,000. The v2.6 fix sets $c_{\mathrm{term}} = 0$: the per-step biomass
+        increment reward integrates to the same total biomass signal over the
+        93-day season, distributing the agronomic gradient smoothly across all
+        timesteps.
+
+  \item \emph{Entropy auto-tuner divergence.} The target entropy of $-13$
+        (= $-0.1 \times \dim$) forced near-deterministic actions from
+        approximately step 25\,000 onwards. As the actor settled into a
+        low-variance schedule, the dual-gradient mechanism responded to falling
+        policy entropy by spiking $\alpha_{\mathrm{ent}}$ from 0.029 to 1.286,
+        injecting sudden random exploration into a critic that had been trained
+        to evaluate a low-variance distribution. The v2.6 fix bypasses the
+        dual-gradient mechanism entirely by hardcoding $\alpha_{\mathrm{ent}} = 0.05$,
+        providing a steady non-adaptive exploration level.
+
+  \item \emph{Absence of gradient clipping.} The Stable-Baselines3 SAC default
+        does not clip gradients. Once the critic loss inflated, large parameter
+        updates amplified estimation errors, creating a positive feedback loop.
+        The v2.6 configuration clips gradients at $\|\nabla\|_2 \le 1$.
+\end{enumerate}
+
+\textbf{Reactive behaviour suppression.}
+A fourth diagnostic finding, distinct from the divergence and homogenisation
+above, was that the $\alpha_5$ actuator-smoothing penalty in the SAC reward
+($\alpha_5 = 0.005$, $J_{\Delta u} = \sum_n (\Delta u_k^{(n)})^2$) discouraged
+the rainfall-responsive switching that the policy needs to learn. Empirically,
+the pilot policy minimised the $\alpha_5$ penalty by maintaining a constant
+$\sim 2$~mm/day rate regardless of rainfall. The MPC retains $\alpha_5$
+unchanged because it has deterministic 8-day forecast access and can smoothly
+schedule transitions; the SAC has no such forward visibility and is therefore
+exposed to immediate dense penalties for any switching behaviour. The v2.6 fix
+sets $\alpha_5 = 0$ in the RL reward only.
+
+The four v2.6 changes (VDN, $c_{\mathrm{term}} = 0$, fixed $\alpha_{\mathrm{ent}}$,
+$\alpha_5 = 0$ in RL reward) plus the auxiliary stabilisation measures (gradient
+clipping, learning-rate decay) collectively transform the SAC training pipeline
+from a pilot diagnostic exercise into a production training run, the results of
+which are reported elsewhere in this chapter as they become available.
+\TODO{Insert outcomes of the v2.6 5-seed training campaign.}
+
+\subsection{Economic Interpretation}
+
+The water cost coefficient $\alpha_2 = 0.016$ was calibrated to the Iranian domestic-base
+water tariff of 7\,000~toman/m$^3$, the economically relevant price for smallholder rice
+farmers in Gilan Province drawing from municipal infrastructure.
+At the current rice market price of 500\,000~toman/kg and a USD exchange rate of
+approximately 187\,000~toman/USD (fiscal year 1402--1403), the MPC's yield premium of
+approximately 538~kg/ha over the fixed schedule in the dry year (at 100\% budget)
+translates to a potential revenue increase of approximately 269~million~toman/ha
+($\approx 1\,440$~USD/ha) per growing season.
+The water savings achieved simultaneously (14.9~mm less water at dry/100\%) are modest
+in absolute terms but represent water that can be reallocated to other agricultural
+or municipal users, contributing to the broader water conservation objective.
+
+The SAC's conservative under-irrigation is economically costly in the dry and moderate
+years: at dry/100\%, the yield shortfall relative to MPC is 1\,668~kg/ha, worth
+approximately 834~million~toman ($\approx 4\,460$~USD) per hectare per season in
+foregone revenue.
+
+\subsection{Axis 3 — Parametric Robustness}
+
+The three-axis evaluation framework specified by the supervising committee includes a
+third axis: parametric robustness, specifically the sensitivity of each controller's
+performance to drift in the ABM's physical parameters (soil hydraulic coefficients,
+crop growth parameters) from their calibrated values.
+This axis was deferred in the current work due to time constraints.
+\TODO{If time permits: run MPC and SAC with $\pm 10\%$ perturbation on $\theta_6$ (FC),
+$\theta_2$ (WP), and $\theta_{14}$ (drought sensitivity). Report yield change and
+constraint satisfaction under misspecification.}
+
+\subsection{Limitations}
+
+This study has several limitations that should be considered when interpreting the results.
+
+\textbf{Single-field, single-cultivar scope.}
+All results are specific to the Hashemi rice cultivar on a 6-hectare silty-loam field
+in Gilan Province.  The ABM parameters, climate data, and water budget derivation are
+calibrated for this site; direct generalisation to other cultivars, soil types, or
+geographies requires re-parameterisation.
+
+\textbf{Perfect ABM as evaluation environment.}
+Both the MPC control-oriented model and the SAC training environment use the same ABM.
+There is therefore no model mismatch between the controller's internal representation
+and the evaluation plant.  In a real deployment, soil and crop parameters would be
+uncertain, and the performance of both controllers — particularly the MPC — would
+degrade under plant-model mismatch.
+
+\textbf{SAC training maturity.}
+The SAC results reported in this chapter from the v2.4 pilot run are characterised
+by an identified divergence pathology and a confirmed spatial-homogenisation failure
+mode. The v2.6 5-seed corrected training campaign — with the VDN factorised critic
+and the three associated hyperparameter changes documented in Chapter~4 — has been
+launched but has not completed in time for inclusion in this chapter. The current
+SAC pilot results should be interpreted as a lower bound on the achievable RL
+performance and as a diagnostic baseline against which the v2.6 results will be
+compared.
+
+\textbf{Absence of weather forecast uncertainty in RL training.}
+The SAC was trained exclusively under perfect forecast conditions.  While the
+noisy-forecast evaluation (Section~\ref{sec:noise}) will reveal the policy's
+degradation under AR(1) noise, training under noisy forecasts — through domain
+randomisation or forecast-uncertainty-augmented observations — was not implemented.
+
+% ============================================================
+\section{Chapter Summary}
+\label{sec:results_summary}
+% ============================================================
+
+This chapter presented a systematic evaluation of four irrigation controllers — no
+irrigation, fixed schedule, MPC, and SAC — across a 3-scenario $\times$ 3-budget
+evaluation grid on the Gilan rice field ABM.
+
+The no-irrigation baseline confirmed that supplemental irrigation is agronomically
+necessary in all three test years.  The fixed-schedule heuristic provides a clear
+improvement, but suffers from structural pathologies: chronic waterlogging in the wet
+year and inability to respond to prolonged dry spells in the dry year.
+
+The MPC, operating at the calibrated operating point $\alpha^* = (1.0, 0.016, 0.1,
+0, 0.005, 8.0)$ with $H_p^* = 8$~days, achieves yield premiums of 492--969~kg/ha
+over the fixed schedule across all six completed evaluation cells.  It consistently
+eliminates severe waterlogging while approaching or exceeding the agronomically optimal
+yield level.  Its principal limitation is computational: season-level solve times of
+22--51~minutes on a standard CPU preclude real-time edge deployment.
+
+The SAC, trained for 200\,000 steps with the initial CTDE architecture (monolithic
+critic, $c_{\mathrm{term}} = 5$, auto-tuned entropy, $\alpha_5 = 0.005$ in the RL
+reward), converged to a productive policy by step 25\,000--96\,000 before experiencing
+Q-value divergence. The best-model checkpoint achieves agronomically conservative
+results: yields below the fixed-schedule in dry and moderate conditions, and modestly
+above it in the wet year, with spatially homogeneous near-constant irrigation across
+all 130 agents. Two distinct pathologies were diagnosed: (i) Q-value divergence
+caused by terminal-bonus bootstrapping and entropy auto-tuner panic; and (ii)
+spatial credit-assignment failure caused by the monolithic critic providing no
+per-agent learning signal. The v2.6 corrected architecture (Value Decomposition
+Network critic, terminal-bonus removal, fixed entropy coefficient, $\alpha_5 = 0$
+in RL reward, gradient clipping, learning-rate decay) addresses both pathologies
+at their root and is currently in training across five seeds.  Independently of
+agronomic performance, the SAC reduces per-decision latency to approximately 1~ms,
+a 25\,000$\times$ improvement over the MPC, fulfilling the deployment objective for
+real-time edge hardware.
+
+Forecast robustness results (Section~\ref{sec:noise}) and the full five-seed SAC
+evaluation remain pending completion of the identified computational runs.  When
+available, these results will be incorporated into the final thesis submission.
+The evaluation framework, ABM environment, and code infrastructure are fully operational
+and capable of generating these results without further architectural changes.

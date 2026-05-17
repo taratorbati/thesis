@@ -1,0 +1,23 @@
+============================================================
+DATA CLEANING REPORT
+Source: POWER_Point_Daily_20000101_20260417_038d30N_048d85E_LST.csv
+Period: 2000–2025, months 4–10
+============================================================
+
+MISSING VALUES (before cleaning):
+  None
+
+RAINFALL ANOMALIES (>100.0 mm/day):
+  2022-04-07: 375.0 → 1.2 mm
+
+TEMPERATURE INCONSISTENCIES (Tmin > Tmean or Tmean > Tmax):
+  0 days
+
+FILLING MISSING VALUES (monthly average):
+
+SUMMARY:
+  Total rows loaded (full dataset): 9604
+  Rows after filtering (Apr–Oct, 2000–2025): 5564
+  Rainfall anomalies replaced: 1
+  Missing values filled: 0
+  Remaining NaN: 0
