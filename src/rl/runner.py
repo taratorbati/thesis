@@ -1,14 +1,24 @@
 # =============================================================================
-# src/rl/runner.py
+# src/rl/runner.py  v2.7
 # Inference runner for trained SAC models.
 #
-# Loads a trained SB3 SAC model (CTDESACPolicy), runs it through the full
-# ABM season, and saves results in the same format as the MPC runner.
+# Loads a trained SB3 SAC model (v2.7 CTDESACPolicy, or legacy v2.6 variants),
+# runs it through the full ABM season, and saves results in the same format
+# as the MPC runner.
 #
-# CRITICAL: _build_obs() MUST produce the exact same 707-dim observation
-# as IrrigationEnv._get_obs() in src/rl/gym_env.py. The scalar sub-vector
-# order is defined in gym_env.py with explicit index comments — any change
-# there requires the same change here.
+# v2.7 changes:
+#   - Critic-arch detection now recognises four input dimensions:
+#         dim=66, flat     → CTDESACPolicy             (v2.7, current default)
+#         dim=63, wrapped  → WrappedVDNCTDESACPolicy   (v2.6 best_model.zip)
+#         dim=63, flat     → WrappedVDNCTDESACPolicy   (no such checkpoint
+#                            in current repo; we accept and treat as legacy
+#                            VDN to be safe)
+#         dim=837, flat    → MonolithicCTDESACPolicy   (pre-VDN pilot)
+#   - _build_obs() branches on self._is_v27_obs to produce either the v2.7
+#     1097-dim layout (8 features/agent including 3 new static topographic
+#     features) or the legacy v2.6 707-dim layout (5 features/agent).  This
+#     allows the same runner to evaluate v2.7 checkpoints and v2.6 best_model
+#     checkpoints — important for the Chapter 5 architecture-comparison story.
 #
 # burn_rate is derived from (budget_total - budget_remaining) / budget_total
 # rather than from an internal _water_used accumulator. This avoids drift
@@ -16,27 +26,11 @@
 # scaled budget deductions (src/runner.py clips u before deducting from
 # budget_remaining, so a self._water_used accumulator would diverge silently).
 #
-# Noisy forecast support (v2.4.3):
+# Noisy forecast support (unchanged from v2.4.3):
 #   forecast_mode='noisy' injects AR(1)-correlated multiplicative noise
-#   into the 48 forecast dims of the observation (rain[H], ETc[H],
-#   rad[H], h2[H], h7[H], g[H]). The ABM transition always uses the true
-#   climate — only the information presented to the policy is corrupted.
-#   This evaluates policy robustness to realistic NWP forecast errors
-#   without retraining (Chapter 5 disturbance analysis).
-#   See src/forecast.py:NoisyForecast for the noise model details.
-#
-#   Why this is the correct comparison with MPC noisy mode:
-#   - MPC noisy: the NLP receives corrupted rainfall/ETc as its forecast
-#     input at each receding-horizon step, so it optimizes for the wrong
-#     future and produces sub-optimal actions.
-#   - SAC noisy: the policy network receives corrupted forecast features
-#     (positions 659-706 in the 707-dim obs) and may produce sub-optimal
-#     actions because its learned input-to-action mapping was trained on
-#     perfect forecasts.
-#   - In both cases the ABM advances with true climate, the same noise seed
-#     is used, and results are compared to each controller's own perfect-
-#     forecast baseline. This isolates the effect of forecast quality on
-#     policy performance.
+#   into the 48 forecast dims of the observation.  The ABM transition always
+#   uses the true climate — only the information presented to the policy is
+#   corrupted.
 # =============================================================================
 
 import io
@@ -53,12 +47,12 @@ from src.rl.gym_env import (
     UB_MM,
     X4_REF,
     X5_REF,
-    FULL_SEASON_NEED_MM,  # float scalar: 484.0 mm
+    FULL_SEASON_NEED_MM,   # float scalar: 484.0 mm
 )
 from src.rl.networks import (
-    CTDESACPolicy,          # noqa: F401 (registration side-effect)
-    MonolithicCTDESACPolicy,
-    WrappedVDNCTDESACPolicy,
+    CTDESACPolicy,              # v2.7 default — dim 66
+    MonolithicCTDESACPolicy,    # pre-VDN — dim 837
+    WrappedVDNCTDESACPolicy,    # v2.6 VDN — dim 63
 )
 
 
@@ -69,10 +63,12 @@ def _detect_critic_arch(model_path: Path):
     -------
     (int, str)
         input_dim   : first Linear layer's input dimension
-                       837 → monolithic   (obs 707 + actions 130)
-                        63 → VDN factorized
+                       66  → v2.7 VDN factorised (8 feat + 57 glob + 1 act)
+                       63  → v2.6 VDN factorised (5 feat + 57 glob + 1 act)
+                       837 → pre-VDN monolithic (obs 707 + actions 130)
         key_format  : 'flat'    → critic.qf0.0.weight  (nn.Sequential subclass)
-                      'wrapped' → critic.qf0.local_q_net.0.weight  (nn.Module + wrapper)
+                      'wrapped' → critic.qf0.local_q_net.0.weight
+                                  (nn.Module + wrapper)
     """
     with zipfile.ZipFile(str(model_path)) as zf:
         with zf.open('policy.pth') as f:
@@ -95,40 +91,66 @@ def _detect_critic_input_dim(model_path: Path) -> int:
     return dim
 
 
-def _load_sac_model(model_path: Path, device: str = 'cpu') -> SAC:
+def _load_sac_model(model_path: Path, device: str = 'cpu'):
     """Load a SAC model, auto-selecting the matching policy class.
 
-    Three known checkpoint variants:
-      dim=837, flat     → MonolithicCTDESACPolicy   (model.zip, final 500k)
-      dim=63,  wrapped  → WrappedVDNCTDESACPolicy   (best_model.zip, step 350k)
-      dim=63,  flat     → CTDESACPolicy             (future VDN checkpoints)
+    Four known checkpoint variants:
+      dim=837, flat     → MonolithicCTDESACPolicy   (pre-VDN pilot)
+      dim=63,  wrapped  → WrappedVDNCTDESACPolicy   (v2.6 best_model.zip)
+      dim=63,  flat     → WrappedVDNCTDESACPolicy   (v2.6 alt-key checkpoint,
+                                                     defensive — none exists
+                                                     in the current repo)
+      dim=66,  flat     → CTDESACPolicy             (v2.7 DEFAULT)
+
+    Returns
+    -------
+    (SAC, str, str)
+        model, arch_label, obs_layout
+        obs_layout is 'v27' (1097-dim, 8 features/agent) or
+                     'v26' (707-dim, 5 features/agent).
     """
     dim, key_fmt = _detect_critic_arch(model_path)
     if dim == 837:
         policy_class = MonolithicCTDESACPolicy
-        label = 'monolithic (pre-VDN)'
+        label        = 'monolithic (pre-VDN)'
+        obs_layout   = 'v26'
     elif dim == 63 and key_fmt == 'wrapped':
         policy_class = WrappedVDNCTDESACPolicy
-        label = 'VDN factorized – local_q_net wrapper (best_model.zip)'
+        label        = 'VDN factorised – v2.6 (local_q_net wrapper)'
+        obs_layout   = 'v26'
     elif dim == 63 and key_fmt == 'flat':
+        # Defensive: no such checkpoint exists in the current repo, but if
+        # one appears (e.g. an alt v2.6 training run), use the legacy v2.6
+        # path since the per-agent feature count is still 5.
+        policy_class = WrappedVDNCTDESACPolicy
+        label        = 'VDN factorised – v2.6 (flat keys, treated as legacy)'
+        obs_layout   = 'v26'
+    elif dim == 66 and key_fmt == 'flat':
         policy_class = CTDESACPolicy
-        label = 'VDN factorized – flat keys (v2.6+)'
+        label        = 'VDN factorised – v2.7 (8 features/agent)'
+        obs_layout   = 'v27'
     else:
         raise ValueError(
             f"Unrecognised critic architecture: dim={dim}, key_format={key_fmt!r}. "
-            f"Expected (837, flat), (63, wrapped), or (63, flat)."
+            f"Expected (837, flat), (63, wrapped), (63, flat), or (66, flat)."
         )
-    return SAC.load(
+    model = SAC.load(
         str(model_path),
         device=device,
         custom_objects={"policy_class": policy_class},
-    ), label
+    )
+    return model, label, obs_layout
+
 
 DEFAULT_FORECAST_HORIZON = 8
 
 
 class RLController(Controller):
     """Controller wrapping a trained SAC model for inference.
+
+    Builds the observation in the layout matching the checkpoint's training
+    architecture (v2.7 = 1097-dim, v2.6 = 707-dim) and queries the SAC policy
+    to produce a 130-dim irrigation action.
 
     Parameters
     ----------
@@ -139,12 +161,12 @@ class RLController(Controller):
     forecast_mode : str
         'perfect' (default) or 'noisy'.
         - 'perfect': true future climate is shown to the policy in the
-          forecast block of the observation. This is what the policy was
-          trained on and is the primary evaluation mode.
+          forecast block of the observation.  This is the primary
+          evaluation mode.
         - 'noisy': AR(1)-correlated multiplicative noise is applied to
-          rainfall and ETc in the 8-day forecast block before the obs is
-          passed to the policy. The ABM transition still uses true climate.
-          Used for the Chapter 5 disturbance robustness analysis.
+          rainfall and ETc in the 8-day forecast block before the obs
+          is passed to the policy.  The ABM transition still uses true
+          climate.  Used for the Chapter 5 disturbance robustness analysis.
     noise_sigma : float
         Base noise level (std at 1-day lead). Default 0.15 (15%).
         Ignored when forecast_mode='perfect'.
@@ -182,9 +204,16 @@ class RLController(Controller):
         self.noise_rho = noise_rho
         self.noise_seed = noise_seed
         self.verbose = verbose
-        self.model, _arch_label = _load_sac_model(self.model_path, device='cpu')
+
+        self.model, _arch_label, obs_layout = _load_sac_model(
+            self.model_path, device='cpu'
+        )
+        self._is_v27_obs = (obs_layout == 'v27')
         if self.verbose:
             print(f"  Loaded checkpoint: critic architecture = {_arch_label}")
+            print(f"  Observation layout = {obs_layout} "
+                  f"({'1097-dim, 8 features/agent' if self._is_v27_obs else '707-dim, 5 features/agent'})")
+
         self._inference_times = []
         self._noisy_forecast = None   # initialized in reset()
 
@@ -198,7 +227,26 @@ class RLController(Controller):
         self._N = terrain['N']
         self._season_days = season_days
         self._budget_total = float(budget_total)
-        self._elev_norm = terrain['gamma_flat']
+
+        # Static topographic features — shared by v2.7 (used) and v2.6 (only
+        # elev_norm used).  Pre-computed once at reset() so _build_obs() is
+        # fast.
+        N = self._N
+        self._elev_norm = terrain['gamma_flat'].astype(np.float32)
+        self._Nr_norm = np.array(
+            [terrain['Nr'][n] / 8.0 for n in range(N)],
+            dtype=np.float32,
+        )
+        self._Nr_internal_norm = np.array(
+            [terrain['Nr_internal'][n] / 8.0 for n in range(N)],
+            dtype=np.float32,
+        )
+        _ups = np.zeros(N, dtype=np.int32)
+        for n_src, downstream in terrain['sends_to'].items():
+            for m_dst in downstream:
+                _ups[m_dst] += 1
+        self._n_upstream_norm = (_ups / 8.0).astype(np.float32)
+
         self._fc_total = crop['theta6'] * crop['theta5']
         self._u_prev = np.zeros(self._N)
 
@@ -210,12 +258,7 @@ class RLController(Controller):
         df = load_cleaned_data()
         self._climate = extract_scenario_by_name(df, scenario, crop)
 
-        # Initialize noisy forecast provider if needed.
-        # NoisyForecast is re-seeded at each reset() so every episode gets
-        # an independent but reproducible noise trajectory. With a fixed
-        # noise_seed, the same trajectory is used for every scenario/budget
-        # cell, ensuring that MPC vs SAC performance differences are not
-        # due to different noise draws.
+        # Noisy forecast provider — same logic as v2.6.
         if self.forecast_mode == 'noisy':
             from src.forecast import NoisyForecast
             self._noisy_forecast = NoisyForecast(
@@ -246,9 +289,24 @@ class RLController(Controller):
         return u
 
     def _build_obs(self, day, state, budget_remaining):
-        """Construct the 707-dim observation vector.
+        """Construct the observation vector.
 
-        Scalar order must exactly match IrrigationEnv._get_obs():
+        v2.7 layout (1097-dim):
+          Per-agent block (8 × 130 = 1040, agent-major):
+            [x1_norm, x5_norm, x4_norm, x3, elev_norm,
+             Nr_norm, Nr_internal_norm, n_upstream_norm]
+          Scalar block (9, positions 1040–1048)
+          Forecast block (48, positions 1049–1096)
+
+        v2.6 LEGACY layout (707-dim):
+          Per-agent block (5 × 130 = 650, agent-major):
+            [x1_norm, x5_norm, x4_norm, x3, elev_norm]
+          Scalar block (9, positions 650–658)
+          Forecast block (48, positions 659–706)
+
+        Branching happens once on self._is_v27_obs, set at load time.
+
+        Scalar order (both layouts):
           [0] day_frac
           [1] budget_frac
           [2] budget_total_norm
@@ -258,33 +316,47 @@ class RLController(Controller):
           [6] h2_today
           [7] h7_today
           [8] g_base_today
-
-        Forecast block (48 dims = 6 vars x 8 days, positions 659-706):
-          forecast_mode='perfect': true future climate slices (same as
-            training). All 6 variables use real data.
-          forecast_mode='noisy': AR(1)-correlated noise applied to
-            rainfall and ETc. h2, h7, g_base, radiation remain perfect
-            because NoisyForecast only corrupts rainfall and ETc (matching
-            the MPC's noise model in src/forecast.py), and because these
-            temperature/radiation-derived quantities have smaller forecast
-            errors than precipitation in operational NWP systems.
         """
         N = self._N
         fc = self._fc_total
 
+        # Common dynamic features
         x1_norm = state['x1'] / fc
         x5_norm = state['x5'] / X5_REF
         x4_norm = state['x4'] / X4_REF
         x3      = state['x3']
-        elev    = self._elev_norm
 
+        # Per-agent block — assembled in agent-major order
+        if self._is_v27_obs:
+            # 8 features per agent
+            agent_block = np.stack([
+                x1_norm,
+                x5_norm,
+                x4_norm,
+                x3,
+                self._elev_norm,
+                self._Nr_norm,
+                self._Nr_internal_norm,
+                self._n_upstream_norm,
+            ], axis=1).flatten().astype(np.float32)   # (1040,)
+        else:
+            # Legacy v2.6: 5 features per agent
+            agent_block = np.stack([
+                x1_norm,
+                x5_norm,
+                x4_norm,
+                x3,
+                self._elev_norm,
+            ], axis=1).flatten().astype(np.float32)   # (650,)
+
+        # Scalars — unchanged between layouts
         day_frac          = day / self._season_days
         budget_frac       = budget_remaining / max(self._budget_total, 1e-6)
         budget_total_norm = self._budget_total / FULL_SEASON_NEED_MM
 
         # burn_rate: derived from the runner-provided budget_remaining so it
         # stays consistent with the outer runner's clipped budget accounting.
-        water_spent = self._budget_total - float(budget_remaining)
+        water_spent  = self._budget_total - float(budget_remaining)
         daily_budget = self._budget_total / self._season_days
         burn_rate = (
             (water_spent / max(day, 1)) / max(daily_budget, 1e-6)
@@ -298,17 +370,9 @@ class RLController(Controller):
         h7_today     = float(self._precomputed.h7[d])
         g_base_today = float(self._precomputed.g_base[d])
 
-        # Scalar order: MUST match gym_env._get_obs() exactly
         scalars = np.array([
-            day_frac,          # [0]
-            budget_frac,       # [1]
-            budget_total_norm, # [2]
-            burn_rate,         # [3]
-            rain_today,        # [4]
-            ETc_today,         # [5]
-            h2_today,          # [6]
-            h7_today,          # [7]
-            g_base_today,      # [8]
+            day_frac, budget_frac, budget_total_norm, burn_rate,
+            rain_today, ETc_today, h2_today, h7_today, g_base_today,
         ], dtype=np.float32)
 
         H   = self.forecast_horizon
@@ -318,27 +382,24 @@ class RLController(Controller):
             arr = np.asarray(arr, dtype=np.float32)
             if len(arr) < H:
                 pad_val = arr[-1] if len(arr) > 0 else 0.0
-                return np.concatenate([arr,
-                    np.full(H - len(arr), pad_val, dtype=np.float32)])
+                return np.concatenate([
+                    arr,
+                    np.full(H - len(arr), pad_val, dtype=np.float32),
+                ])
             return arr
 
         if self._noisy_forecast is not None:
-            # Get the noisy forecast for the current day.
-            # Each call to NoisyForecast.__call__ advances the AR(1) state
-            # by one step, simulating daily forecast issuance with temporal
-            # persistence. NoisyForecast was re-seeded in reset() so the
-            # trajectory is deterministic and reproducible.
             fc_dict = self._noisy_forecast(
                 day, self._climate, self._precomputed, H
             )
             rain_fc = _pad(fc_dict['rainfall'])
             ETc_fc  = _pad(fc_dict['ETc'])
             rad_fc  = _pad(fc_dict['radiation'])
-            # h2, h7, g_base use perfect values: NoisyForecast only corrupts
-            # rainfall and ETc to match the MPC noise model.
-            h2_fc  = _pad(self._precomputed.h2[d:end])
-            h7_fc  = _pad(self._precomputed.h7[d:end])
-            g_fc   = _pad(self._precomputed.g_base[d:end])
+            # h2, h7, g_base use perfect values — NoisyForecast only
+            # corrupts rainfall and ETc to match the MPC noise model.
+            h2_fc = _pad(self._precomputed.h2[d:end])
+            h7_fc = _pad(self._precomputed.h7[d:end])
+            g_fc  = _pad(self._precomputed.g_base[d:end])
         else:
             rain_fc = _pad(self._climate['rainfall'][d:end])
             ETc_fc  = _pad(self._precomputed.Kc_ET[d:end])
@@ -348,7 +409,7 @@ class RLController(Controller):
             g_fc    = _pad(self._precomputed.g_base[d:end])
 
         return np.concatenate([
-            x1_norm, x5_norm, x4_norm, x3, elev,
+            agent_block,
             scalars,
             rain_fc, ETc_fc, rad_fc, h2_fc, h7_fc, g_fc,
         ]).astype(np.float32)

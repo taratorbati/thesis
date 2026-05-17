@@ -1,28 +1,34 @@
-# src/rl/networks.py  v2.6.0
+# src/rl/networks.py  v2.7.0
 # ─────────────────────────────────────────────────────────────────────────────
-# Changes from v2.5.x
+# Changes from v2.6.x  (see change_spec_v27.md for full rationale)
 #
-#  1.  NEW: FactorizedContinuousCritic (Value Decomposition Network)
-#        Replaces the monolithic 837-dim → 1 critic with a per-agent
-#        decomposition  Q_total = Σ_n Q_local(s_n^local, s_global, a_n).
-#        Shared MLP across all 130 agents (parallel to the shared actor).
-#        Twin-Q preserved (q1_net, q2_net) for clipped double-Q learning.
-#        Resolves the spatial credit-assignment failure that caused the
-#        previous policy to collapse to spatially homogeneous behaviour.
+#   1. CURRENT (v2.7) per-agent feature count: 5 → 8.
+#        Three new static topographic features are now in the gym_env obs:
+#        Nr_norm, Nr_internal_norm, n_upstream_norm.  The actor and critic
+#        first-layer widths grow correspondingly:
+#            PER_AGENT_INPUT_DIM        : 62 → 65
+#            PER_AGENT_CRITIC_INPUT_DIM : 63 → 66
+#            OBS_DIM_DEFAULT            : 707 → 1097
+#        All architectural choices (shared actor, VDN factorised critic,
+#        twin-Q, hidden widths) are otherwise unchanged.
 #
-#  2.  FIX: SharedActor reshape bug
-#        The previous version used  .reshape(B, 5, N).permute(0, 2, 1),
-#        which assumes a feature-major obs layout.  The env produces an
-#        agent-major layout (5 contiguous features per agent).  The fix
-#        is a direct  .reshape(B, N, 5) — no permute.
-#        This bug was previously masked because the policy collapsed to a
-#        uniform action regardless of the spatial input ordering.
+#   2. LEGACY (v2.6) checkpoint loading is preserved.
+#        WrappedVDNCTDESACPolicy and MonolithicCTDESACPolicy continue to
+#        load checkpoints trained against the 707-dim observation layout.
+#        They are kept distinct from the v2.7 path by parameterising the
+#        legacy actor / critic on V26_* constants instead of the
+#        module-default v2.7 constants.  Loading a v2.6 best_model.zip
+#        therefore continues to work for the Chapter 5 architecture-
+#        comparison story.
 #
-#  3.  CTDESACPolicy now overrides both make_actor() and make_critic().
-#
-#  All other architectural choices (shared actor, CTDE, 707-dim obs,
-#  62-dim per-agent input, [128,128] actor hidden, [256,256] critic hidden,
-#  log_std clamp [-20, 2], SquashedDiagGaussian) are unchanged.
+# Three known checkpoint variants and their load paths:
+#   - dim=66, flat       → CTDESACPolicy             (v2.7 — DEFAULT)
+#   - dim=63, wrapped    → WrappedVDNCTDESACPolicy   (v2.6 best_model.zip)
+#   - dim=63, flat       → CTDESACPolicy with V26_* constants (n/a — no
+#                          such checkpoint exists in the current repo, but
+#                          this case is handled by treating it as legacy
+#                          VDN under WrappedVDN — see runner.py)
+#   - dim=837, flat      → MonolithicCTDESACPolicy   (pre-VDN, legacy)
 # ─────────────────────────────────────────────────────────────────────────────
 
 from __future__ import annotations
@@ -40,17 +46,31 @@ from stable_baselines3.common.distributions import SquashedDiagGaussianDistribut
 from stable_baselines3.sac.policies import Actor, SACPolicy
 
 
-# ── observation layout constants  (must match gym_env.py v2.5+) ──────────────
-# Per-agent block: 5 contiguous features per agent, agent-major:
-#   [x1_0, x5_0, x4_0, x3_0, γ_0, x1_1, x5_1, x4_1, x3_1, γ_1, ...]
-N_AGENT_FEATURES = 5
-N_AGENTS_DEFAULT = 130
-N_GLOBAL_DIMS    = 57   # 9 scalars + 48 forecast (6 vars × 8 days)
-OBS_DIM_DEFAULT  = N_AGENT_FEATURES * N_AGENTS_DEFAULT + N_GLOBAL_DIMS  # 707
-PER_AGENT_INPUT_DIM = N_AGENT_FEATURES + N_GLOBAL_DIMS                  # 62
+# ─────────────────────────────────────────────────────────────────────────────
+# v2.7 dimensions (CURRENT — used by all newly trained policies)
+# Per-agent block (agent-major, 8 contiguous features per agent):
+#   [x1_norm, x5_norm, x4_norm, x3, elev_norm,
+#    Nr_norm, Nr_internal_norm, n_upstream_norm]
+# ─────────────────────────────────────────────────────────────────────────────
+N_AGENT_FEATURES           = 8
+N_AGENTS_DEFAULT           = 130
+N_GLOBAL_DIMS              = 57   # 9 scalars + 48 forecast (6 vars × 8 days)
+OBS_DIM_DEFAULT            = N_AGENT_FEATURES * N_AGENTS_DEFAULT + N_GLOBAL_DIMS   # 1097
+PER_AGENT_INPUT_DIM        = N_AGENT_FEATURES + N_GLOBAL_DIMS                     # 65
+PER_AGENT_CRITIC_INPUT_DIM = N_AGENT_FEATURES + N_GLOBAL_DIMS + 1                 # 66
 
-# Per-agent critic input: local state + global context + local action
-PER_AGENT_CRITIC_INPUT_DIM = N_AGENT_FEATURES + N_GLOBAL_DIMS + 1       # 63
+# ─────────────────────────────────────────────────────────────────────────────
+# v2.6 LEGACY dimensions  (kept ONLY for loading pre-v2.7 checkpoints).
+# Do not use these for new training.  Per-agent block was 5 features:
+#   [x1_norm, x5_norm, x4_norm, x3, gamma]
+# where the 5th slot held either a per-agent elevation (runner.py) or a
+# field-uniform GDD scalar (gym_env.py) depending on which side of the
+# v2.6 obs-layout bug you looked at.
+# ─────────────────────────────────────────────────────────────────────────────
+V26_N_AGENT_FEATURES           = 5
+V26_OBS_DIM                    = V26_N_AGENT_FEATURES * N_AGENTS_DEFAULT + N_GLOBAL_DIMS   # 707
+V26_PER_AGENT_INPUT_DIM        = V26_N_AGENT_FEATURES + N_GLOBAL_DIMS                       # 62
+V26_PER_AGENT_CRITIC_INPUT_DIM = V26_N_AGENT_FEATURES + N_GLOBAL_DIMS + 1                   # 63
 
 # Numerical stability bounds for the policy log-std
 LOG_STD_MIN = -20.0
@@ -58,13 +78,15 @@ LOG_STD_MAX = 2.0
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  SHARED ACTOR  (corrected reshape)
+#  v2.7 SHARED ACTOR  (8 per-agent features → 65-dim per-agent input)
 # ═════════════════════════════════════════════════════════════════════════════
 class SharedActor(Actor):
-    """SAC actor with parameter-sharing across N spatial agents.
+    """SAC actor with parameter-sharing across N spatial agents (v2.7).
 
-    Each agent receives a 62-dim input vector consisting of:
-      • 5  local features        (its own x1_norm, x5_norm, x4_norm, x3, γ)
+    Each agent receives a 65-dim input vector consisting of:
+      • 8  local features        (its own x1_norm, x5_norm, x4_norm, x3,
+                                  elev_norm, Nr_norm, Nr_internal_norm,
+                                  n_upstream_norm)
       • 57 global context dims   (9 scalars + 48 forecast, identical for all)
 
     A single MLP (the "shared MLP") is applied to all N per-agent inputs in
@@ -75,7 +97,15 @@ class SharedActor(Actor):
     Parameters are reduced ~86% versus a naive monolithic actor while
     enforcing spatial equivariance: permuting the agent index permutes the
     action in the same way.
+
+    v2.7 vs v2.6:  per-agent feature count grew from 5 to 8, so the input
+    width grew from 62 to 65.  The hidden widths and output head are
+    unchanged.
     """
+
+    # Class-level configuration — overridden in _LegacySharedActor for v2.6 loads
+    _N_AGENT_FEATURES = N_AGENT_FEATURES
+    _PER_AGENT_INPUT_DIM = PER_AGENT_INPUT_DIM
 
     def __init__(
         self,
@@ -107,11 +137,11 @@ class SharedActor(Actor):
                 f"SharedActor: action_dim must equal N (={N}), got {action_dim}"
             )
 
-        expected_obs_dim = N_AGENT_FEATURES * N + N_GLOBAL_DIMS
+        expected_obs_dim = self._N_AGENT_FEATURES * N + N_GLOBAL_DIMS
         if features_dim != expected_obs_dim:
             raise ValueError(
-                f"SharedActor: features_dim must equal "
-                f"{N_AGENT_FEATURES}*{N} + {N_GLOBAL_DIMS} = {expected_obs_dim}, "
+                f"{type(self).__name__}: features_dim must equal "
+                f"{self._N_AGENT_FEATURES}*{N} + {N_GLOBAL_DIMS} = {expected_obs_dim}, "
                 f"got {features_dim}. Check gym_env observation layout."
             )
 
@@ -120,15 +150,15 @@ class SharedActor(Actor):
         # Drop the parent Actor's mu/log_std heads — they expect action_dim out;
         # we replace them with 1-out heads to be applied per agent.
         latent_pi_net = create_mlp(
-            input_dim=PER_AGENT_INPUT_DIM,
+            input_dim=self._PER_AGENT_INPUT_DIM,
             output_dim=-1,
             net_arch=net_arch_list,
             activation_fn=activation_fn,
         )
         self.latent_pi = nn.Sequential(*latent_pi_net)
 
-        last_layer_dim = net_arch_list[-1] if net_arch_list else PER_AGENT_INPUT_DIM
-        self.mu = nn.Linear(last_layer_dim, 1)
+        last_layer_dim = net_arch_list[-1] if net_arch_list else self._PER_AGENT_INPUT_DIM
+        self.mu      = nn.Linear(last_layer_dim, 1)
         self.log_std = nn.Linear(last_layer_dim, 1)
 
         self.action_dist = SquashedDiagGaussianDistribution(action_dim)
@@ -141,27 +171,26 @@ class SharedActor(Actor):
         return
 
     def _per_agent_features(self, features: torch.Tensor) -> torch.Tensor:
-        """Reshape a flat 707-dim batched obs into (B*N, 62) per-agent inputs.
+        """Reshape a flat batched obs into (B*N, per_agent_input_dim).
 
         Layout produced by gym_env (agent-major):
-          features[:, 0:650]   = per-agent block, 5 contiguous features per agent
-          features[:, 650:707] = 57 global dims (9 scalars + 48 forecast)
+          features[:, : F*N]   = per-agent block, F contiguous features per agent
+          features[:, F*N : ]  = N_GLOBAL_DIMS global dims (broadcast to all agents)
         """
         B = features.shape[0]
         N = self.N
+        F = self._N_AGENT_FEATURES
 
-        # (B, N*5) → (B, N, 5)   [agent-major: each agent's 5 features are contiguous]
-        per_agent = features[:, : N_AGENT_FEATURES * N].reshape(
-            B, N, N_AGENT_FEATURES
-        )
+        # (B, N*F) → (B, N, F)
+        per_agent = features[:, : F * N].reshape(B, N, F)
 
-        # (B, 57) → (B, 1, 57) → (B, N, 57)  broadcast global to every agent
-        global_block = features[:, N_AGENT_FEATURES * N:]
+        # (B, G) → (B, 1, G) → (B, N, G)  broadcast global to every agent
+        global_block = features[:, F * N:]
         global_expanded = global_block.unsqueeze(1).expand(-1, N, -1)
 
-        # (B, N, 5+57=62) → (B*N, 62)
+        # (B, N, F+G) → (B*N, F+G)
         combined = torch.cat([per_agent, global_expanded], dim=-1)
-        return combined.reshape(B * N, PER_AGENT_INPUT_DIM)
+        return combined.reshape(B * N, self._PER_AGENT_INPUT_DIM)
 
     # ── SAC actor interface ──────────────────────────────────────────────────
     def get_action_dist_params(
@@ -199,8 +228,19 @@ class SharedActor(Actor):
         return self(observation, deterministic)
 
 
+class _LegacySharedActor(SharedActor):
+    """SharedActor for v2.6 checkpoints (5 per-agent features, 62-dim input).
+
+    Subclass-only override of the class-level dimension constants.  All
+    behaviour is identical to SharedActor; only the reshape geometry
+    differs to match the obs layout the legacy checkpoint was trained on.
+    """
+    _N_AGENT_FEATURES    = V26_N_AGENT_FEATURES
+    _PER_AGENT_INPUT_DIM = V26_PER_AGENT_INPUT_DIM
+
+
 # ═════════════════════════════════════════════════════════════════════════════
-#  FACTORIZED CRITIC  (Value Decomposition Network)
+#  v2.7 FACTORIZED CRITIC  (Value Decomposition Network, 66-dim per-agent input)
 # ═════════════════════════════════════════════════════════════════════════════
 class _FactorizedQNet(nn.Sequential):
     """Single Q-network that decomposes Q_total = Σ_n Q_local(s_n, g, a_n).
@@ -208,18 +248,21 @@ class _FactorizedQNet(nn.Sequential):
     Inherits from nn.Sequential so that the MLP layers are registered
     directly as numeric children (0, 1, 2, …) instead of being nested
     inside an extra ``local_q_net`` attribute.  This matches the
-    state-dict key naming used by the original training run
-    (e.g. ``critic.qf0.0.weight``) and keeps SB3 checkpoint loads
-    backwards-compatible.
+    state-dict key naming used by v2.7 training runs
+    (e.g. ``critic.qf0.0.weight``).
 
-    The local MLP is shared across all N agents.  Input per agent:
-      • 5  local state features
+    The local MLP is shared across all N agents.  Input per agent (v2.7):
+      • 8  local state features
       • 57 global context (broadcast)
       • 1  local action
-    → 63 inputs, scalar output (Q_n).
+    → 66 inputs, scalar output (Q_n).
 
     Q_total is the sum of Q_n across the N agents.
     """
+
+    # Class-level configuration — overridden in legacy variant
+    _N_AGENT_FEATURES           = N_AGENT_FEATURES
+    _PER_AGENT_CRITIC_INPUT_DIM = PER_AGENT_CRITIC_INPUT_DIM
 
     def __init__(
         self,
@@ -228,7 +271,7 @@ class _FactorizedQNet(nn.Sequential):
         activation_fn: Type[nn.Module] = nn.ReLU,
     ):
         layers = create_mlp(
-            input_dim=PER_AGENT_CRITIC_INPUT_DIM,
+            input_dim=self._PER_AGENT_CRITIC_INPUT_DIM,
             output_dim=1,
             net_arch=net_arch,
             activation_fn=activation_fn,
@@ -238,29 +281,30 @@ class _FactorizedQNet(nn.Sequential):
 
     def forward(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
         """
-        obs:     (B, 707)   flat batched observation
-        actions: (B, N)     joint action  (N = self.N)
+        obs:     (B, OBS_DIM)   flat batched observation
+        actions: (B, N)          joint action  (N = self.N)
 
-        returns: (B, 1)     Q_total = Σ_n Q_local(s_n, g, a_n)
+        returns: (B, 1)          Q_total = Σ_n Q_local(s_n, g, a_n)
         """
         B = obs.shape[0]
         N = self.N
+        F = self._N_AGENT_FEATURES
 
         # agent-major reshape (same convention as SharedActor)
-        local_obs = obs[:, : N_AGENT_FEATURES * N].reshape(B, N, N_AGENT_FEATURES)
-        global_block = obs[:, N_AGENT_FEATURES * N:]                    # (B, 57)
-        global_expanded = global_block.unsqueeze(1).expand(-1, N, -1)   # (B, N, 57)
+        local_obs       = obs[:, : F * N].reshape(B, N, F)
+        global_block    = obs[:, F * N:]                                # (B, G)
+        global_expanded = global_block.unsqueeze(1).expand(-1, N, -1)   # (B, N, G)
+        local_actions   = actions.reshape(B, N, 1)                       # (B, N, 1)
 
-        local_actions = actions.reshape(B, N, 1)                         # (B, N, 1)
-
-        # concatenate (5 + 57 + 1 = 63) per agent
+        # concatenate (F + G + 1) per agent
         local_inputs = torch.cat(
             [local_obs, global_expanded, local_actions], dim=-1
-        )                                                                # (B, N, 63)
+        )                                                                # (B, N, F+G+1)
 
-        # apply the shared MLP to all N agents in parallel via nn.Sequential's
-        # own forward (super().forward applies the registered child modules).
-        local_inputs_flat = local_inputs.reshape(B * N, PER_AGENT_CRITIC_INPUT_DIM)
+        # apply the shared MLP to all N agents in parallel
+        local_inputs_flat = local_inputs.reshape(
+            B * N, self._PER_AGENT_CRITIC_INPUT_DIM
+        )
         local_q = nn.Sequential.forward(self, local_inputs_flat).reshape(B, N, 1)
 
         # Σ across the agent dimension
@@ -269,7 +313,7 @@ class _FactorizedQNet(nn.Sequential):
 
 
 class FactorizedContinuousCritic(ContinuousCritic):
-    """Twin-Q factorized critic conforming to SB3's ContinuousCritic API.
+    """Twin-Q factorized critic conforming to SB3's ContinuousCritic API (v2.7).
 
     Replaces the standard monolithic Q-networks with twin _FactorizedQNet
     instances.  Each instance computes Q_total = Σ_n Q_local independently.
@@ -280,6 +324,10 @@ class FactorizedContinuousCritic(ContinuousCritic):
       • forward(obs, actions)    → Tuple[Q1, Q2]   each (B, 1)
       • q1_forward(obs, actions) → Q1              (B, 1)
     """
+
+    # Class-level configuration — overridden in legacy variant
+    _N_AGENT_FEATURES = N_AGENT_FEATURES
+    _QNET_CLS         = _FactorizedQNet
 
     def __init__(
         self,
@@ -308,24 +356,24 @@ class FactorizedContinuousCritic(ContinuousCritic):
         self.n_critics = n_critics
         self.N = N
 
-        expected_obs_dim = N_AGENT_FEATURES * N + N_GLOBAL_DIMS
+        expected_obs_dim = self._N_AGENT_FEATURES * N + N_GLOBAL_DIMS
         if features_dim != expected_obs_dim:
             raise ValueError(
-                f"FactorizedContinuousCritic: features_dim must equal "
+                f"{type(self).__name__}: features_dim must equal "
                 f"{expected_obs_dim}, got {features_dim}."
             )
 
         action_dim = get_action_dim(action_space)
         if action_dim != N:
             raise ValueError(
-                f"FactorizedContinuousCritic: action_dim must equal N (={N}), "
+                f"{type(self).__name__}: action_dim must equal N (={N}), "
                 f"got {action_dim}."
             )
 
         # twin factorized Q-networks
-        self.q_networks: List[_FactorizedQNet] = []
+        self.q_networks: List[nn.Module] = []
         for idx in range(n_critics):
-            q_net = _FactorizedQNet(N=N, net_arch=net_arch, activation_fn=activation_fn)
+            q_net = self._QNET_CLS(N=N, net_arch=net_arch, activation_fn=activation_fn)
             self.add_module(f"qf{idx}", q_net)
             self.q_networks.append(q_net)
 
@@ -346,10 +394,10 @@ class FactorizedContinuousCritic(ContinuousCritic):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  CTDE SAC POLICY  (overrides both make_actor and make_critic)
+#  v2.7 CTDE SAC POLICY  (DEFAULT — used by train.py for new runs)
 # ═════════════════════════════════════════════════════════════════════════════
 class CTDESACPolicy(SACPolicy):
-    """SAC policy with shared-parameter SharedActor + FactorizedContinuousCritic.
+    """SAC policy with SharedActor + FactorizedContinuousCritic (v2.7).
 
     The agent count N is read from the action space dimensionality.
     """
@@ -374,35 +422,46 @@ class CTDESACPolicy(SACPolicy):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  LEGACY VDN POLICY — VDN critic with local_q_net wrapper (best_model.zip)
+#  v2.6 LEGACY VDN POLICY — VDN critic with local_q_net wrapper (best_model.zip)
 #  Used for checkpoints where _FactorizedQNet stored layers as self.local_q_net
 #  (keys: critic.qf0.local_q_net.0.weight, shape [256, 63]).
 # ═════════════════════════════════════════════════════════════════════════════
 class _FactorizedQNetWrapped(nn.Module):
-    """_FactorizedQNet with named local_q_net wrapper — matches best_model.zip keys."""
+    """_FactorizedQNet with named local_q_net wrapper — matches best_model.zip keys.
+
+    Uses V26_* constants (5 per-agent features, 63-dim per-agent critic input).
+    """
 
     def __init__(self, N: int, net_arch: List[int],
                  activation_fn: Type[nn.Module] = nn.ReLU):
         super().__init__()
         self.N = N
-        layers = create_mlp(input_dim=PER_AGENT_CRITIC_INPUT_DIM, output_dim=1,
-                             net_arch=net_arch, activation_fn=activation_fn)
+        layers = create_mlp(
+            input_dim=V26_PER_AGENT_CRITIC_INPUT_DIM,
+            output_dim=1,
+            net_arch=net_arch,
+            activation_fn=activation_fn,
+        )
         self.local_q_net = nn.Sequential(*layers)
 
     def forward(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
         B, N = obs.shape[0], self.N
-        local_obs       = obs[:, :N_AGENT_FEATURES * N].reshape(B, N, N_AGENT_FEATURES)
-        global_expanded = obs[:, N_AGENT_FEATURES * N:].unsqueeze(1).expand(-1, N, -1)
+        F    = V26_N_AGENT_FEATURES
+        local_obs       = obs[:, : F * N].reshape(B, N, F)
+        global_expanded = obs[:, F * N:].unsqueeze(1).expand(-1, N, -1)
         local_actions   = actions.reshape(B, N, 1)
         local_inputs    = torch.cat([local_obs, global_expanded, local_actions], dim=-1)
         local_q = self.local_q_net(
-            local_inputs.reshape(B * N, PER_AGENT_CRITIC_INPUT_DIM)
+            local_inputs.reshape(B * N, V26_PER_AGENT_CRITIC_INPUT_DIM)
         ).reshape(B, N, 1)
         return local_q.sum(dim=1)
 
 
 class _WrappedFactorizedCritic(ContinuousCritic):
-    """Twin-Q critic using _FactorizedQNetWrapped — matches best_model.zip."""
+    """Twin-Q critic using _FactorizedQNetWrapped — matches v2.6 best_model.zip.
+
+    Uses V26_OBS_DIM = 707 expectations.
+    """
 
     def __init__(self, observation_space, action_space, net_arch, features_extractor,
                  features_dim, activation_fn=nn.ReLU, normalize_images=False,
@@ -413,6 +472,14 @@ class _WrappedFactorizedCritic(ContinuousCritic):
         self.share_features_extractor = share_features_extractor
         self.n_critics = n_critics
         self.N = N
+
+        expected_obs_dim = V26_N_AGENT_FEATURES * N + N_GLOBAL_DIMS
+        if features_dim != expected_obs_dim:
+            raise ValueError(
+                f"_WrappedFactorizedCritic (legacy v2.6): features_dim must equal "
+                f"{expected_obs_dim}, got {features_dim}."
+            )
+
         self.q_networks: List[_FactorizedQNetWrapped] = []
         for idx in range(n_critics):
             q_net = _FactorizedQNetWrapped(N=N, net_arch=net_arch, activation_fn=activation_fn)
@@ -431,12 +498,15 @@ class _WrappedFactorizedCritic(ContinuousCritic):
 
 
 class WrappedVDNCTDESACPolicy(SACPolicy):
-    """CTDESACPolicy for best_model.zip (VDN, local_q_net keys, dim=63)."""
+    """CTDESACPolicy for v2.6 best_model.zip (VDN, local_q_net keys, dim=63).
+
+    Uses _LegacySharedActor (62-dim per-agent input) and _WrappedFactorizedCritic.
+    """
 
     def make_actor(self, features_extractor=None):
         kw = self._update_features_extractor(self.actor_kwargs, features_extractor)
         kw["N"] = get_action_dim(self.action_space)
-        return SharedActor(**kw).to(self.device)
+        return _LegacySharedActor(**kw).to(self.device)
 
     def make_critic(self, features_extractor=None):
         kw = self._update_features_extractor(self.critic_kwargs, features_extractor)
@@ -445,32 +515,31 @@ class WrappedVDNCTDESACPolicy(SACPolicy):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  LEGACY POLICY — monolithic 837-dim twin-Q critic
-#  Used ONLY for loading checkpoints that were trained before the VDN upgrade.
-#  The Colab run on 2026-05-16 used this architecture (first Linear layer
-#  shape [256, 837] in the saved checkpoint).
+#  PRE-VDN LEGACY POLICY — monolithic 837-dim twin-Q critic
+#  Used ONLY for loading checkpoints from before the VDN upgrade (the
+#  v2.4 pilot saved with a [256, 837] first Linear layer in the critic).
 # ═════════════════════════════════════════════════════════════════════════════
 class MonolithicCTDESACPolicy(SACPolicy):
     """CTDESACPolicy with the original monolithic 837-dim twin-Q critic.
 
     Identical to the pre-VDN architecture:
-      - Actor: SharedActor (unchanged)
+      - Actor: _LegacySharedActor (5 per-agent features × 130 + 57 globals = 707
+        obs, 62-dim per-agent input — matches what the v2.4 pilot was trained on)
       - Critic: standard SB3 ContinuousCritic(837 → 256 → 256 → 1) × 2
 
-    Use this as the custom_objects override when loading a checkpoint that
-    was saved before the factorized critic was committed:
+    Use this as the custom_objects override when loading a pre-VDN checkpoint:
 
         SAC.load(path, custom_objects={"policy_class": MonolithicCTDESACPolicy})
     """
 
     def make_actor(
         self, features_extractor: Optional[BaseFeaturesExtractor] = None
-    ) -> SharedActor:
+    ) -> _LegacySharedActor:
         actor_kwargs = self._update_features_extractor(
             self.actor_kwargs, features_extractor
         )
         actor_kwargs["N"] = get_action_dim(self.action_space)
-        return SharedActor(**actor_kwargs).to(self.device)
+        return _LegacySharedActor(**actor_kwargs).to(self.device)
 
     # make_critic is NOT overridden → falls back to SACPolicy's standard
     # ContinuousCritic which takes the full (obs + action) concatenation as
@@ -486,7 +555,7 @@ def make_sac_policy_kwargs(
     critic_hidden: Tuple[int, ...] = (256, 256),
     optimizer_kwargs: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Build the policy_kwargs dict for SB3 SAC with the CTDE VDN architecture.
+    """Build the policy_kwargs dict for SB3 SAC with the v2.7 CTDE VDN architecture.
 
     Use with policy_class=CTDESACPolicy in the SAC constructor:
 

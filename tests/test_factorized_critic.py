@@ -1,7 +1,16 @@
-# tests/test_factorized_critic.py
+# tests/test_factorized_critic.py  v2.7
 # ─────────────────────────────────────────────────────────────────────────────
-# Pre-Kaggle validation tests for the v2.6 networks.
-# All three tests must pass locally before any cloud training run.
+# Pre-Kaggle validation tests for the v2.7 networks.
+# All tests must pass locally before any cloud training run.
+#
+# v2.7 changes:
+#   - OBS_DIM is now imported from OBS_DIM_DEFAULT (= 1097) automatically.
+#   - The comment on line 27 was updated from "# 707" to "# 1097".
+#   - One new test (test_legacy_policy_load_shape) defends the v2.6
+#     checkpoint-loading path by building a WrappedVDNCTDESACPolicy with
+#     the V26_OBS_DIM space and confirming it produces correctly-shaped
+#     forward outputs.  This guards against accidental regressions in the
+#     legacy load path when networks.py is edited.
 #
 # Usage:   pytest tests/test_factorized_critic.py -v
 # ─────────────────────────────────────────────────────────────────────────────
@@ -20,11 +29,18 @@ from src.rl.networks import (
     N_AGENT_FEATURES,
     N_GLOBAL_DIMS,
     OBS_DIM_DEFAULT,
+    # Legacy v2.6 constants — used by the legacy-load test below.
+    V26_OBS_DIM,
+    V26_N_AGENT_FEATURES,
+    V26_PER_AGENT_CRITIC_INPUT_DIM,
+    WrappedVDNCTDESACPolicy,
+    _LegacySharedActor,
+    _WrappedFactorizedCritic,
 )
 
 
 N = 130
-OBS_DIM = OBS_DIM_DEFAULT      # 707
+OBS_DIM = OBS_DIM_DEFAULT      # 1097 in v2.7
 B = 32                         # batch size for tests
 
 
@@ -216,8 +232,8 @@ def test_sac_integration_smoke():
 def test_parameter_counts(actor, critic):
     """Sanity check: factorized critic should be similar size to monolithic.
 
-    Shared 256x256 with 63-input ≈ 83k params per Q-net × 2 = ~166k.
-    Old monolithic 837x256x256x1 × 2 ≈ 540k params.
+    v2.7 shared 256×256 with 66-input ≈ 84k params per Q-net × 2 = ~168k.
+    Old monolithic 837×256×256×1 × 2 ≈ 540k params.
     """
     actor_params = sum(p.numel() for p in actor.parameters())
     critic_params = sum(p.numel() for p in critic.parameters())
@@ -227,4 +243,68 @@ def test_parameter_counts(actor, critic):
 
     assert 50_000 < critic_params < 300_000, (
         f"Factorized critic param count {critic_params} outside expected range"
+    )
+
+
+# ── v2.7 NEW: legacy v2.6 policy load shape guard ────────────────────────────
+def test_legacy_policy_load_shape():
+    """v2.6 WrappedVDNCTDESACPolicy must build with the 707-dim obs space.
+
+    Defensive test: when networks.py is edited, the legacy load path for
+    v2.6 best_model.zip checkpoints must continue to produce correctly-shaped
+    actor and critic outputs.  Without this guard, a refactor that changes
+    only v2.7 dimensions could silently break v2.6 checkpoint loading,
+    invalidating the Chapter 5 architecture-comparison story.
+    """
+    # Build the legacy v2.6 spaces (707-dim obs).
+    legacy_obs_space = spaces.Box(
+        low=-np.inf, high=np.inf, shape=(V26_OBS_DIM,), dtype=np.float32
+    )
+    act_space = spaces.Box(low=0.0, high=1.0, shape=(N,), dtype=np.float32)
+    extractor = FlattenExtractor(legacy_obs_space)
+
+    # Legacy actor — 5 features per agent, 62-dim per-agent input.
+    legacy_actor = _LegacySharedActor(
+        N=N,
+        observation_space=legacy_obs_space,
+        action_space=act_space,
+        features_extractor=extractor,
+        features_dim=V26_OBS_DIM,
+        net_arch=[128, 128],
+        activation_fn=torch.nn.ReLU,
+    )
+
+    obs_legacy = torch.randn(B, V26_OBS_DIM)
+    action = legacy_actor(obs_legacy, deterministic=False)
+    assert action.shape == (B, N), (
+        f"Legacy actor output shape {action.shape} != ({B}, {N}). "
+        f"The v2.6 obs layout (5 features/agent) is broken."
+    )
+
+    # Legacy critic — wrapped factorised, 63-dim per-agent critic input.
+    legacy_critic = _WrappedFactorizedCritic(
+        observation_space=legacy_obs_space,
+        action_space=act_space,
+        net_arch=[256, 256],
+        features_extractor=extractor,
+        features_dim=V26_OBS_DIM,
+        activation_fn=torch.nn.ReLU,
+        n_critics=2,
+        share_features_extractor=True,
+        N=N,
+    )
+
+    actions_in = torch.rand(B, N)
+    q1, q2 = legacy_critic(obs_legacy, actions_in)
+    assert q1.shape == (B, 1), f"Legacy critic q1 shape {q1.shape} != ({B}, 1)"
+    assert q2.shape == (B, 1), f"Legacy critic q2 shape {q2.shape} != ({B}, 1)"
+
+    # Spot-check: first Linear layer of the legacy critic should be (256, 63),
+    # NOT (256, 66).  This guards against accidentally building the v2.7
+    # critic dimensions inside the legacy class.
+    first_layer = legacy_critic.qf0.local_q_net[0]
+    assert first_layer.weight.shape[1] == V26_PER_AGENT_CRITIC_INPUT_DIM, (
+        f"Legacy critic first-layer input dim is {first_layer.weight.shape[1]}, "
+        f"expected {V26_PER_AGENT_CRITIC_INPUT_DIM} (= V26_PER_AGENT_CRITIC_INPUT_DIM). "
+        "Has the legacy class accidentally been built with v2.7 dimensions?"
     )
