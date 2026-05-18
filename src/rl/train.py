@@ -1,37 +1,25 @@
-# src/rl/train.py  v2.5.0
+# src/rl/train.py  v2.7.0
 # ─────────────────────────────────────────────────────────────────────────────
-# Changes from v2.4.2  (all changes marked with  # [v2.5])
+# Changes from v2.5.0  (see change_spec_v27.md for full rationale)
 #
-#  1. ent_coef = 0.05 (hardcoded, auto-tuning DISABLED)
-#       Previously: ent_coef='auto', target_entropy=-13
-#       The dual-gradient entropy auto-tuner caused the Phase-3 explosion:
-#       as the actor settled into a low-variance ~2mm/day schedule, entropy
-#       fell below the target.  The auto-tuner spiked ent_coef to 1.28 to
-#       compensate, injecting sudden exploration noise that shattered the
-#       Critic's learned Q-landscape.
-#       Fix: hardcode ent_coef=0.05, a standard SAC value for complex
-#       continuous-action environments.  Provides steady, unchanging
-#       exploration noise; the Critic is never subjected to sudden
-#       distribution shocks.  target_entropy argument is removed.
-#       Ref: Gemini analysis Part 3, Point 3.
+#  1. Version string bumped to "2.7.0" for WandB provenance tracking.
 #
-#  2. max_grad_norm = 1.0  (gradient clipping added)
-#       Breaks the positive feedback loop: large critic loss → large
-#       parameter updates → larger Q errors → even larger loss.
-#       Ref: Both Claude session record and Gemini analysis.
+#  2. Config dict updated to reflect v2.7 changes:
+#       - OBS_DIM: 707 → 1097  (8 per-agent features instead of 5)
+#       - N_AGENT_FEATURES: 5 → 8  (elev_norm + Nr_norm + Nr_internal_norm
+#                                   + n_upstream_norm added)
+#       - episode_lifecycle: "always 93 days — no early termination on
+#         budget exhaustion"
+#       - reward_terms: "r1+r2+r3+r6 only (rb and r5 removed)"
 #
-#  3. Linear learning-rate decay: 3e-4 → 5e-5 over total_timesteps
-#       In late training, a constant lr=3e-4 allows noise to push network
-#       weights away from near-converged optima.  Linear decay stabilises
-#       late-training updates without sacrificing early learning speed.
-#       Ref: Claude session record Section 12.
+#  3. Print banner updated to reflect v2.7 changes.
 #
-#  4. total_timesteps raised to 500_000 (was 200_000)
-#       The productive Phase-2 window now has more room.  With divergence
-#       fixed, the full 500k should yield continued improvement.
-#
-#  All other training logic (RotatingReplayBufferCheckpoint, WandB
-#  integration, year/budget randomisation, EvalCallback) is unchanged.
+#  All training logic, hyperparameters, callbacks, and WandB integration
+#  are UNCHANGED from v2.5.0.  This is intentional: the only things that
+#  changed are the environment (gym_env.py) and the network dimensions
+#  (networks.py).  The SAC algorithm itself does not need to know about
+#  those changes — it discovers the obs dimension from the env at
+#  construction time.
 # ─────────────────────────────────────────────────────────────────────────────
 
 from __future__ import annotations
@@ -180,7 +168,7 @@ def train_sac(
     wandb_project: str | None = None,
     total_timesteps: int = TOTAL_TIMESTEPS,
 ) -> SAC:
-    """Train a SAC agent with the v2.5 hyperparameters.
+    """Train a SAC agent with the v2.7 environment and hyperparameters.
 
     Parameters
     ----------
@@ -192,14 +180,28 @@ def train_sac(
         WandB project name.  Pass None to disable WandB logging.
     total_timesteps : int
         Total environment steps.  Default 500 000.
+
+    Notes
+    -----
+    v2.7 environment changes (gym_env.py):
+        - OBS_DIM 707 → 1097: per-agent block now has 8 features (was 5).
+          The three new features are static topographic scalars: Nr_norm,
+          Nr_internal_norm, n_upstream_norm.  The gamma slot (previously the
+          v2.6 obs-layout bug: x2/theta18) is restored to elev_norm.
+        - Episodes always run 93 days: terminated=False always; budget
+          exhaustion no longer ends the episode early.
+        - Reward simplified: r = r1 + r2 + r3 + r6 only (rb and r5 removed).
+
+    SAC hyperparameters (unchanged from v2.5):
+        ent_coef=0.05 (fixed), max_grad_norm=1.0, LR 3e-4→5e-5, 500k steps.
     """
     run_name = f"sac_general_seed{seed}"
     save_dir = Path(output_dir) / run_name
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── config dict for logging ───────────────────────────────────────────────
+    # ── config dict for WandB logging ─────────────────────────────────────────
     config = {
-        "version": "2.5.0",
+        "version": "2.7.0",                     # [v2.7] bumped from 2.5.0
         "seed": seed,
         "total_timesteps": total_timesteps,
         "buffer_size": BUFFER_SIZE,
@@ -208,18 +210,24 @@ def train_sac(
         "tau": TAU,
         "lr_start": LR_START,
         "lr_end": LR_END,
-        "ent_coef": ENT_COEF,        # [v2.5] hardcoded
+        "ent_coef": ENT_COEF,
         "max_grad_norm": MAX_GRAD_NORM,
         "actor_hidden": ACTOR_HIDDEN,
         "critic_hidden": CRITIC_HIDDEN,
-        "c_term": 0.0,               # [v2.5] terminal bonus removed
-        "alpha5_rl": 0.0,            # [v2.5] actuator smoothing removed
-        "changes_v25": [
-            "c_term=0 (terminal bonus removed)",
-            "ent_coef=0.05 hardcoded (auto-tuner disabled)",
-            "max_grad_norm=1.0 (gradient clipping added)",
-            "lr linear decay 3e-4->5e-5",
-            "alpha5_rl=0 (actuator smoothing removed from RL reward)",
+        # [v2.7] environment changes
+        "obs_dim": 1097,
+        "n_agent_features": 8,
+        "episode_lifecycle": "always 93 days — no early termination on budget exhaustion",
+        "reward_terms": "r1+r2+r3+r6 only (rb and r5 removed)",
+        # [v2.5] values still in effect
+        "c_term": 0.0,
+        "alpha5_rl": 0.0,
+        "changes_v27": [
+            "obs_dim 707→1097: per-agent block 5→8 features",
+            "gamma obs slot restored to elev_norm (was x2/theta18 — bug fix)",
+            "3 new static topo features: Nr_norm, Nr_internal_norm, n_upstream_norm",
+            "episodes always run 93 days (no early termination on budget exhaustion)",
+            "reward simplified: rb (burn-rate) and r5 (delta-u) removed",
         ],
     }
 
@@ -245,18 +253,18 @@ def train_sac(
     )
 
     # ── LR schedule ──────────────────────────────────────────────────────────
-    lr_schedule = _make_lr_schedule(LR_START, LR_END)   # [v2.5]
+    lr_schedule = _make_lr_schedule(LR_START, LR_END)
 
     # ── model ─────────────────────────────────────────────────────────────────
     model = SAC(
         policy=CTDESACPolicy,
         env=train_env,
-        learning_rate=lr_schedule,          # [v2.5] decay schedule
+        learning_rate=lr_schedule,
         buffer_size=BUFFER_SIZE,
         batch_size=BATCH_SIZE,
         gamma=GAMMA,
         tau=TAU,
-        ent_coef=ENT_COEF,                  # [v2.5] hardcoded float, not 'auto'
+        ent_coef=ENT_COEF,
         # target_entropy intentionally omitted — only used with ent_coef='auto'
         learning_starts=LEARNING_STARTS,
         gradient_steps=GRADIENT_STEPS,
@@ -288,7 +296,6 @@ def train_sac(
         save_path=save_dir,
         verbose=1,
     )
-
     grad_clip_callback = GradClipCallback(max_grad_norm=MAX_GRAD_NORM)
     callbacks = CallbackList([eval_callback, checkpoint_callback,
                               rotating_buffer_callback, grad_clip_callback])
@@ -310,9 +317,12 @@ def train_sac(
 
     # ── train ─────────────────────────────────────────────────────────────────
     print(f"\n{'='*60}")
-    print(f"  SAC training — v2.5.0 — seed {seed}")
-    print(f"  Key changes: c_term=0, ent_coef=0.05 (fixed),")
-    print(f"               grad_clip=1.0, LR decay, alpha5_rl=0")
+    print(f"  SAC training — v2.7.0 — seed {seed}")
+    print(f"  Env changes:  obs_dim=1097 (was 707), 8 features/agent,")
+    print(f"                gamma slot restored (elev_norm, was x2/theta18),")
+    print(f"                3 new topo features, episodes always 93 days")
+    print(f"  Reward:       r1+r2+r3+r6 only (rb and r5 removed)")
+    print(f"  SAC:          ent_coef=0.05 (fixed), grad_clip=1.0, LR decay")
     print(f"  Output: {save_dir}")
     print(f"{'='*60}\n")
 
@@ -338,7 +348,7 @@ def train_sac(
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Train SAC v2.5")
+    parser = argparse.ArgumentParser(description="Train SAC v2.7")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output-dir", type=str, default="results/rl")
     parser.add_argument("--wandb-project", type=str, default=None)
