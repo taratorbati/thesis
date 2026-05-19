@@ -1,25 +1,26 @@
-# src/rl/train.py  v2.7.0
+# src/rl/train.py  v2.8.0
 # ─────────────────────────────────────────────────────────────────────────────
-# Changes from v2.5.0  (see change_spec_v27.md for full rationale)
+# Changes from v2.7.0  (see change_spec_v28.md for full rationale)
 #
-#  1. Version string bumped to "2.7.0" for WandB provenance tracking.
+#  1. Version string bumped to "2.8.0".
 #
-#  2. Config dict updated to reflect v2.7 changes:
-#       - OBS_DIM: 707 → 1097  (8 per-agent features instead of 5)
-#       - N_AGENT_FEATURES: 5 → 8  (elev_norm + Nr_norm + Nr_internal_norm
-#                                   + n_upstream_norm added)
-#       - episode_lifecycle: "always 93 days — no early termination on
-#         budget exhaustion"
-#       - reward_terms: "r1+r2+r3+r6 only (rb and r5 removed)"
+#  2. Curriculum kwargs exposed via train_sac() signature:
+#       curriculum_warmup_steps (default 50_000)
+#       curriculum_short_len    (default 60)
+#     These are passed to IrrigationEnv at construction so each parallel
+#     env knows when to switch from short to full episodes.
 #
-#  3. Print banner updated to reflect v2.7 changes.
+#  3. Default TOTAL_TIMESTEPS reduced from 500_000 to 250_000 based on the
+#     v2.7 seed-0 and seed-1 evaluations: both peaked at step 200k and
+#     degraded thereafter; the EvalCallback captures the peak regardless,
+#     so the 250k → 500k window was wasted compute.  The 250k cap saves
+#     ~50% time per seed and matches what was actually used for seed-1.
 #
-#  All training logic, hyperparameters, callbacks, and WandB integration
-#  are UNCHANGED from v2.5.0.  This is intentional: the only things that
-#  changed are the environment (gym_env.py) and the network dimensions
-#  (networks.py).  The SAC algorithm itself does not need to know about
-#  those changes — it discovers the obs dimension from the env at
-#  construction time.
+#  4. Config dict updated to reflect v2.8 obs (1227-dim), feature count
+#     (9), reward (unchanged 4-term), and curriculum settings.
+#
+#  All other training logic, hyperparameters, callbacks, and WandB
+#  integration are UNCHANGED from v2.7.
 # ─────────────────────────────────────────────────────────────────────────────
 
 from __future__ import annotations
@@ -39,27 +40,30 @@ from stable_baselines3.common.callbacks import (
 )
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-from src.rl.gym_env import IrrigationEnv
+from src.rl.gym_env import (
+    IrrigationEnv,
+    CURRICULUM_WARMUP_STEPS_DEFAULT,
+    CURRICULUM_SHORT_LEN_DEFAULT,
+)
 from src.rl.networks import CTDESACPolicy, make_sac_policy_kwargs
 
 # ── training constants ────────────────────────────────────────────────────────
-TOTAL_TIMESTEPS  = 500_000
-BUFFER_SIZE      = 500_000
+TOTAL_TIMESTEPS  = 250_000     # v2.8: reduced from 500k (see header)
+BUFFER_SIZE      = 250_000     # match — no point oversizing buffer
 BATCH_SIZE       = 256
 GAMMA            = 0.99
 TAU              = 0.005
 LR_START         = 3e-4
 LR_END           = 5e-5
 
-ENT_COEF         = 0.05    # [v2.5] hardcoded — auto-tuning DISABLED
-# TARGET_ENTROPY removed — not used when ent_coef is a fixed float
+ENT_COEF         = 0.05    # fixed (auto-tuning disabled since v2.5)
 
-MAX_GRAD_NORM    = 1.0     # [v2.5] gradient clipping
+MAX_GRAD_NORM    = 1.0     # gradient clipping (v2.5)
 LEARNING_STARTS  = 1_000
 GRADIENT_STEPS   = 1
 
 EVAL_FREQ        = 25_000
-N_EVAL_EPISODES  = 9       # 3 dev years × 3 budget samples
+N_EVAL_EPISODES  = 9
 CHECKPOINT_FREQ  = 50_000
 
 ACTOR_HIDDEN  = [128, 128]
@@ -69,7 +73,6 @@ CRITIC_HIDDEN = [256, 256]
 def _make_lr_schedule(lr_start: float, lr_end: float):
     """Linear decay from lr_start (progress=1.0) to lr_end (progress=0.0)."""
     def schedule(progress_remaining: float) -> float:
-        # progress_remaining: 1.0 at start, 0.0 at end
         return lr_end + (lr_start - lr_end) * progress_remaining
     return schedule
 
@@ -97,7 +100,6 @@ def _resolve_wandb_api_key() -> str | None:
 
 
 def _init_wandb(project: str, run_name: str, config: dict) -> bool:
-    """Initialise WandB; return True on success, False if unavailable."""
     try:
         import wandb
         api_key = _resolve_wandb_api_key()
@@ -118,12 +120,7 @@ def _init_wandb(project: str, run_name: str, config: dict) -> bool:
 
 
 class RotatingReplayBufferCheckpoint(BaseCallback):
-    """Save replay buffer to a single overwriting file at each checkpoint.
-
-    Avoids the SB3 default behaviour of writing a new file per checkpoint,
-    which at buffer_size=500k fills the 20 GB Kaggle disk limit within ~40
-    checkpoints (~3.1 GB × 40 = 124 GB).
-    """
+    """Save replay buffer to a single overwriting file at each checkpoint."""
 
     def __init__(self, save_freq: int, save_path: str, verbose: int = 0):
         super().__init__(verbose)
@@ -142,13 +139,7 @@ class RotatingReplayBufferCheckpoint(BaseCallback):
 
 
 class GradClipCallback(BaseCallback):
-    """Clip gradient norms after every SAC update step.
-
-    SB3 does not expose a max_grad_norm parameter on SAC.  Passing it via
-    optimizer_kwargs crashes because it is not an Adam argument.  This
-    callback clips in-place after each gradient step, which is equivalent
-    to the standard PyTorch pattern and has no effect on the loss landscape.
-    """
+    """Clip gradient norms after every SAC update step."""
 
     def __init__(self, max_grad_norm: float = 1.0):
         super().__init__(verbose=0)
@@ -167,41 +158,50 @@ def train_sac(
     output_dir: str = "results/rl",
     wandb_project: str | None = None,
     total_timesteps: int = TOTAL_TIMESTEPS,
+    curriculum_warmup_steps: int = CURRICULUM_WARMUP_STEPS_DEFAULT,
+    curriculum_short_len:    int = CURRICULUM_SHORT_LEN_DEFAULT,
 ) -> SAC:
-    """Train a SAC agent with the v2.7 environment and hyperparameters.
+    """Train a SAC agent with the v2.8 environment and hyperparameters.
 
     Parameters
     ----------
     seed : int
-        Random seed for reproducibility.  Run seeds 0–4 for the 5-seed campaign.
+        Random seed for reproducibility.  Run seeds 2-6 for the v2.8 campaign.
     output_dir : str
         Directory for model checkpoints and best-model artefacts.
     wandb_project : str | None
         WandB project name.  Pass None to disable WandB logging.
     total_timesteps : int
-        Total environment steps.  Default 500 000.
+        Total environment steps.  Default 250 000 (v2.8 — was 500 000 in v2.7).
+    curriculum_warmup_steps : int
+        Number of env transitions during which episodes are truncated at the
+        short length.  Default 50 000 (= 20% of 250k training budget).  Set to
+        0 to disable the curriculum entirely (full episodes throughout — v2.7
+        baseline behaviour).
+    curriculum_short_len : int
+        Episode length in days during the warmup window.  Default 60.
 
     Notes
     -----
-    v2.7 environment changes (gym_env.py):
-        - OBS_DIM 707 → 1097: per-agent block now has 8 features (was 5).
-          The three new features are static topographic scalars: Nr_norm,
-          Nr_internal_norm, n_upstream_norm.  The gamma slot (previously the
-          v2.6 obs-layout bug: x2/theta18) is restored to elev_norm.
-        - Episodes always run 93 days: terminated=False always; budget
-          exhaustion no longer ends the episode early.
-        - Reward simplified: r = r1 + r2 + r3 + r6 only (rb and r5 removed).
+    v2.8 environment changes (gym_env.py):
+        - OBS_DIM 1097 → 1227: per-agent block now has 9 features (was 8).
+          The new feature is x1_overshoot_norm = max(x1-FC, 0)/FC, addressing
+          the v2.7 wet-year x1-conditioning weakness.
+        - Episode-length curriculum: episodes truncate at 60 days for first
+          50 000 env steps, 93 days thereafter.  Reduces critic-target
+          variance during the initial value-function learning phase.
 
-    SAC hyperparameters (unchanged from v2.5):
-        ent_coef=0.05 (fixed), max_grad_norm=1.0, LR 3e-4→5e-5, 500k steps.
+    SAC hyperparameters (unchanged from v2.7):
+        ent_coef=0.05 (fixed), max_grad_norm=1.0, LR 3e-4→5e-5,
+        gradient clipping via GradClipCallback.
     """
-    run_name = f"sac_general_seed{seed}"
+    run_name = f"sac_v28_seed{seed}"
     save_dir = Path(output_dir) / run_name
     save_dir.mkdir(parents=True, exist_ok=True)
 
     # ── config dict for WandB logging ─────────────────────────────────────────
     config = {
-        "version": "2.7.0",                     # [v2.7] bumped from 2.5.0
+        "version": "2.8.0",
         "seed": seed,
         "total_timesteps": total_timesteps,
         "buffer_size": BUFFER_SIZE,
@@ -214,20 +214,22 @@ def train_sac(
         "max_grad_norm": MAX_GRAD_NORM,
         "actor_hidden": ACTOR_HIDDEN,
         "critic_hidden": CRITIC_HIDDEN,
-        # [v2.7] environment changes
-        "obs_dim": 1097,
-        "n_agent_features": 8,
-        "episode_lifecycle": "always 93 days — no early termination on budget exhaustion",
-        "reward_terms": "r1+r2+r3+r6 only (rb and r5 removed)",
-        # [v2.5] values still in effect
+        # v2.8 environment
+        "obs_dim": 1227,
+        "n_agent_features": 9,
+        "curriculum_warmup_steps": curriculum_warmup_steps,
+        "curriculum_short_len":    curriculum_short_len,
+        "episode_lifecycle": "always run full season after warmup",
+        "reward_terms": "r1+r2+r3+r6 (unchanged from v2.7)",
+        # legacy values still in effect
         "c_term": 0.0,
         "alpha5_rl": 0.0,
-        "changes_v27": [
-            "obs_dim 707→1097: per-agent block 5→8 features",
-            "gamma obs slot restored to elev_norm (was x2/theta18 — bug fix)",
-            "3 new static topo features: Nr_norm, Nr_internal_norm, n_upstream_norm",
-            "episodes always run 93 days (no early termination on budget exhaustion)",
-            "reward simplified: rb (burn-rate) and r5 (delta-u) removed",
+        "changes_v28": [
+            "obs_dim 1097→1227: per-agent block 8→9 features",
+            "added x1_overshoot_norm feature: max(x1-FC,0)/FC, in [0,1]",
+            "episode-length curriculum: 60d for first {0}k steps, 93d after".format(
+                curriculum_warmup_steps // 1000),
+            "total_timesteps default reduced 500k→250k (v2.7 peaked at 200k)",
         ],
     }
 
@@ -237,8 +239,20 @@ def train_sac(
         wandb_active = _init_wandb(wandb_project, run_name, config)
 
     # ── environments ──────────────────────────────────────────────────────────
-    train_env = DummyVecEnv([lambda: IrrigationEnv(randomize=True)])
-    eval_env  = DummyVecEnv([lambda: IrrigationEnv(randomize=True)])
+    def _make_env():
+        return IrrigationEnv(
+            randomize=True,
+            curriculum_warmup_steps=curriculum_warmup_steps,
+            curriculum_short_len=curriculum_short_len,
+        )
+    train_env = DummyVecEnv([_make_env])
+
+    # Eval env: NO curriculum (full episodes always, so eval is on the same
+    # distribution we ultimately care about).
+    eval_env = DummyVecEnv([lambda: IrrigationEnv(
+        randomize=True,
+        curriculum_warmup_steps=0,   # disable curriculum at eval time
+    )])
     train_env.seed(seed)
     eval_env.seed(seed + 1000)
 
@@ -247,9 +261,6 @@ def train_sac(
         N=130,
         actor_hidden=ACTOR_HIDDEN,
         critic_hidden=CRITIC_HIDDEN,
-        # optimizer_kwargs intentionally omitted — max_grad_norm is NOT an Adam
-        # argument and crashes if passed via optimizer_kwargs.  Gradient clipping
-        # is applied by GradClipCallback after each update step instead.
     )
 
     # ── LR schedule ──────────────────────────────────────────────────────────
@@ -265,7 +276,6 @@ def train_sac(
         gamma=GAMMA,
         tau=TAU,
         ent_coef=ENT_COEF,
-        # target_entropy intentionally omitted — only used with ent_coef='auto'
         learning_starts=LEARNING_STARTS,
         gradient_steps=GRADIENT_STEPS,
         policy_kwargs=policy_kwargs,
@@ -288,7 +298,7 @@ def train_sac(
         save_freq=CHECKPOINT_FREQ,
         save_path=str(save_dir / "checkpoints"),
         name_prefix=run_name,
-        save_replay_buffer=False,   # handled by RotatingReplayBufferCheckpoint
+        save_replay_buffer=False,
         verbose=1,
     )
     rotating_buffer_callback = RotatingReplayBufferCheckpoint(
@@ -300,7 +310,6 @@ def train_sac(
     callbacks = CallbackList([eval_callback, checkpoint_callback,
                               rotating_buffer_callback, grad_clip_callback])
 
-    # ── WandB callback (optional) ─────────────────────────────────────────────
     if wandb_active:
         try:
             from wandb.integration.sb3 import WandbCallback
@@ -316,15 +325,17 @@ def train_sac(
             print(f"[WandB] WandbCallback unavailable ({e}); continuing without it.")
 
     # ── train ─────────────────────────────────────────────────────────────────
-    print(f"\n{'='*60}")
-    print(f"  SAC training — v2.7.0 — seed {seed}")
-    print(f"  Env changes:  obs_dim=1097 (was 707), 8 features/agent,")
-    print(f"                gamma slot restored (elev_norm, was x2/theta18),")
-    print(f"                3 new topo features, episodes always 93 days")
-    print(f"  Reward:       r1+r2+r3+r6 only (rb and r5 removed)")
-    print(f"  SAC:          ent_coef=0.05 (fixed), grad_clip=1.0, LR decay")
+    print(f"\n{'='*72}")
+    print(f"  SAC training — v2.8.0 — seed {seed}")
+    print(f"  Env: obs_dim=1227 (was 1097), 9 features/agent (was 8)")
+    print(f"       new feature: x1_overshoot_norm = max(x1-FC,0)/FC")
+    print(f"  Curriculum: short episodes (length {curriculum_short_len}) for")
+    print(f"              first {curriculum_warmup_steps:,} env steps, then full 93-day episodes")
+    print(f"  Reward: r1+r2+r3+r6 (unchanged from v2.7)")
+    print(f"  SAC: ent_coef=0.05 fixed, grad_clip=1.0, LR decay 3e-4→5e-5")
+    print(f"  Total steps: {total_timesteps:,}")
     print(f"  Output: {save_dir}")
-    print(f"{'='*60}\n")
+    print(f"{'='*72}\n")
 
     try:
         model.learn(
@@ -348,11 +359,15 @@ def train_sac(
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Train SAC v2.7")
+    parser = argparse.ArgumentParser(description="Train SAC v2.8")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output-dir", type=str, default="results/rl")
     parser.add_argument("--wandb-project", type=str, default=None)
     parser.add_argument("--total-timesteps", type=int, default=TOTAL_TIMESTEPS)
+    parser.add_argument("--curriculum-warmup-steps", type=int,
+                        default=CURRICULUM_WARMUP_STEPS_DEFAULT)
+    parser.add_argument("--curriculum-short-len", type=int,
+                        default=CURRICULUM_SHORT_LEN_DEFAULT)
     args = parser.parse_args()
 
     train_sac(
@@ -360,4 +375,6 @@ if __name__ == "__main__":
         output_dir=args.output_dir,
         wandb_project=args.wandb_project,
         total_timesteps=args.total_timesteps,
+        curriculum_warmup_steps=args.curriculum_warmup_steps,
+        curriculum_short_len=args.curriculum_short_len,
     )

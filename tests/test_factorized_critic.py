@@ -1,16 +1,11 @@
-# tests/test_factorized_critic.py  v2.7
+# tests/test_factorized_critic.py  v2.8
 # ─────────────────────────────────────────────────────────────────────────────
-# Pre-Kaggle validation tests for the v2.7 networks.
-# All tests must pass locally before any cloud training run.
+# Pre-cloud validation tests for the v2.8 networks.
 #
-# v2.7 changes:
-#   - OBS_DIM is now imported from OBS_DIM_DEFAULT (= 1097) automatically.
-#   - The comment on line 27 was updated from "# 707" to "# 1097".
-#   - One new test (test_legacy_policy_load_shape) defends the v2.6
-#     checkpoint-loading path by building a WrappedVDNCTDESACPolicy with
-#     the V26_OBS_DIM space and confirming it produces correctly-shaped
-#     forward outputs.  This guards against accidental regressions in the
-#     legacy load path when networks.py is edited.
+# v2.8 changes:
+#   - OBS_DIM_DEFAULT is now 1227 (flows automatically).
+#   - Added test_v27_legacy_load_shape — guards the v2.7 checkpoint load path.
+#   - Existing v2.6 legacy load test renamed for clarity.
 #
 # Usage:   pytest tests/test_factorized_critic.py -v
 # ─────────────────────────────────────────────────────────────────────────────
@@ -22,6 +17,7 @@ from gymnasium import spaces
 from stable_baselines3.common.torch_layers import FlattenExtractor
 
 from src.rl.networks import (
+    # v2.8 default
     SharedActor,
     FactorizedContinuousCritic,
     CTDESACPolicy,
@@ -29,7 +25,14 @@ from src.rl.networks import (
     N_AGENT_FEATURES,
     N_GLOBAL_DIMS,
     OBS_DIM_DEFAULT,
-    # Legacy v2.6 constants — used by the legacy-load test below.
+    # v2.7 legacy
+    V27_OBS_DIM,
+    V27_N_AGENT_FEATURES,
+    V27_PER_AGENT_CRITIC_INPUT_DIM,
+    V27CTDESACPolicy,
+    _V27SharedActor,
+    _V27FactorizedContinuousCritic,
+    # v2.6 legacy
     V26_OBS_DIM,
     V26_N_AGENT_FEATURES,
     V26_PER_AGENT_CRITIC_INPUT_DIM,
@@ -40,8 +43,8 @@ from src.rl.networks import (
 
 
 N = 130
-OBS_DIM = OBS_DIM_DEFAULT      # 1097 in v2.7
-B = 32                         # batch size for tests
+OBS_DIM = OBS_DIM_DEFAULT   # 1227 in v2.8
+B = 32
 
 
 @pytest.fixture
@@ -84,18 +87,16 @@ def actor(spaces_fixture):
 
 # ── Test 1: shape correctness ────────────────────────────────────────────────
 def test_critic_output_shape(critic):
-    """forward(obs, actions) must return a tuple of two (B,1) tensors."""
     obs = torch.randn(B, OBS_DIM)
     actions = torch.rand(B, N)
     out = critic(obs, actions)
     assert isinstance(out, tuple), f"Critic must return a tuple; got {type(out)}"
-    assert len(out) == 2, f"Critic must return 2 Q-values; got {len(out)}"
+    assert len(out) == 2
     for i, q in enumerate(out):
         assert q.shape == (B, 1), f"Q{i+1} shape {q.shape} != ({B}, 1)"
 
 
 def test_q1_forward_shape(critic):
-    """q1_forward must return a single (B, 1) tensor for the actor's policy loss."""
     obs = torch.randn(B, OBS_DIM)
     actions = torch.rand(B, N)
     q1 = critic.q1_forward(obs, actions)
@@ -103,7 +104,6 @@ def test_q1_forward_shape(critic):
 
 
 def test_actor_output_shape(actor):
-    """SharedActor.forward must return (B, N) joint actions."""
     obs = torch.randn(B, OBS_DIM)
     action = actor(obs, deterministic=False)
     assert action.shape == (B, N), f"Actor shape {action.shape} != ({B}, {N})"
@@ -111,25 +111,17 @@ def test_actor_output_shape(actor):
 
 # ── Test 2: gradient localisation ────────────────────────────────────────────
 def test_gradient_localisation(critic):
-    """∂Q_total/∂a_n should be roughly uniform in magnitude across n.
-
-    With the shared MLP and identical input statistics, each agent's
-    gradient should be of the same order of magnitude — confirming the
-    per-agent decomposition is alive.
-    """
     obs = torch.randn(B, OBS_DIM)
     actions = torch.rand(B, N, requires_grad=True)
     q1, _ = critic(obs, actions)
     q1.sum().backward()
 
-    grad = actions.grad           # (B, N)
-    grad_mag_per_agent = grad.abs().mean(dim=0)   # mean over batch → (N,)
+    grad = actions.grad
+    grad_mag_per_agent = grad.abs().mean(dim=0)
 
-    # Gradients must exist for ALL agents (no dead agents)
     assert torch.all(grad_mag_per_agent > 0), \
         "Some agents have zero gradient — decomposition is broken."
 
-    # Range across agents shouldn't be wildly skewed (within 5×)
     ratio = grad_mag_per_agent.max() / grad_mag_per_agent.min()
     assert ratio < 5.0, (
         f"Gradient ratio max/min = {ratio:.2f} across agents — "
@@ -138,31 +130,16 @@ def test_gradient_localisation(critic):
 
 
 def test_gradient_only_through_relevant_agent(critic):
-    """Setting action[:, k] modifies Q only through agent k's local Q_k.
-
-    We verify this by setting all actions to zero, then setting a single
-    agent's action to a large value, and confirming the gradient on THAT
-    agent is much larger than on any other agent.
-
-    This is the strongest test of decomposition correctness: if Q_total
-    truly equals Σ_n Q_n(s_n, g, a_n), then a_k appears in exactly one
-    Q_n and nowhere else.
-    """
     obs = torch.randn(B, OBS_DIM)
-    # Create a fresh leaf tensor directly — clone() produces a non-leaf
-    # and PyTorch will not populate .grad on non-leaf tensors.
     actions_input = torch.zeros(B, N, requires_grad=True)
 
     q1, _ = critic(obs, actions_input)
     q1.sum().backward()
 
-    grad = actions_input.grad   # (B, N) — populated because actions_input is a leaf
+    grad = actions_input.grad
     assert grad is not None, "Gradient is None — actions_input must be a leaf tensor"
 
     per_agent_norm = grad.abs().mean(dim=0)
-    # In a perfect VDN factorization Q_total = Σ_n Q_n(s_n, g, a_n),
-    # so ∂Q_total/∂a_n flows only through Q_n. Every agent receives a
-    # non-zero gradient because the shared MLP has non-zero weights.
     assert torch.all(per_agent_norm > 0), (
         f"Some agents have zero gradient — VDN decomposition may be broken. "
         f"Zero-grad agents: {(per_agent_norm == 0).nonzero().flatten().tolist()}"
@@ -171,12 +148,7 @@ def test_gradient_only_through_relevant_agent(critic):
 
 # ── Test 3: SB3 SAC integration smoke test ───────────────────────────────────
 def test_sac_integration_smoke():
-    """Build a full SAC model with CTDESACPolicy and run a few training steps.
-
-    This is the integration test: if SB3's training loop can produce
-    valid losses and the model can save/load, the architecture plumbing
-    is correct.
-    """
+    """Build a full SAC model with CTDESACPolicy and run a few training steps."""
     import gymnasium as gym
     from stable_baselines3 import SAC
     from stable_baselines3.common.vec_env import DummyVecEnv
@@ -193,7 +165,7 @@ def test_sac_integration_smoke():
         def step(self, action):
             self._steps += 1
             obs = np.random.randn(OBS_DIM).astype(np.float32)
-            reward = float(-np.mean(action))   # trivial reward
+            reward = float(-np.mean(action))
             terminated = self._steps >= 10
             return obs, reward, terminated, False, {}
 
@@ -213,28 +185,20 @@ def test_sac_integration_smoke():
         verbose=0,
     )
 
-    # Learn for 200 steps — must complete without errors
     model.learn(total_timesteps=200)
 
-    # Test save/load round-trip
     import tempfile, os
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "model.zip")
         model.save(path)
         model2 = SAC.load(path, env=env)
-        # Make sure inference works after reload
         obs = env.reset()
         action, _ = model2.predict(obs, deterministic=True)
         assert action.shape == (1, N), f"Loaded model action shape {action.shape} != (1, {N})"
 
 
-# ── Bonus: parameter count check ─────────────────────────────────────────────
 def test_parameter_counts(actor, critic):
-    """Sanity check: factorized critic should be similar size to monolithic.
-
-    v2.7 shared 256×256 with 66-input ≈ 84k params per Q-net × 2 = ~168k.
-    Old monolithic 837×256×256×1 × 2 ≈ 540k params.
-    """
+    """Sanity check — v2.8 first layer is 67-input critic."""
     actor_params = sum(p.numel() for p in actor.parameters())
     critic_params = sum(p.numel() for p in critic.parameters())
 
@@ -246,24 +210,71 @@ def test_parameter_counts(actor, critic):
     )
 
 
-# ── v2.7 NEW: legacy v2.6 policy load shape guard ────────────────────────────
-def test_legacy_policy_load_shape():
-    """v2.6 WrappedVDNCTDESACPolicy must build with the 707-dim obs space.
+# ── v2.8: v2.7 legacy load shape guard ───────────────────────────────────────
+def test_v27_legacy_load_shape():
+    """v2.7 V27CTDESACPolicy must build with the 1097-dim obs space.
 
-    Defensive test: when networks.py is edited, the legacy load path for
-    v2.6 best_model.zip checkpoints must continue to produce correctly-shaped
-    actor and critic outputs.  Without this guard, a refactor that changes
-    only v2.7 dimensions could silently break v2.6 checkpoint loading,
-    invalidating the Chapter 5 architecture-comparison story.
+    Guards the v2.7 best_model.zip load path.  Without this, a refactor that
+    changes only v2.8 dimensions could silently break v2.7 checkpoint loading.
     """
-    # Build the legacy v2.6 spaces (707-dim obs).
+    legacy_obs_space = spaces.Box(
+        low=-np.inf, high=np.inf, shape=(V27_OBS_DIM,), dtype=np.float32
+    )
+    act_space = spaces.Box(low=0.0, high=1.0, shape=(N,), dtype=np.float32)
+    extractor = FlattenExtractor(legacy_obs_space)
+
+    legacy_actor = _V27SharedActor(
+        N=N,
+        observation_space=legacy_obs_space,
+        action_space=act_space,
+        features_extractor=extractor,
+        features_dim=V27_OBS_DIM,
+        net_arch=[128, 128],
+        activation_fn=torch.nn.ReLU,
+    )
+
+    obs_legacy = torch.randn(B, V27_OBS_DIM)
+    action = legacy_actor(obs_legacy, deterministic=False)
+    assert action.shape == (B, N), (
+        f"v2.7 actor output shape {action.shape} != ({B}, {N}). "
+        "The v2.7 obs layout (8 features/agent) is broken."
+    )
+
+    legacy_critic = _V27FactorizedContinuousCritic(
+        observation_space=legacy_obs_space,
+        action_space=act_space,
+        net_arch=[256, 256],
+        features_extractor=extractor,
+        features_dim=V27_OBS_DIM,
+        activation_fn=torch.nn.ReLU,
+        n_critics=2,
+        share_features_extractor=True,
+        N=N,
+    )
+
+    actions_in = torch.rand(B, N)
+    q1, q2 = legacy_critic(obs_legacy, actions_in)
+    assert q1.shape == (B, 1)
+    assert q2.shape == (B, 1)
+
+    # First layer of v2.7 critic should be (256, 66), NOT (256, 67)
+    first_layer = legacy_critic.qf0[0]
+    assert first_layer.weight.shape[1] == V27_PER_AGENT_CRITIC_INPUT_DIM, (
+        f"v2.7 critic first-layer input dim is {first_layer.weight.shape[1]}, "
+        f"expected {V27_PER_AGENT_CRITIC_INPUT_DIM}. "
+        "Has the v2.7 class accidentally been built with v2.8 dimensions?"
+    )
+
+
+# ── v2.8: v2.6 legacy load shape guard (carried over from v2.7) ──────────────
+def test_v26_legacy_load_shape():
+    """v2.6 WrappedVDNCTDESACPolicy must build with the 707-dim obs space."""
     legacy_obs_space = spaces.Box(
         low=-np.inf, high=np.inf, shape=(V26_OBS_DIM,), dtype=np.float32
     )
     act_space = spaces.Box(low=0.0, high=1.0, shape=(N,), dtype=np.float32)
     extractor = FlattenExtractor(legacy_obs_space)
 
-    # Legacy actor — 5 features per agent, 62-dim per-agent input.
     legacy_actor = _LegacySharedActor(
         N=N,
         observation_space=legacy_obs_space,
@@ -276,12 +287,8 @@ def test_legacy_policy_load_shape():
 
     obs_legacy = torch.randn(B, V26_OBS_DIM)
     action = legacy_actor(obs_legacy, deterministic=False)
-    assert action.shape == (B, N), (
-        f"Legacy actor output shape {action.shape} != ({B}, {N}). "
-        f"The v2.6 obs layout (5 features/agent) is broken."
-    )
+    assert action.shape == (B, N)
 
-    # Legacy critic — wrapped factorised, 63-dim per-agent critic input.
     legacy_critic = _WrappedFactorizedCritic(
         observation_space=legacy_obs_space,
         action_space=act_space,
@@ -296,15 +303,11 @@ def test_legacy_policy_load_shape():
 
     actions_in = torch.rand(B, N)
     q1, q2 = legacy_critic(obs_legacy, actions_in)
-    assert q1.shape == (B, 1), f"Legacy critic q1 shape {q1.shape} != ({B}, 1)"
-    assert q2.shape == (B, 1), f"Legacy critic q2 shape {q2.shape} != ({B}, 1)"
+    assert q1.shape == (B, 1)
+    assert q2.shape == (B, 1)
 
-    # Spot-check: first Linear layer of the legacy critic should be (256, 63),
-    # NOT (256, 66).  This guards against accidentally building the v2.7
-    # critic dimensions inside the legacy class.
     first_layer = legacy_critic.qf0.local_q_net[0]
     assert first_layer.weight.shape[1] == V26_PER_AGENT_CRITIC_INPUT_DIM, (
-        f"Legacy critic first-layer input dim is {first_layer.weight.shape[1]}, "
-        f"expected {V26_PER_AGENT_CRITIC_INPUT_DIM} (= V26_PER_AGENT_CRITIC_INPUT_DIM). "
-        "Has the legacy class accidentally been built with v2.7 dimensions?"
+        f"v2.6 critic first-layer input dim is {first_layer.weight.shape[1]}, "
+        f"expected {V26_PER_AGENT_CRITIC_INPUT_DIM}."
     )

@@ -1,52 +1,42 @@
-# src/rl/gym_env.py  v2.7.0
+# src/rl/gym_env.py  v2.8.0
 # ─────────────────────────────────────────────────────────────────────────────
-# Changes from v2.6.x  (see change_spec_v27.md for full rationale)
+# Changes from v2.7.0  (see change_spec_v28.md for full rationale)
 #
-#   1. BUG FIX — restored Chapter 4 spec compliance.
-#        The 5th per-agent feature was, since commit c623833, accidentally
-#        x2/theta18 (a field-uniform GDD scalar) instead of the normalised
-#        elevation gamma_flat that Chapter 4 specifies.  The slot is now
-#        renamed ``elev_norm`` in the obs builder to prevent the variable-
-#        name collision (terrain "gamma" vs agronomic "gamma") from
-#        recurring.
+#   1. NEW FEATURE — x1_overshoot_norm added as the 9th per-agent feature.
+#        Defined as max(x1 − FC, 0) / FC, clipped to [0, 1].  Equals zero
+#        whenever the agent is in the healthy regime (x1 ≤ FC), grows
+#        linearly above.  This is the SAME quantity that gets squared and
+#        averaged in the r6 reward, so the gradient signal from r6 is
+#        maximally informative about which feature should change.  Tackles
+#        the v2.7 wet-year weakness: corr(u, x1) ≈ 0 across both seeds.
+#        Per-agent block:  8 features → 9 features
+#        Total OBS_DIM:    1097 → 1227
 #
-#   2. ENRICHMENT — per-agent block now carries three additional static
-#        topographic features:
-#           Nr_norm          = Nr / 8.0           (total downhill fanout)
-#           Nr_internal_norm = Nr_internal / 8.0  (internal-only fanout)
-#           n_upstream_norm  = (#feeders) / 8.0   (upstream feed count)
-#        These give the shared actor the information the ABM uses
-#        internally to route water (sends_to, Nr).
-#        Per-agent block:   5 features → 8 features
-#        Total OBS_DIM:     707 → 1097
+#   2. EPISODE-LENGTH CURRICULUM — short episodes during warmup.
+#        For the first CURRICULUM_WARMUP_STEPS env transitions (default
+#        50 000), episodes truncate at CURRICULUM_SHORT_LEN days (default
+#        60).  After that, episodes return to the full 93-day length.
+#        Reduces the high-variance return distribution that drove the
+#        v2.7 critic explosion around step 165k.
 #
-#   3. REWARD SIMPLIFIED — burn-rate penalty (rb) and dead delta-u term
-#        (r5, already inactive in v2.6) removed.  Final reward is
-#                r = r1 + r2 + r3 + r6
-#        The four-term form matches what was actually generating gradient
-#        in v2.6; rb never bound on the converged policy.
+# Backwards compatibility:
+#   - The v2.7 8-feature observation layout remains importable via
+#     networks.py's V27_* constants.  The runner can load v2.7 checkpoints
+#     and produce 8-feature observations for them.
+#   - The reward function, action space, ABM interface, and SAC
+#     hyperparameters are all unchanged from v2.7.
 #
-#   4. EPISODE LIFECYCLE — episode now ALWAYS runs to the end of the
-#        93-day season.  Budget exhaustion no longer terminates early.
-#        The per-step clip irr_mm = min(irr_mm, remaining) is preserved
-#        for physical compliance; after the budget runs out, effective
-#        irrigation is 0 and the agent feels late-season drought through
-#        r3 and reduced r1.  This delivers correctly time-weighted
-#        overspend pain via the underlying biological dynamics without
-#        introducing a tuned penalty hyperparameter.
-#
-# Interface dependencies (unchanged from v2.6):
+# Interface dependencies (unchanged from v2.7):
 #   abm.py:
 #     CropSoilABM(gamma_flat, sends_to, Nr, theta, N, runoff_mode, elevation)
-#     .reset()               → initialises x1/x2/x3/x4/x5 arrays
-#     .step(u, climate_dict) → returns {'x1':…,'x2':…,'x3':…,'x4':…,'x5':…}
+#     .reset(), .step(u, climate_dict)
 #
 #   soil_data.py:
-#     get_crop('rice') → dict with keys theta2, theta5, theta6, theta18, HI, p, …
+#     get_crop('rice') → dict with theta2, theta5, theta6, theta18, HI, p, …
 #
 #   src/terrain.py:
 #     load_terrain('gilan_farm.tif')
-#     → dict: 'gamma_flat'(N,), 'sends_to', 'Nr', 'Nr_internal', 'N',
+#     → dict: 'gamma_flat', 'sends_to', 'Nr', 'Nr_internal', 'N',
 #             'elevation_flat', 'topological_order', …
 #
 #   climate_data.py:
@@ -73,24 +63,28 @@ from src.terrain import load_terrain
 from soil_data import get_crop
 
 # ── public scalar constants (consumed by runner.py) ──────────────────────────
-UB_MM               = 12.0    # actuator upper bound mm/day (= runner.UB_MM_PER_DAY)
+UB_MM               = 12.0    # actuator upper bound mm/day
 X4_REF              = 600.0   # reference biomass for normalisation (g/m²)
 X5_REF              = 50.0    # reference surface ponding (mm)
 FULL_SEASON_NEED_MM = 484.0   # 100% seasonal budget reference (mm)
-FORECAST_H          = 8       # forecast horizon (days) — matches MPC Hp*
+FORECAST_H          = 8       # forecast horizon (days)
 
-# ── reward weights (v2.7: ALPHA5_RL and LAMBDA_BUDGET removed) ───────────────
+# ── reward weights (unchanged from v2.7) ──────────────────────────────────────
 ALPHA1 = 1.0     # biomass increment
 ALPHA2 = 0.016   # water cost
 ALPHA3 = 0.1     # drought stress regulariser
 ALPHA6 = 8.0     # FC-overshoot penalty
-C_TERM = 0.0     # terminal bonus (kept as 0 for completeness; never paid in v2.7)
+C_TERM = 0.0     # terminal bonus (kept as 0)
 
-# ── environment dimensions ────────────────────────────────────────────────────
+# ── curriculum defaults (NEW in v2.8) ─────────────────────────────────────────
+CURRICULUM_WARMUP_STEPS_DEFAULT = 50_000    # transition point (env steps)
+CURRICULUM_SHORT_LEN_DEFAULT    = 60        # short-episode length (days)
+
+# ── environment dimensions (v2.8) ─────────────────────────────────────────────
 N_AGENTS         = 130
-N_AGENT_FEATURES = 8     # v2.7: 4 dynamic (x1, x5, x4, x3) + 4 static topo
-N_GLOBAL_DIMS    = 57    # 9 scalars + 48 forecast (6 vars × 8 days)
-OBS_DIM          = N_AGENT_FEATURES * N_AGENTS + N_GLOBAL_DIMS    # 1097
+N_AGENT_FEATURES = 9     # v2.8: 4 dynamic + 4 static topo + 1 overshoot
+N_GLOBAL_DIMS    = 57    # 9 scalars + 48 forecast
+OBS_DIM          = N_AGENT_FEATURES * N_AGENTS + N_GLOBAL_DIMS    # 1227
 
 
 # ── module-level asset cache (loaded once per process) ───────────────────────
@@ -103,41 +97,19 @@ def _load_assets():
 
 _CROP, _TERRAIN, _CLIMATE_DF = _load_assets()
 
-# per-crop derived thresholds (computed once from the crop dict)
+# per-crop derived thresholds
 _FC_MM = _CROP['theta6'] * _CROP['theta5']           # field capacity (mm)
 _WP_MM = _CROP['theta2'] * _CROP['theta5']           # wilting point  (mm)
 _ST_MM = _FC_MM - _CROP['p'] * (_FC_MM - _WP_MM)     # stress threshold (mm)
 _HI    = _CROP['HI']                                  # harvest index
-_K     = _CROP['season_days']                         # season length (days)
-_GDD_MATURITY = _CROP.get('theta18', 1250.0)          # GDD to maturity
+_K     = _CROP['season_days']                         # season length (93)
+_GDD_MATURITY = _CROP.get('theta18', 1250.0)
 
-# Scenario name → year int mapping (for precompute cache key)
 _SCENARIO_YEAR_MAP = {2022: 'dry', 2018: 'moderate', 2024: 'wet'}
 
 
-# ── Static per-agent topographic features (v2.7) ─────────────────────────────
-# These are computed once at module load from _TERRAIN and never change during
-# a season.  They are what the ABM uses internally to route water (sends_to,
-# Nr); putting them in the actor's observation closes the asymmetry that
-# caused SAC_best to be spatially blind in v2.6.
-#
-#   _ELEV_NORM        — normalised elevation (= terrain['gamma_flat']),
-#                       restores the Chapter 4 spec for the 5th per-agent
-#                       feature that was broken in commits c623833+.
-#   _NR_NORM          — total downhill fanout / 8, in [0, ~0.75].  High value
-#                       means "water I receive disperses to many neighbours".
-#   _NR_INTERNAL_NORM — internal-only fanout / 8, in [0, ~0.75].  Comparing
-#                       this with _NR_NORM tells the actor whether the
-#                       agent is at a field boundary.
-#   _N_UPSTREAM_NORM  — number of upstream feeders / 8, in [0, ~0.75].
-#                       High value means "I receive runoff from many
-#                       neighbours" — this is what makes valley cells
-#                       hydrologically different from hilltop cells at
-#                       similar elevation.
-#
-# All four are float32 numpy arrays of shape (N_AGENTS,).  Dividing by 8
-# (the 8-directional neighbourhood ceiling for D8 routing) keeps values in
-# [0, 1] with headroom for terrains with denser connectivity than Gilan.
+# ── Static per-agent topographic features (unchanged from v2.7) ──────────────
+# These are constant across the season; computed once at module load.
 
 _ELEV_NORM = _TERRAIN['gamma_flat'].astype(np.float32)
 
@@ -151,7 +123,6 @@ _NR_INTERNAL_NORM = np.array(
     dtype=np.float32,
 )
 
-# n_upstream[m] = number of agents n such that m is in sends_to[n]
 _n_upstream_counts = np.zeros(_TERRAIN['N'], dtype=np.int32)
 for _n_src, _downstream_list in _TERRAIN['sends_to'].items():
     for _m_dst in _downstream_list:
@@ -160,53 +131,64 @@ _N_UPSTREAM_NORM = (_n_upstream_counts / 8.0).astype(np.float32)
 
 
 class IrrigationEnv(gym.Env):
-    """Gymnasium wrapper around the 130-agent crop-soil ABM (v2.7).
+    """Gymnasium wrapper around the 130-agent crop-soil ABM (v2.8).
 
-    Observation (1097-dim, agent-major layout):
-      Per-agent block  (1040 = 8 × 130):
+    Observation (1227-dim, agent-major layout):
+      Per-agent block  (1170 = 9 × 130):
         DYNAMIC (updated each step):
-          [0] x1_norm  — root-zone moisture mapped via (x1 − WP)/(FC − WP)
-          [1] x5_norm  — surface ponding / X5_REF
-          [2] x4_norm  — biomass / X4_REF
-          [3] x3       — accumulated maturation stress
+          [0] x1_norm             — (x1 − WP)/(FC − WP), in [0, 1.5]
+          [1] x5_norm             — surface ponding / X5_REF
+          [2] x4_norm             — biomass / X4_REF
+          [3] x3                  — accumulated maturation stress
         STATIC (computed once at module load):
-          [4] elev_norm        — normalised elevation (Chapter 4 γ⁽ⁿ⁾)
-          [5] Nr_norm          — total downhill fanout / 8
-          [6] Nr_internal_norm — internal-only fanout / 8
-          [7] n_upstream_norm  — upstream feeders / 8
-      Scalar block (9):
-          [0] day_frac        — day index / 93
-          [1] budget_frac     — remaining / budget_total
-          [2] budget_total_norm — budget_total / 484
-          [3] burn_rate       — water_used / (day × daily_pace)
-                                 (informative signal even though rb is
-                                  no longer used in the reward)
-          [4] rain_today, [5] ETc_today, [6] h2, [7] h7, [8] g_base
-      Forecast block (48): rain[0:8], ETc[0:8], rad[0:8],
-                            h2[0:8], h7[0:8], g_base[0:8]
+          [4] elev_norm           — normalised elevation (Chapter 4 γ⁽ⁿ⁾)
+          [5] Nr_norm             — total downhill fanout / 8
+          [6] Nr_internal_norm    — internal-only fanout / 8
+          [7] n_upstream_norm     — upstream feeders / 8
+        DYNAMIC (v2.8 NEW):
+          [8] x1_overshoot_norm   — max(x1 − FC, 0) / FC, in [0, 1]
+      Scalar block (9, unchanged): day_frac, budget_frac, budget_total_norm,
+        burn_rate, rain_today, ETc_today, h2, h7, g_base.
+      Forecast block (48, unchanged): rain[0:8], ETc[0:8], rad[0:8],
+        h2[0:8], h7[0:8], g_base[0:8].
 
-    Action (130-dim, Box[0,1]):
-      Scaled to [0, UB_MM = 12] mm/day in step().
+    Action (130-dim, Box[0,1]): scaled to [0, UB_MM = 12] mm/day.
 
-    Reward (v2.7, four terms):
-      r(t) = r1 + r2 + r3 + r6
-        r1 = ALPHA1 × Δ(mean x4) / X4_REF
-        r2 = −ALPHA2 × mean(irr_delivered) / UB_MM
-        r3 = −ALPHA3 × mean(max(ST − x1, 0)) / (ST − WP)
-        r6 = −ALPHA6 × mean(max(x1 − FC, 0)²) / FC²
+    Reward (unchanged from v2.7, four terms):
+      r(t) = r1 + r2 + r3 + r6.
 
-    Episode: always runs 93 days.  terminated = False on every step;
-      truncated = True only when day index reaches 93.  Budget compliance is
-      enforced inside step() via the per-step clip and is therefore
-      physically guaranteed for every reported run.
+    Episode termination (v2.8):
+      Always terminated=False; truncated triggered when
+      `self._day >= self._truncation_day`, where `truncation_day` is set
+      at reset to CURRICULUM_SHORT_LEN during the warmup window and to
+      _K (93) afterwards.  Budget exhaustion does NOT terminate the
+      episode (preserves v2.7 lifecycle).
+
+    Constructor kwargs:
+      randomize : bool
+          If True, sample year from TRAINING_YEARS and budget from
+          U(0.7, 1.0) on each reset.  Set False for fixed-mode evaluation.
+      curriculum_warmup_steps : int
+          Number of env transitions before switching from short to full
+          episodes.  Default 50 000.  Set to 0 to disable the curriculum
+          entirely (always full episodes — matches v2.7 behaviour).
+      curriculum_short_len : int
+          Episode length in days during the warmup window.  Default 60.
     """
 
     metadata = {"render_modes": []}
-    N = N_AGENTS   # public attribute used by smoke tests and networks.py
+    N = N_AGENTS
 
-    def __init__(self, randomize: bool = True):
+    def __init__(
+        self,
+        randomize: bool = True,
+        curriculum_warmup_steps: int = CURRICULUM_WARMUP_STEPS_DEFAULT,
+        curriculum_short_len:    int = CURRICULUM_SHORT_LEN_DEFAULT,
+    ):
         super().__init__()
         self.randomize = randomize
+        self._curriculum_warmup_steps = int(curriculum_warmup_steps)
+        self._curriculum_short_len    = int(curriculum_short_len)
 
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(OBS_DIM,), dtype=np.float32
@@ -224,6 +206,10 @@ class IrrigationEnv(gym.Env):
         self._water_used: float = 0.0
         self._day: int = 0
         self._prev_x4_mean: float = 0.0
+
+        # curriculum state (v2.8)
+        self._global_step_count: int = 0   # increments on every step() call
+        self._truncation_day:    int = _K  # set on each reset
 
         # public alias for smoke tests
         self.abm: CropSoilABM | None = None
@@ -243,13 +229,18 @@ class IrrigationEnv(gym.Env):
         self._water_used = 0.0
         self._day        = 0
 
-        # climate for this year
+        # Curriculum: decide this episode's truncation day at the start of
+        # the episode, so we don't switch mid-episode.
+        if (self._curriculum_warmup_steps > 0
+                and self._global_step_count < self._curriculum_warmup_steps):
+            self._truncation_day = self._curriculum_short_len
+        else:
+            self._truncation_day = _K
+
+        # climate
         self._climate = extract_scenario(_CLIMATE_DF, self._year, _CROP)
 
         # precomputed biological arrays
-        # get_precomputed only accepts named scenario strings ('dry','moderate','wet').
-        # For training years not in that set, compute on the fly from the loaded
-        # climate dict.
         scenario = _SCENARIO_YEAR_MAP.get(self._year)
         if scenario is not None:
             self._precomp = get_precomputed(scenario, 'rice')
@@ -269,7 +260,7 @@ class IrrigationEnv(gym.Env):
             elevation=_TERRAIN['elevation_flat'],
         )
         self._abm.reset()
-        self.abm = self._abm   # public alias
+        self.abm = self._abm
 
         self._prev_x4_mean = float(np.mean(self._abm.x4))
         return self._build_obs(), {}
@@ -280,15 +271,11 @@ class IrrigationEnv(gym.Env):
         action = np.clip(action, 0.0, 1.0).astype(np.float32)
         irr_mm = action * UB_MM
 
-        # 2. per-step budget clip: physical compliance guarantee.
-        #    When budget is exhausted, remaining == 0, effective irrigation
-        #    becomes 0, and the ABM advances under climate alone.  This
-        #    lets the agent feel late-season drought via reduced r1 and
-        #    rising r3, without any tuned overspend penalty.
+        # 2. per-step budget clip (unchanged from v2.7)
         remaining = max(self._budget_mm - self._water_used, 0.0)
         irr_mm    = np.minimum(irr_mm, remaining)
 
-        # 3. climate dict for today
+        # 3. climate for today
         d = min(self._day, _K - 1)
         climate_today = {
             'rainfall':  float(self._climate['rainfall'][d]),
@@ -298,7 +285,7 @@ class IrrigationEnv(gym.Env):
             'ET':        float(self._climate['ET'][d]),
         }
 
-        # 4. advance ABM, accumulate FIELD-MEAN water depth in mm
+        # 4. advance ABM, accumulate field-mean water depth
         new_state         = self._abm.step(irr_mm, climate_today)
         water_step_field  = float(np.mean(irr_mm))
         self._water_used += water_step_field
@@ -307,63 +294,52 @@ class IrrigationEnv(gym.Env):
         x1      = new_state['x1']
         x4_mean = float(np.mean(new_state['x4']))
 
-        # 6. reward
+        # 6. reward (unchanged)
         reward = self._compute_reward(x1=x1, x4_mean=x4_mean, irr_mm=irr_mm)
 
-        # 7. step the day counter (must precede termination logic)
+        # 7. advance counters
         self._day += 1
+        self._global_step_count += 1
         self._prev_x4_mean = x4_mean
 
-        # 8. v2.7 termination logic
-        #    Episode ALWAYS runs the full season — no early termination on
-        #    budget exhaustion.  truncated fires only at day == K, signalling
-        #    the natural end of the season (gymnasium convention: truncated
-        #    means "time limit reached", terminated means "absorbing state").
+        # 8. termination (v2.8)
+        #    terminated=False always (no early termination from budget).
+        #    truncated when day reaches the curriculum-dependent truncation day.
         terminated = False
-        truncated  = (self._day >= _K)
+        truncated  = (self._day >= self._truncation_day)
 
         info = {
-            'day':           self._day,
-            'water_used_mm': self._water_used,
-            'budget_mm':     self._budget_mm,
-            'x4_mean':       x4_mean,
-            'yield_kg_ha':   x4_mean * _HI * 10.0,
+            'day':              self._day,
+            'water_used_mm':    self._water_used,
+            'budget_mm':        self._budget_mm,
+            'x4_mean':          x4_mean,
+            'yield_kg_ha':      x4_mean * _HI * 10.0,
+            'truncation_day':   self._truncation_day,
+            'global_step':      self._global_step_count,
         }
         return self._build_obs(), float(reward), terminated, truncated, info
 
-    # ── reward ────────────────────────────────────────────────────────────────
+    # ── reward (unchanged from v2.7) ──────────────────────────────────────────
     def _compute_reward(
         self,
         x1: np.ndarray,
         x4_mean: float,
         irr_mm: np.ndarray,
     ) -> float:
-        """Four-term reward (v2.7): r = r1 + r2 + r3 + r6.
-
-        r5 (delta-u) was disabled in v2.6; the entire branch is removed.
-        rb (burn-rate) never bound on the v2.6 converged policy; removed.
-        The remaining four terms exactly match the MPC path-cost terms
-        whose weights were validated by the Chapter 4 α-sensitivity sweep.
-        """
         r1 = ALPHA1 * (x4_mean - self._prev_x4_mean) / X4_REF
-
         r2 = -ALPHA2 * float(np.mean(irr_mm)) / UB_MM
-
-        drought = np.maximum(_ST_MM - x1, 0.0)
+        drought   = np.maximum(_ST_MM - x1, 0.0)
         r3 = -ALPHA3 * float(np.mean(drought)) / max(_ST_MM - _WP_MM, 1e-6)
-
         overshoot = np.maximum(x1 - _FC_MM, 0.0)
         r6 = -ALPHA6 * float(np.mean(overshoot ** 2)) / max(_FC_MM ** 2, 1e-6)
-
         return r1 + r2 + r3 + r6
 
-    # ── observation ───────────────────────────────────────────────────────────
+    # ── observation (v2.8: 9-feature per-agent block) ─────────────────────────
     def _build_obs(self) -> np.ndarray:
         d = min(self._day, _K - 1)
         p = self._precomp
 
-        # ── per-agent block (8 features per agent, agent-major) ─────────────
-        # Dynamic features — updated every step.
+        # ── dynamic per-agent features ──────────────────────────────────────
         x1_norm = np.clip(
             (self._abm.x1 - _WP_MM) / max(_FC_MM - _WP_MM, 1e-6),
             0.0, 1.5,
@@ -372,9 +348,15 @@ class IrrigationEnv(gym.Env):
         x4_norm = np.clip(self._abm.x4 / X4_REF, 0.0, 1.5)
         x3      = np.clip(self._abm.x3, 0.0, 2.0)
 
-        # Static topographic features — module-level, broadcast in.
-        # Stacking with axis=1 then flattening produces the agent-major
-        # layout that SharedActor and FactorizedContinuousCritic expect.
+        # v2.8 NEW: explicit FC-overshoot feature.  Same quantity that
+        # appears in r6 = -α6 × mean(this^2) / FC, giving the gradient
+        # from r6 a direct, named feature to flow into.
+        x1_overshoot_norm = np.clip(
+            np.maximum(self._abm.x1 - _FC_MM, 0.0) / max(_FC_MM, 1e-6),
+            0.0, 1.0,
+        ).astype(np.float32)
+
+        # Per-agent block: 9 features, agent-major (stack axis=1 + flatten).
         agent_block = np.stack([
             x1_norm,
             x5_norm,
@@ -384,9 +366,10 @@ class IrrigationEnv(gym.Env):
             _NR_NORM,
             _NR_INTERNAL_NORM,
             _N_UPSTREAM_NORM,
-        ], axis=1).flatten().astype(np.float32)   # (1040,)
+            x1_overshoot_norm,
+        ], axis=1).flatten().astype(np.float32)   # (1170,)
 
-        # ── scalar block (9 dims, unchanged from v2.6) ──────────────────────
+        # ── scalar block (unchanged from v2.7) ──────────────────────────────
         day_frac          = self._day / _K
         budget_remaining  = max(self._budget_mm - self._water_used, 0.0)
         budget_frac       = budget_remaining / max(self._budget_mm, 1e-6)
@@ -401,15 +384,15 @@ class IrrigationEnv(gym.Env):
             day_frac,
             budget_frac,
             budget_total_norm,
-            burn_rate,                              # informative; not in reward
+            burn_rate,
             float(self._climate['rainfall'][d]),
             float(p.Kc_ET[d]),
             float(p.h2[d]),
             float(p.h7[d]),
             float(p.g_base[d]),
-        ], dtype=np.float32)   # (9,)
+        ], dtype=np.float32)
 
-        # ── forecast block (48 dims, unchanged from v2.6) ───────────────────
+        # ── forecast block (unchanged from v2.7) ────────────────────────────
         def _fc_slice(arr, start, length):
             arr = np.asarray(arr, dtype=np.float32)
             end = min(start + length, len(arr))
@@ -429,7 +412,7 @@ class IrrigationEnv(gym.Env):
             _fc_slice(p.h2,                       d, FORECAST_H),
             _fc_slice(p.h7,                       d, FORECAST_H),
             _fc_slice(p.g_base,                   d, FORECAST_H),
-        ]).astype(np.float32)   # (48,)
+        ]).astype(np.float32)
 
         obs = np.concatenate([agent_block, scalar_block, forecast_block])
         assert obs.shape == (OBS_DIM,), f"obs shape {obs.shape}, expected ({OBS_DIM},)"

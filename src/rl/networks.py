@@ -1,34 +1,29 @@
-# src/rl/networks.py  v2.7.0
+# src/rl/networks.py  v2.8.0
 # ─────────────────────────────────────────────────────────────────────────────
-# Changes from v2.6.x  (see change_spec_v27.md for full rationale)
+# Changes from v2.7.0  (see change_spec_v28.md for full rationale)
 #
-#   1. CURRENT (v2.7) per-agent feature count: 5 → 8.
-#        Three new static topographic features are now in the gym_env obs:
-#        Nr_norm, Nr_internal_norm, n_upstream_norm.  The actor and critic
-#        first-layer widths grow correspondingly:
-#            PER_AGENT_INPUT_DIM        : 62 → 65
-#            PER_AGENT_CRITIC_INPUT_DIM : 63 → 66
-#            OBS_DIM_DEFAULT            : 707 → 1097
-#        All architectural choices (shared actor, VDN factorised critic,
-#        twin-Q, hidden widths) are otherwise unchanged.
+#   1. CURRENT (v2.8) per-agent feature count: 8 → 9.
+#        The v2.8 obs adds x1_overshoot_norm as a 9th per-agent feature.
+#        The actor and critic first-layer widths grow accordingly:
+#            PER_AGENT_INPUT_DIM        : 65 → 66
+#            PER_AGENT_CRITIC_INPUT_DIM : 66 → 67
+#            OBS_DIM_DEFAULT            : 1097 → 1227
+#        Hidden widths, activation, twin-Q architecture: unchanged.
 #
-#   2. LEGACY (v2.6) checkpoint loading is preserved.
-#        WrappedVDNCTDESACPolicy and MonolithicCTDESACPolicy continue to
-#        load checkpoints trained against the 707-dim observation layout.
-#        They are kept distinct from the v2.7 path by parameterising the
-#        legacy actor / critic on V26_* constants instead of the
-#        module-default v2.7 constants.  Loading a v2.6 best_model.zip
-#        therefore continues to work for the Chapter 5 architecture-
-#        comparison story.
+#   2. LEGACY CHECKPOINT LOADING PRESERVED for both v2.7 and v2.6.
+#        - v2.7 best_model.zip (8 features/agent, dim=66 critic input):
+#          loaded via _V27SharedActor + _V27FactorizedQNet.
+#        - v2.6 best_model.zip (5 features/agent, dim=63 critic input,
+#          local_q_net wrapper): loaded via _LegacySharedActor +
+#          _WrappedFactorizedCritic.
+#        - pre-VDN monolithic (837-dim flat): MonolithicCTDESACPolicy.
 #
-# Three known checkpoint variants and their load paths:
-#   - dim=66, flat       → CTDESACPolicy             (v2.7 — DEFAULT)
-#   - dim=63, wrapped    → WrappedVDNCTDESACPolicy   (v2.6 best_model.zip)
-#   - dim=63, flat       → CTDESACPolicy with V26_* constants (n/a — no
-#                          such checkpoint exists in the current repo, but
-#                          this case is handled by treating it as legacy
-#                          VDN under WrappedVDN — see runner.py)
-#   - dim=837, flat      → MonolithicCTDESACPolicy   (pre-VDN, legacy)
+# Critic checkpoint variants (loaded by runner.py):
+#   dim=67, flat       → CTDESACPolicy            (v2.8 — DEFAULT)
+#   dim=66, flat       → V27CTDESACPolicy         (v2.7)
+#   dim=63, wrapped    → WrappedVDNCTDESACPolicy  (v2.6 best_model.zip)
+#   dim=63, flat       → WrappedVDNCTDESACPolicy  (v2.6 alt-key — defensive)
+#   dim=837, flat      → MonolithicCTDESACPolicy  (pre-VDN, legacy)
 # ─────────────────────────────────────────────────────────────────────────────
 
 from __future__ import annotations
@@ -47,25 +42,34 @@ from stable_baselines3.sac.policies import Actor, SACPolicy
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# v2.7 dimensions (CURRENT — used by all newly trained policies)
-# Per-agent block (agent-major, 8 contiguous features per agent):
-#   [x1_norm, x5_norm, x4_norm, x3, elev_norm,
-#    Nr_norm, Nr_internal_norm, n_upstream_norm]
+# v2.8 dimensions (CURRENT — used by all newly trained policies)
+# Per-agent block (agent-major, 9 contiguous features per agent):
+#   [x1_norm, x5_norm, x4_norm, x3,
+#    elev_norm, Nr_norm, Nr_internal_norm, n_upstream_norm,
+#    x1_overshoot_norm]
 # ─────────────────────────────────────────────────────────────────────────────
-N_AGENT_FEATURES           = 8
+N_AGENT_FEATURES           = 9
 N_AGENTS_DEFAULT           = 130
-N_GLOBAL_DIMS              = 57   # 9 scalars + 48 forecast (6 vars × 8 days)
-OBS_DIM_DEFAULT            = N_AGENT_FEATURES * N_AGENTS_DEFAULT + N_GLOBAL_DIMS   # 1097
-PER_AGENT_INPUT_DIM        = N_AGENT_FEATURES + N_GLOBAL_DIMS                     # 65
-PER_AGENT_CRITIC_INPUT_DIM = N_AGENT_FEATURES + N_GLOBAL_DIMS + 1                 # 66
+N_GLOBAL_DIMS              = 57   # 9 scalars + 48 forecast
+OBS_DIM_DEFAULT            = N_AGENT_FEATURES * N_AGENTS_DEFAULT + N_GLOBAL_DIMS   # 1227
+PER_AGENT_INPUT_DIM        = N_AGENT_FEATURES + N_GLOBAL_DIMS                     # 66
+PER_AGENT_CRITIC_INPUT_DIM = N_AGENT_FEATURES + N_GLOBAL_DIMS + 1                 # 67
 
 # ─────────────────────────────────────────────────────────────────────────────
-# v2.6 LEGACY dimensions  (kept ONLY for loading pre-v2.7 checkpoints).
-# Do not use these for new training.  Per-agent block was 5 features:
-#   [x1_norm, x5_norm, x4_norm, x3, gamma]
-# where the 5th slot held either a per-agent elevation (runner.py) or a
-# field-uniform GDD scalar (gym_env.py) depending on which side of the
-# v2.6 obs-layout bug you looked at.
+# v2.7 LEGACY dimensions  (for loading v2.7 checkpoints)
+# Per-agent block was 8 features:
+#   [x1_norm, x5_norm, x4_norm, x3,
+#    elev_norm, Nr_norm, Nr_internal_norm, n_upstream_norm]
+# ─────────────────────────────────────────────────────────────────────────────
+V27_N_AGENT_FEATURES           = 8
+V27_OBS_DIM                    = V27_N_AGENT_FEATURES * N_AGENTS_DEFAULT + N_GLOBAL_DIMS   # 1097
+V27_PER_AGENT_INPUT_DIM        = V27_N_AGENT_FEATURES + N_GLOBAL_DIMS                       # 65
+V27_PER_AGENT_CRITIC_INPUT_DIM = V27_N_AGENT_FEATURES + N_GLOBAL_DIMS + 1                   # 66
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v2.6 LEGACY dimensions  (for loading v2.6 best_model.zip and earlier)
+# Per-agent block was 5 features:
+#   [x1_norm, x5_norm, x4_norm, x3, gamma]  (gamma was buggy — see ch5)
 # ─────────────────────────────────────────────────────────────────────────────
 V26_N_AGENT_FEATURES           = 5
 V26_OBS_DIM                    = V26_N_AGENT_FEATURES * N_AGENTS_DEFAULT + N_GLOBAL_DIMS   # 707
@@ -78,32 +82,26 @@ LOG_STD_MAX = 2.0
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  v2.7 SHARED ACTOR  (8 per-agent features → 65-dim per-agent input)
+#  v2.8 SHARED ACTOR  (9 per-agent features → 66-dim per-agent input)
 # ═════════════════════════════════════════════════════════════════════════════
 class SharedActor(Actor):
-    """SAC actor with parameter-sharing across N spatial agents (v2.7).
+    """SAC actor with parameter-sharing across N spatial agents (v2.8).
 
-    Each agent receives a 65-dim input vector consisting of:
-      • 8  local features        (its own x1_norm, x5_norm, x4_norm, x3,
-                                  elev_norm, Nr_norm, Nr_internal_norm,
-                                  n_upstream_norm)
-      • 57 global context dims   (9 scalars + 48 forecast, identical for all)
+    Each agent receives a 66-dim input vector:
+      • 9  local features  (x1_norm, x5_norm, x4_norm, x3, elev_norm,
+                            Nr_norm, Nr_internal_norm, n_upstream_norm,
+                            x1_overshoot_norm)
+      • 57 global context  (9 scalars + 48 forecast)
 
-    A single MLP (the "shared MLP") is applied to all N per-agent inputs in
-    parallel, producing (mean_n, log_std_n) for n = 0,...,N-1.  The N
-    per-agent action distributions are concatenated into a joint
-    N-dimensional action distribution.
+    A single MLP is applied to all N per-agent inputs in parallel, producing
+    (mean_n, log_std_n) for n = 0,…,N-1.  The N per-agent action distributions
+    are concatenated into a joint N-dimensional action distribution.
 
-    Parameters are reduced ~86% versus a naive monolithic actor while
-    enforcing spatial equivariance: permuting the agent index permutes the
-    action in the same way.
-
-    v2.7 vs v2.6:  per-agent feature count grew from 5 to 8, so the input
-    width grew from 62 to 65.  The hidden widths and output head are
-    unchanged.
+    v2.7 → v2.8: per-agent feature count grew from 8 to 9.  Hidden widths and
+    output head unchanged.
     """
 
-    # Class-level configuration — overridden in _LegacySharedActor for v2.6 loads
+    # Class-level configuration — overridden in legacy subclasses
     _N_AGENT_FEATURES = N_AGENT_FEATURES
     _PER_AGENT_INPUT_DIM = PER_AGENT_INPUT_DIM
 
@@ -147,8 +145,6 @@ class SharedActor(Actor):
 
         net_arch_list = net_arch if net_arch is not None else [128, 128]
 
-        # Drop the parent Actor's mu/log_std heads — they expect action_dim out;
-        # we replace them with 1-out heads to be applied per agent.
         latent_pi_net = create_mlp(
             input_dim=self._PER_AGENT_INPUT_DIM,
             output_dim=-1,
@@ -163,7 +159,6 @@ class SharedActor(Actor):
 
         self.action_dist = SquashedDiagGaussianDistribution(action_dim)
 
-    # ── helpers ──────────────────────────────────────────────────────────────
     def get_std(self) -> torch.Tensor:
         return torch.zeros(self.N)
 
@@ -171,28 +166,22 @@ class SharedActor(Actor):
         return
 
     def _per_agent_features(self, features: torch.Tensor) -> torch.Tensor:
-        """Reshape a flat batched obs into (B*N, per_agent_input_dim).
+        """Reshape flat batched obs into (B*N, per_agent_input_dim).
 
-        Layout produced by gym_env (agent-major):
-          features[:, : F*N]   = per-agent block, F contiguous features per agent
-          features[:, F*N : ]  = N_GLOBAL_DIMS global dims (broadcast to all agents)
+        Agent-major layout (matches gym_env):
+          features[:, : F*N]   = N×F per-agent features
+          features[:, F*N : ]  = G global features (broadcast to all agents)
         """
         B = features.shape[0]
         N = self.N
         F = self._N_AGENT_FEATURES
 
-        # (B, N*F) → (B, N, F)
         per_agent = features[:, : F * N].reshape(B, N, F)
-
-        # (B, G) → (B, 1, G) → (B, N, G)  broadcast global to every agent
         global_block = features[:, F * N:]
         global_expanded = global_block.unsqueeze(1).expand(-1, N, -1)
-
-        # (B, N, F+G) → (B*N, F+G)
         combined = torch.cat([per_agent, global_expanded], dim=-1)
         return combined.reshape(B * N, self._PER_AGENT_INPUT_DIM)
 
-    # ── SAC actor interface ──────────────────────────────────────────────────
     def get_action_dist_params(
         self, obs: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor]]:
@@ -228,39 +217,28 @@ class SharedActor(Actor):
         return self(observation, deterministic)
 
 
-class _LegacySharedActor(SharedActor):
-    """SharedActor for v2.6 checkpoints (5 per-agent features, 62-dim input).
+class _V27SharedActor(SharedActor):
+    """SharedActor for v2.7 checkpoints (8 per-agent features, 65-dim input)."""
+    _N_AGENT_FEATURES    = V27_N_AGENT_FEATURES
+    _PER_AGENT_INPUT_DIM = V27_PER_AGENT_INPUT_DIM
 
-    Subclass-only override of the class-level dimension constants.  All
-    behaviour is identical to SharedActor; only the reshape geometry
-    differs to match the obs layout the legacy checkpoint was trained on.
-    """
+
+class _LegacySharedActor(SharedActor):
+    """SharedActor for v2.6 checkpoints (5 per-agent features, 62-dim input)."""
     _N_AGENT_FEATURES    = V26_N_AGENT_FEATURES
     _PER_AGENT_INPUT_DIM = V26_PER_AGENT_INPUT_DIM
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  v2.7 FACTORIZED CRITIC  (Value Decomposition Network, 66-dim per-agent input)
+#  v2.8 FACTORIZED CRITIC  (67-dim per-agent input)
 # ═════════════════════════════════════════════════════════════════════════════
 class _FactorizedQNet(nn.Sequential):
-    """Single Q-network that decomposes Q_total = Σ_n Q_local(s_n, g, a_n).
+    """Q_total = Σ_n Q_local(s_n, g, a_n).  Inherits nn.Sequential so layers
+    are registered at top level (state-dict keys: critic.qf0.0.weight, …).
 
-    Inherits from nn.Sequential so that the MLP layers are registered
-    directly as numeric children (0, 1, 2, …) instead of being nested
-    inside an extra ``local_q_net`` attribute.  This matches the
-    state-dict key naming used by v2.7 training runs
-    (e.g. ``critic.qf0.0.weight``).
-
-    The local MLP is shared across all N agents.  Input per agent (v2.7):
-      • 8  local state features
-      • 57 global context (broadcast)
-      • 1  local action
-    → 66 inputs, scalar output (Q_n).
-
-    Q_total is the sum of Q_n across the N agents.
+    v2.8 per-agent critic input: 9 local features + 57 global + 1 action = 67.
     """
 
-    # Class-level configuration — overridden in legacy variant
     _N_AGENT_FEATURES           = N_AGENT_FEATURES
     _PER_AGENT_CRITIC_INPUT_DIM = PER_AGENT_CRITIC_INPUT_DIM
 
@@ -280,52 +258,42 @@ class _FactorizedQNet(nn.Sequential):
         self.N = N
 
     def forward(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
-        """
-        obs:     (B, OBS_DIM)   flat batched observation
-        actions: (B, N)          joint action  (N = self.N)
-
-        returns: (B, 1)          Q_total = Σ_n Q_local(s_n, g, a_n)
-        """
         B = obs.shape[0]
         N = self.N
         F = self._N_AGENT_FEATURES
 
-        # agent-major reshape (same convention as SharedActor)
         local_obs       = obs[:, : F * N].reshape(B, N, F)
-        global_block    = obs[:, F * N:]                                # (B, G)
-        global_expanded = global_block.unsqueeze(1).expand(-1, N, -1)   # (B, N, G)
-        local_actions   = actions.reshape(B, N, 1)                       # (B, N, 1)
+        global_block    = obs[:, F * N:]
+        global_expanded = global_block.unsqueeze(1).expand(-1, N, -1)
+        local_actions   = actions.reshape(B, N, 1)
 
-        # concatenate (F + G + 1) per agent
         local_inputs = torch.cat(
             [local_obs, global_expanded, local_actions], dim=-1
-        )                                                                # (B, N, F+G+1)
-
-        # apply the shared MLP to all N agents in parallel
+        )
         local_inputs_flat = local_inputs.reshape(
             B * N, self._PER_AGENT_CRITIC_INPUT_DIM
         )
         local_q = nn.Sequential.forward(self, local_inputs_flat).reshape(B, N, 1)
-
-        # Σ across the agent dimension
-        q_total = local_q.sum(dim=1)                                     # (B, 1)
+        q_total = local_q.sum(dim=1)
         return q_total
 
 
+class _V27FactorizedQNet(_FactorizedQNet):
+    """_FactorizedQNet for v2.7 checkpoints (8 features, 66-dim input)."""
+    _N_AGENT_FEATURES           = V27_N_AGENT_FEATURES
+    _PER_AGENT_CRITIC_INPUT_DIM = V27_PER_AGENT_CRITIC_INPUT_DIM
+
+
 class FactorizedContinuousCritic(ContinuousCritic):
-    """Twin-Q factorized critic conforming to SB3's ContinuousCritic API (v2.7).
+    """Twin-Q factorized critic for v2.8.
 
-    Replaces the standard monolithic Q-networks with twin _FactorizedQNet
-    instances.  Each instance computes Q_total = Σ_n Q_local independently.
-    The Bellman target uses min(Q1_total, Q2_total) — standard clipped
-    double-Q learning.
+    Replaces SB3's monolithic Q-networks with twin _FactorizedQNet instances.
+    Bellman target uses min(Q1_total, Q2_total) — standard clipped double-Q.
 
-    Interface preserved:
-      • forward(obs, actions)    → Tuple[Q1, Q2]   each (B, 1)
-      • q1_forward(obs, actions) → Q1              (B, 1)
+    Class-level _N_AGENT_FEATURES and _QNET_CLS are overridden in legacy
+    subclasses to handle v2.7 and v2.6 checkpoints.
     """
 
-    # Class-level configuration — overridden in legacy variant
     _N_AGENT_FEATURES = N_AGENT_FEATURES
     _QNET_CLS         = _FactorizedQNet
 
@@ -343,8 +311,8 @@ class FactorizedContinuousCritic(ContinuousCritic):
         N: int = N_AGENTS_DEFAULT,
         **kwargs,
     ):
-        # Call the great-grandparent BaseModel.__init__ to set up features
-        # extractor properly, then bypass ContinuousCritic's q_networks build.
+        # Bypass ContinuousCritic.__init__ (which builds standard q_networks);
+        # call grandparent BaseModel.__init__ directly.
         super(ContinuousCritic, self).__init__(
             observation_space,
             action_space,
@@ -380,27 +348,28 @@ class FactorizedContinuousCritic(ContinuousCritic):
     def forward(
         self, obs: torch.Tensor, actions: torch.Tensor
     ) -> Tuple[torch.Tensor, ...]:
-        # Extract flat features (FlattenExtractor is the identity for Box obs)
         with torch.set_grad_enabled(not self.share_features_extractor):
             features = self.extract_features(obs, self.features_extractor)
         qvalue_input = features
         return tuple(q_net(qvalue_input, actions) for q_net in self.q_networks)
 
     def q1_forward(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
-        """Used by the actor's policy loss (which maximises Q1 only)."""
         with torch.no_grad():
             features = self.extract_features(obs, self.features_extractor)
         return self.q_networks[0](features, actions)
 
 
+class _V27FactorizedContinuousCritic(FactorizedContinuousCritic):
+    """FactorizedContinuousCritic for v2.7 checkpoints (8 features/agent)."""
+    _N_AGENT_FEATURES = V27_N_AGENT_FEATURES
+    _QNET_CLS         = _V27FactorizedQNet
+
+
 # ═════════════════════════════════════════════════════════════════════════════
-#  v2.7 CTDE SAC POLICY  (DEFAULT — used by train.py for new runs)
+#  v2.8 CTDE SAC POLICY  (DEFAULT — used by train.py for new runs)
 # ═════════════════════════════════════════════════════════════════════════════
 class CTDESACPolicy(SACPolicy):
-    """SAC policy with SharedActor + FactorizedContinuousCritic (v2.7).
-
-    The agent count N is read from the action space dimensionality.
-    """
+    """SAC policy with SharedActor + FactorizedContinuousCritic (v2.8)."""
 
     def make_actor(
         self, features_extractor: Optional[BaseFeaturesExtractor] = None
@@ -422,15 +391,30 @@ class CTDESACPolicy(SACPolicy):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  v2.6 LEGACY VDN POLICY — VDN critic with local_q_net wrapper (best_model.zip)
-#  Used for checkpoints where _FactorizedQNet stored layers as self.local_q_net
-#  (keys: critic.qf0.local_q_net.0.weight, shape [256, 63]).
+#  v2.7 LEGACY VDN POLICY (for loading v2.7 best_model.zip)
+# ═════════════════════════════════════════════════════════════════════════════
+class V27CTDESACPolicy(SACPolicy):
+    """CTDESACPolicy for v2.7 checkpoints (8 features/agent, dim=66 critic input).
+
+    Uses _V27SharedActor and _V27FactorizedContinuousCritic.
+    """
+
+    def make_actor(self, features_extractor=None):
+        kw = self._update_features_extractor(self.actor_kwargs, features_extractor)
+        kw["N"] = get_action_dim(self.action_space)
+        return _V27SharedActor(**kw).to(self.device)
+
+    def make_critic(self, features_extractor=None):
+        kw = self._update_features_extractor(self.critic_kwargs, features_extractor)
+        kw["N"] = get_action_dim(self.action_space)
+        return _V27FactorizedContinuousCritic(**kw).to(self.device)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  v2.6 LEGACY VDN POLICY (for loading v2.6 best_model.zip)
 # ═════════════════════════════════════════════════════════════════════════════
 class _FactorizedQNetWrapped(nn.Module):
-    """_FactorizedQNet with named local_q_net wrapper — matches best_model.zip keys.
-
-    Uses V26_* constants (5 per-agent features, 63-dim per-agent critic input).
-    """
+    """_FactorizedQNet with local_q_net wrapper — matches v2.6 best_model.zip keys."""
 
     def __init__(self, N: int, net_arch: List[int],
                  activation_fn: Type[nn.Module] = nn.ReLU):
@@ -458,10 +442,7 @@ class _FactorizedQNetWrapped(nn.Module):
 
 
 class _WrappedFactorizedCritic(ContinuousCritic):
-    """Twin-Q critic using _FactorizedQNetWrapped — matches v2.6 best_model.zip.
-
-    Uses V26_OBS_DIM = 707 expectations.
-    """
+    """Twin-Q critic with v2.6 wrapped keys (dim=63)."""
 
     def __init__(self, observation_space, action_space, net_arch, features_extractor,
                  features_dim, activation_fn=nn.ReLU, normalize_images=False,
@@ -498,10 +479,7 @@ class _WrappedFactorizedCritic(ContinuousCritic):
 
 
 class WrappedVDNCTDESACPolicy(SACPolicy):
-    """CTDESACPolicy for v2.6 best_model.zip (VDN, local_q_net keys, dim=63).
-
-    Uses _LegacySharedActor (62-dim per-agent input) and _WrappedFactorizedCritic.
-    """
+    """CTDESACPolicy for v2.6 best_model.zip (VDN, local_q_net keys, dim=63)."""
 
     def make_actor(self, features_extractor=None):
         kw = self._update_features_extractor(self.actor_kwargs, features_extractor)
@@ -515,21 +493,14 @@ class WrappedVDNCTDESACPolicy(SACPolicy):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  PRE-VDN LEGACY POLICY — monolithic 837-dim twin-Q critic
-#  Used ONLY for loading checkpoints from before the VDN upgrade (the
-#  v2.4 pilot saved with a [256, 837] first Linear layer in the critic).
+#  Pre-VDN LEGACY POLICY (monolithic 837-dim critic)
 # ═════════════════════════════════════════════════════════════════════════════
 class MonolithicCTDESACPolicy(SACPolicy):
     """CTDESACPolicy with the original monolithic 837-dim twin-Q critic.
 
-    Identical to the pre-VDN architecture:
-      - Actor: _LegacySharedActor (5 per-agent features × 130 + 57 globals = 707
-        obs, 62-dim per-agent input — matches what the v2.4 pilot was trained on)
-      - Critic: standard SB3 ContinuousCritic(837 → 256 → 256 → 1) × 2
-
-    Use this as the custom_objects override when loading a pre-VDN checkpoint:
-
-        SAC.load(path, custom_objects={"policy_class": MonolithicCTDESACPolicy})
+    For loading pre-VDN checkpoints (the v2.4 pilot saved with a [256, 837]
+    first Linear layer in the critic).  Uses _LegacySharedActor for the actor
+    (5 per-agent features, matching v2.4 obs layout).
     """
 
     def make_actor(
@@ -541,9 +512,8 @@ class MonolithicCTDESACPolicy(SACPolicy):
         actor_kwargs["N"] = get_action_dim(self.action_space)
         return _LegacySharedActor(**actor_kwargs).to(self.device)
 
-    # make_critic is NOT overridden → falls back to SACPolicy's standard
-    # ContinuousCritic which takes the full (obs + action) concatenation as
-    # input, producing the [256, 837] first-layer shape seen in the checkpoint.
+    # make_critic is NOT overridden → SACPolicy's standard ContinuousCritic,
+    # producing the [256, 837] first-layer shape seen in the checkpoint.
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -555,19 +525,9 @@ def make_sac_policy_kwargs(
     critic_hidden: Tuple[int, ...] = (256, 256),
     optimizer_kwargs: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Build the policy_kwargs dict for SB3 SAC with the v2.7 CTDE VDN architecture.
+    """policy_kwargs for SB3 SAC with the v2.8 CTDE VDN architecture.
 
-    Use with policy_class=CTDESACPolicy in the SAC constructor:
-
-        from stable_baselines3 import SAC
-        from src.rl.networks import CTDESACPolicy, make_sac_policy_kwargs
-
-        model = SAC(
-            policy=CTDESACPolicy,
-            env=env,
-            policy_kwargs=make_sac_policy_kwargs(N=130),
-            ...
-        )
+    Use with policy_class=CTDESACPolicy in the SAC constructor.
     """
     kwargs: Dict[str, Any] = {
         "net_arch": {

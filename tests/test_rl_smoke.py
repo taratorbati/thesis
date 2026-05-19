@@ -1,19 +1,17 @@
-# tests/test_rl_smoke.py  v2.7
+# tests/test_rl_smoke.py  v2.8
 # =============================================================================
-# Regression tests for the v2.7 RL pipeline.
+# Regression tests for the v2.8 RL pipeline.
 #
-# v2.7 changes:
-#   - OBS_DIM is now 1097 (was 707): 8 features × 130 agents + 9 scalars + 48
-#     forecast.  Slicing indices for the scalar block move from [650:659]
-#     to [1040:1049]; per-agent block ends at index 1040, not 650.
-#   - Episode now ALWAYS runs to the full 93-day season.  Budget exhaustion
-#     no longer terminates the episode early.  The corresponding test was
-#     rewritten from test_budget_exhaustion_terminates to
-#     test_episode_runs_full_season_after_budget_exhaustion, asserting the
-#     opposite behaviour.
-#   - Two new tests validate the v2.7 per-agent feature additions:
-#     test_per_agent_topo_features_vary_across_agents and
-#     test_per_agent_topo_features_static_across_season.
+# v2.8 changes:
+#   - OBS_DIM is now 1227 (was 1097 in v2.7): 9 features × 130 + 9 + 48.
+#     Slicing indices for the scalar block move from [1040:1049] to
+#     [1170:1179].  Per-agent block ends at 1170.
+#   - New tests:
+#       test_x1_overshoot_feature_zero_at_reset
+#       test_x1_overshoot_feature_nonzero_when_above_FC
+#       test_curriculum_truncates_short_episodes_during_warmup
+#       test_curriculum_switches_to_full_after_warmup
+#       test_curriculum_disabled_when_warmup_zero
 #
 # Run with: pytest tests/test_rl_smoke.py -v
 # =============================================================================
@@ -22,12 +20,12 @@ import numpy as np
 import pytest
 
 
-# Module-level constants for clarity; these match v2.7 gym_env.py
-V27_OBS_DIM         = 1097
-V27_N_AGENT_FEAT    = 8
+# v2.8 module-level constants
+V28_OBS_DIM         = 1227
+V28_N_AGENT_FEAT    = 9
 N_AGENTS            = 130
-PER_AGENT_BLOCK_END = V27_N_AGENT_FEAT * N_AGENTS   # = 1040
-SCALAR_BLOCK_END    = PER_AGENT_BLOCK_END + 9       # = 1049
+PER_AGENT_BLOCK_END = V28_N_AGENT_FEAT * N_AGENTS   # 1170
+SCALAR_BLOCK_END    = PER_AGENT_BLOCK_END + 9       # 1179
 
 
 def test_env_instantiates_training_mode():
@@ -45,10 +43,9 @@ def test_env_fixed_mode():
     from src.rl.gym_env import IrrigationEnv
     env = IrrigationEnv(randomize=False)
     obs, _ = env.reset()
-    assert obs.shape[0] == V27_OBS_DIM, (
-        f"Expected obs of shape ({V27_OBS_DIM},), got {obs.shape}"
+    assert obs.shape[0] == V28_OBS_DIM, (
+        f"Expected obs of shape ({V28_OBS_DIM},), got {obs.shape}"
     )
-    # Second reset must produce identical obs (same year, full budget)
     obs2, _ = env.reset()
     np.testing.assert_array_equal(
         obs, obs2,
@@ -70,46 +67,30 @@ def test_runner_imports():
     from src.rl.runner import RLController  # noqa
 
 
-def test_obs_dim_matches_v27_layout():
-    """The env must produce exactly the 1097-dim v2.7 obs layout.
-
-    Per-agent block (positions [0, 1040)): 8 features × 130 agents,
-    agent-major.  Scalar block (positions [1040, 1049)).  Forecast block
-    (positions [1049, 1097)).
-    """
+def test_obs_dim_matches_v28_layout():
+    """The env must produce exactly the 1227-dim v2.8 obs layout."""
     from src.rl.gym_env import IrrigationEnv
-
     env = IrrigationEnv(randomize=False)
     obs_env, _ = env.reset()
 
-    assert obs_env.shape == (V27_OBS_DIM,), (
-        f"Expected ({V27_OBS_DIM},) got {obs_env.shape}"
+    assert obs_env.shape == (V28_OBS_DIM,), (
+        f"Expected ({V28_OBS_DIM},) got {obs_env.shape}"
     )
 
-    # Scalar positions 1040–1048 must be finite
     scalars = obs_env[PER_AGENT_BLOCK_END:SCALAR_BLOCK_END]
     assert np.all(np.isfinite(scalars)), (
         f"Scalar block contains non-finite values: {scalars}"
     )
 
-    # Per-agent block positions [0, 1040) must be in plausible range
     agent_block = obs_env[:PER_AGENT_BLOCK_END]
-    assert np.all(agent_block >= -0.1), (
-        "Per-agent block has large negative values"
-    )
-    assert np.all(agent_block < 10.0), (
-        "Per-agent block has implausibly large values"
-    )
+    assert np.all(agent_block >= -0.1), "Per-agent block has large negative values"
+    assert np.all(agent_block < 10.0), "Per-agent block has implausibly large values"
 
 
 def test_reward_is_finite():
-    """100 random steps must produce finite rewards and observations.
-
-    Note: in v2.7 the episode never terminates from budget exhaustion, so
-    100 random steps will not reset unless the season ends (day >= 93).
-    """
+    """100 random steps must produce finite rewards and observations."""
     from src.rl.gym_env import IrrigationEnv
-    env = IrrigationEnv(randomize=False)
+    env = IrrigationEnv(randomize=False, curriculum_warmup_steps=0)
     env.reset(seed=0)
     rng = np.random.default_rng(0)
     for step in range(100):
@@ -122,136 +103,247 @@ def test_reward_is_finite():
 
 
 def test_obs_layout_agent_major():
-    """Per-agent block must use agent-major layout (8 contiguous per agent).
-
-    This is the convention assumed by networks.py's SharedActor and
-    FactorizedContinuousCritic: obs[:, n*8:(n+1)*8] is agent n's features.
-    """
+    """Per-agent block must use agent-major layout (9 contiguous per agent)."""
     from src.rl.gym_env import IrrigationEnv
     env = IrrigationEnv(randomize=False)
     obs, _ = env.reset(seed=0)
 
-    # After reset x1 is uniform (all agents start at FC).
-    # x1_norm (feature index 0 of each agent's 8-tuple) should therefore
-    # be uniform across agents.
-    x1_norms = obs[:PER_AGENT_BLOCK_END].reshape(N_AGENTS, V27_N_AGENT_FEAT)[:, 0]
+    # After reset, x1 is uniform across agents → x1_norm (feature 0) is uniform
+    x1_norms = obs[:PER_AGENT_BLOCK_END].reshape(N_AGENTS, V28_N_AGENT_FEAT)[:, 0]
     assert x1_norms.std() < 0.01, (
         f"x1_norm should be ~uniform at reset; std={x1_norms.std():.4f}. "
-        "Check if gym_env uses agent-major layout (stack axis=1, then flatten)."
+        "Check that gym_env uses agent-major layout (stack axis=1 + flatten)."
     )
 
 
 def test_per_agent_topo_features_vary_across_agents():
-    """v2.7 bug fix: per-agent static features MUST vary across the 130 agents.
-
-    The v2.6 implementation had x2/theta18 (a field-uniform GDD scalar) in
-    the 5th per-agent slot, which gave the actor no per-agent information.
-    In v2.7, slots 4-7 hold normalised elevation, Nr/8, Nr_internal/8, and
-    n_upstream/8 — all of which depend on agent identity and must therefore
-    have non-zero std across agents.
-    """
+    """Slots 4–7 (static topo features) must have non-zero std across agents."""
     from src.rl.gym_env import IrrigationEnv
     env = IrrigationEnv(randomize=False)
     obs, _ = env.reset(seed=0)
-
-    agent_grid = obs[:PER_AGENT_BLOCK_END].reshape(N_AGENTS, V27_N_AGENT_FEAT)
+    agent_grid = obs[:PER_AGENT_BLOCK_END].reshape(N_AGENTS, V28_N_AGENT_FEAT)
 
     feature_names = [
         'x1_norm', 'x5_norm', 'x4_norm', 'x3',
         'elev_norm', 'Nr_norm', 'Nr_internal_norm', 'n_upstream_norm',
+        'x1_overshoot_norm',
     ]
 
-    # Static topographic features must have non-trivial spread across agents.
-    # We test slots 4, 5, 6, 7 — the four static topographic features.
     for slot in [4, 5, 6, 7]:
         feat = agent_grid[:, slot]
         assert feat.std() > 0.01, (
             f"Static feature '{feature_names[slot]}' (slot {slot}) has "
-            f"std={feat.std():.6f} across the 130 agents — should be > 0.01. "
-            f"This indicates the feature is field-uniform (likely the v2.6 "
-            f"x2/theta18 regression bug has come back)."
+            f"std={feat.std():.6f} across agents — should be > 0.01."
         )
 
 
 def test_per_agent_topo_features_static_across_season():
-    """v2.7: the 4 static topographic features must NOT change during a season.
-
-    Features at slots 4-7 (elev_norm, Nr_norm, Nr_internal_norm,
-    n_upstream_norm) are derived from the DEM and are constant for the
-    duration of the simulation.  Any change across steps indicates the
-    obs builder is accidentally writing dynamic state into a static slot.
-    """
+    """Slots 4–7 must NOT change during a season."""
     from src.rl.gym_env import IrrigationEnv
-    env = IrrigationEnv(randomize=False)
+    env = IrrigationEnv(randomize=False, curriculum_warmup_steps=0)
     obs0, _ = env.reset(seed=0)
-    static0 = obs0[:PER_AGENT_BLOCK_END].reshape(N_AGENTS, V27_N_AGENT_FEAT)[:, 4:8].copy()
+    static0 = obs0[:PER_AGENT_BLOCK_END].reshape(N_AGENTS, V28_N_AGENT_FEAT)[:, 4:8].copy()
 
     rng = np.random.default_rng(0)
     for step in range(5):
         action = rng.uniform(0, 1, (env.N,)).astype(np.float32)
         obs, _, _, _, _ = env.step(action)
-        static_now = obs[:PER_AGENT_BLOCK_END].reshape(N_AGENTS, V27_N_AGENT_FEAT)[:, 4:8]
+        static_now = obs[:PER_AGENT_BLOCK_END].reshape(N_AGENTS, V28_N_AGENT_FEAT)[:, 4:8]
         np.testing.assert_allclose(
             static_now, static0,
-            err_msg=(
-                f"Static topographic features changed between reset and step {step}. "
-                "These should be constant for the entire season."
-            ),
+            err_msg=f"Static topo features changed between reset and step {step}.",
         )
 
 
-def test_episode_runs_full_season_after_budget_exhaustion():
-    """v2.7 behaviour: budget exhaustion does NOT terminate the episode.
-
-    Setting the budget to a tiny value and pumping the agent at full
-    irrigation must NOT raise terminated=True.  The episode should keep
-    running until day 93, at which point truncated=True fires (season end).
-    After budget is exhausted, the env clip drives effective irrigation
-    to 0 and the agent feels late-season drought through r3 and reduced r1.
-    """
+# ── v2.8 NEW: x1_overshoot feature tests ─────────────────────────────────────
+def test_x1_overshoot_feature_zero_at_reset():
+    """At reset, x1 is initialised at FC, so x1_overshoot_norm should be ~0."""
     from src.rl.gym_env import IrrigationEnv
     env = IrrigationEnv(randomize=False)
+    obs, _ = env.reset(seed=0)
+    agent_grid = obs[:PER_AGENT_BLOCK_END].reshape(N_AGENTS, V28_N_AGENT_FEAT)
+    overshoot_at_reset = agent_grid[:, 8]
+    assert overshoot_at_reset.max() < 0.01, (
+        f"x1_overshoot_norm at reset should be ~0 (x1 starts at FC); "
+        f"max value seen: {overshoot_at_reset.max():.4f}."
+    )
+
+
+def test_x1_overshoot_feature_nonzero_when_above_FC():
+    """After pumping max irrigation, at least some agents should show x1 > FC.
+
+    The wet-year scenario plus max irrigation should drive some agents into
+    overshoot territory.  Verifies the feature reflects the FC threshold.
+    """
+    from src.rl.gym_env import IrrigationEnv
+    env = IrrigationEnv(randomize=False, curriculum_warmup_steps=0)
+    env.reset(seed=0)
+    env._year = 2024   # wet-year climate
+    env._climate = __import__('climate_data').extract_scenario(
+        __import__('climate_data').load_cleaned_data(),
+        2024,
+        __import__('soil_data').get_crop('rice'),
+    )
+    # Force re-extract precomputed for the wet year via re-reset using
+    # the same year (won't re-randomise since we override post-reset)
+    # Simpler: pump irrigation for several days and see x1 rise.
+    rng = np.random.default_rng(0)
+    saw_overshoot = False
+    for _ in range(15):
+        action = np.ones(env.N, dtype=np.float32)   # max irrigation request
+        obs, _, _, _, _ = env.step(action)
+        agent_grid = obs[:PER_AGENT_BLOCK_END].reshape(N_AGENTS, V28_N_AGENT_FEAT)
+        if agent_grid[:, 8].max() > 0.0:
+            saw_overshoot = True
+            break
+    assert saw_overshoot, (
+        "After 15 days of max irrigation, at least some agent should have "
+        "x1_overshoot_norm > 0.  Check that the feature is wired up correctly."
+    )
+
+
+def test_x1_overshoot_feature_matches_definition():
+    """x1_overshoot_norm[n] should equal max(x1[n]/FC - 1, 0), clipped to [0,1].
+
+    Verify the feature is the same quantity used in the r6 reward formula
+    (max(x1 - FC, 0)/FC), not some accidental variant.
+    """
+    from src.rl.gym_env import IrrigationEnv, _FC_MM
+    env = IrrigationEnv(randomize=False, curriculum_warmup_steps=0)
+    env.reset(seed=0)
+    rng = np.random.default_rng(0)
+
+    for step in range(20):
+        action = rng.uniform(0.5, 1.0, (env.N,)).astype(np.float32)
+        obs, _, _, _, _ = env.step(action)
+
+        x1 = env._abm.x1
+        agent_grid = obs[:PER_AGENT_BLOCK_END].reshape(N_AGENTS, V28_N_AGENT_FEAT)
+        obs_overshoot = agent_grid[:, 8]
+
+        expected = np.clip(
+            np.maximum(x1 - _FC_MM, 0.0) / _FC_MM,
+            0.0, 1.0,
+        ).astype(np.float32)
+
+        np.testing.assert_allclose(
+            obs_overshoot, expected, atol=1e-5,
+            err_msg=f"x1_overshoot_norm mismatch at step {step}",
+        )
+
+
+# ── v2.8 NEW: curriculum tests ───────────────────────────────────────────────
+def test_curriculum_truncates_short_episodes_during_warmup():
+    """During the warmup window, episodes must truncate at curriculum_short_len."""
+    from src.rl.gym_env import IrrigationEnv
+    env = IrrigationEnv(
+        randomize=False,
+        curriculum_warmup_steps=200,   # tiny warmup window for testing
+        curriculum_short_len=20,
+    )
     env.reset()
-    env._budget_mm = 0.5   # only 0.5 mm of total budget
+    action = np.ones(env.N, dtype=np.float32)
 
-    action = np.ones(env.N, dtype=np.float32)   # max irrigation request
+    # Step until episode ends
+    steps = 0
+    while True:
+        obs, r, term, trunc, info = env.step(action)
+        steps += 1
+        if term or trunc:
+            break
+        if steps > 100:
+            pytest.fail("Episode did not end within 100 steps — curriculum broken")
 
-    # First step: should NOT terminate, even though budget exhausts in
-    # one step because mean(action × UB_MM) = 12 mm vs 0.5 mm remaining.
+    assert steps == 20, (
+        f"Curriculum (short=20) should truncate after 20 steps; got {steps}. "
+        f"truncated={trunc}, terminated={term}."
+    )
+
+
+def test_curriculum_switches_to_full_after_warmup():
+    """After warmup_steps env transitions, episodes should run full 93 days."""
+    from src.rl.gym_env import IrrigationEnv
+    env = IrrigationEnv(
+        randomize=False,
+        curriculum_warmup_steps=20,
+        curriculum_short_len=10,
+    )
+    env.reset()
+    action = np.ones(env.N, dtype=np.float32)
+
+    # Burn through warmup (20 transitions = 2 short episodes of 10 steps each)
+    while env._global_step_count < 20:
+        obs, r, term, trunc, info = env.step(action)
+        if term or trunc:
+            env.reset()
+
+    # Now reset for a fresh post-warmup episode
+    env.reset()
+    assert env._truncation_day == 93, (
+        f"After warmup, _truncation_day should be 93; got {env._truncation_day}"
+    )
+
+    # Step through the full season and confirm it doesn't truncate until day 93
+    steps_in_episode = 0
+    while True:
+        obs, r, term, trunc, info = env.step(action)
+        steps_in_episode += 1
+        if term or trunc:
+            break
+        if steps_in_episode > 100:
+            pytest.fail("Post-warmup episode did not end within 100 steps")
+    assert steps_in_episode == 93, (
+        f"Post-warmup episode should run 93 days; got {steps_in_episode}."
+    )
+
+
+def test_curriculum_disabled_when_warmup_zero():
+    """curriculum_warmup_steps=0 disables the curriculum (always full episodes)."""
+    from src.rl.gym_env import IrrigationEnv
+    env = IrrigationEnv(
+        randomize=False,
+        curriculum_warmup_steps=0,
+        curriculum_short_len=60,   # would be used if curriculum were active
+    )
+    env.reset()
+    assert env._truncation_day == 93, (
+        f"With curriculum_warmup_steps=0, episodes should always be 93 days; "
+        f"got _truncation_day={env._truncation_day}"
+    )
+
+
+def test_episode_runs_full_season_after_budget_exhaustion():
+    """v2.7 behaviour preserved: budget exhaustion does NOT terminate."""
+    from src.rl.gym_env import IrrigationEnv
+    env = IrrigationEnv(randomize=False, curriculum_warmup_steps=0)
+    env.reset()
+    env._budget_mm = 0.5
+
+    action = np.ones(env.N, dtype=np.float32)
     obs, reward, terminated, truncated, info = env.step(action)
     assert not terminated, (
-        "v2.7: budget exhaustion must NOT terminate the episode "
-        "(terminated should always be False)."
+        "v2.8: budget exhaustion must NOT terminate the episode."
     )
     assert not truncated, (
-        "Episode should not be truncated after only 1 step (season is 93 days)."
+        "Episode should not be truncated after 1 step (season is 93 days)."
     )
-    assert info['water_used_mm'] <= 0.5 + 1e-6, (
-        f"Cumulative water {info['water_used_mm']:.6f} must not exceed "
-        f"budget 0.5 mm — the per-step clip should enforce this."
-    )
+    assert info['water_used_mm'] <= 0.5 + 1e-6
 
-    # Keep stepping for 91 more days; episode must continue.
-    # After the first step above _day = 1, so 91 more steps brings _day to 92.
+    # Step through remaining 91 days; total = 92 steps so far
     for d in range(91):
         obs, r, term, trunc, info = env.step(action)
-        assert not term, f"Should not terminate at day {d+2} (no early termination in v2.7)."
+        assert not term
 
-    # On the 93rd step total (_day becomes 93 == _K), truncated must fire.
+    # Step 93: must truncate
     obs, r, term, trunc, info = env.step(action)
     assert trunc, "By day 93 the episode must be truncated (season end)."
-    assert not term, "Even at season end, terminated should be False in v2.7."
+    assert not term, "Even at season end, terminated should be False in v2.8."
 
 
 def test_water_clipped_at_budget():
-    """The env clip must prevent water_used from exceeding budget_total.
-
-    Pump the env at maximum irrigation for the full season; water_used
-    must equal budget exactly (within floating-point tolerance) and never
-    exceed it.
-    """
+    """Cumulative water never exceeds budget; equals budget after max irr."""
     from src.rl.gym_env import IrrigationEnv
-    env = IrrigationEnv(randomize=False)
+    env = IrrigationEnv(randomize=False, curriculum_warmup_steps=0)
     env.reset()
     full_budget = env._budget_mm
     action = np.ones(env.N, dtype=np.float32)
@@ -265,8 +357,7 @@ def test_water_clipped_at_budget():
         if trunc:
             break
 
-    # After 93 days at max irrigation, cumulative water should equal budget.
     assert abs(info['water_used_mm'] - full_budget) < 1e-3, (
-        f"Cumulative water {info['water_used_mm']:.4f} should equal "
-        f"budget {full_budget:.4f} after a season of max irrigation."
+        f"After 93 days of max irrigation, cumulative water should equal "
+        f"budget {full_budget:.4f}; got {info['water_used_mm']:.4f}"
     )
