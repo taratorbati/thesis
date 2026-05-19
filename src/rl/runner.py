@@ -1,28 +1,34 @@
 # =============================================================================
-# src/rl/runner.py  v2.8
+# src/rl/runner.py  v2.8.1
 # Inference runner for trained SAC models.
 #
 # Loads a trained SB3 SAC model (v2.8 default, v2.7 legacy, v2.6 legacy, or
 # pre-VDN monolithic), runs it through the full ABM season, and saves
 # results in the same format as the MPC runner.
 #
-# v2.8 changes:
-#   - Critic-arch detection now recognises FIVE input dimensions:
-#         dim=67, flat       → CTDESACPolicy            (v2.8, current default)
-#         dim=66, flat       → V27CTDESACPolicy         (v2.7)
-#         dim=63, wrapped    → WrappedVDNCTDESACPolicy  (v2.6 best_model.zip)
-#         dim=63, flat       → WrappedVDNCTDESACPolicy  (v2.6 alt, defensive)
-#         dim=837, flat      → MonolithicCTDESACPolicy  (pre-VDN)
-#   - _build_obs() branches on self._obs_layout to produce 1227-dim (v2.8,
-#     9 features/agent), 1097-dim (v2.7, 8 features/agent), or 707-dim
-#     (v2.6, 5 features/agent) observations.
+# v2.8.1 fix (obs normalisation — critical):
+#   All dynamic per-agent features now match gym_env.py _build_obs() exactly.
+#   The previous version had wrong formulas for x1_norm, x5_norm, x4_norm,
+#   and x3, causing the inference policy to receive a different input
+#   distribution than it was trained on.
 #
-# burn_rate is derived from (budget_total - budget_remaining) / budget_total
-# rather than from an internal _water_used accumulator.
+#   Corrected formulas (mirror gym_env.py line-for-line):
+#     x1_norm  = clip((x1 - WP) / (FC - WP), 0.0, 1.5)   [was: x1 / FC]
+#     x5_norm  = clip(x5 / X5_REF,            0.0, 2.0)   [was: x5/X5_REF, no clip]
+#     x4_norm  = clip(x4 / X4_REF,            0.0, 1.5)   [was: x4/X4_REF, no clip]
+#     x3       = clip(x3,                      0.0, 2.0)   [was: x3, no clip]
 #
-# Noisy forecast support (unchanged):
-#   forecast_mode='noisy' injects AR(1)-correlated multiplicative noise
-#   into the 48 forecast dims.  The ABM transition always uses true climate.
+#   The WP offset in x1_norm is the most consequential fix: at x1 = WP
+#   (80 mm) the old runner produced 0.57 while the env produced 0.0;
+#   they agreed only at x1 = FC (140 mm).
+#
+#   reset() now stores self._wp_total and self._x1_range alongside
+#   self._fc_total so _build_obs() can apply the correct formula.
+#
+# v2.8 changes (unchanged):
+#   - Five-way critic-arch detection for checkpoint auto-loading.
+#   - _build_obs() branches on self._obs_layout (v28/v27/v26).
+#   - Noisy forecast support via AR(1) NoisyForecast.
 # =============================================================================
 
 import io
@@ -56,13 +62,12 @@ def _detect_critic_arch(model_path: Path):
     -------
     (int, str)
         input_dim   : first Linear layer's input dimension
-                       67  → v2.8 VDN factorised (9 feat + 57 glob + 1 act)
-                       66  → v2.7 VDN factorised (8 feat + 57 glob + 1 act)
-                       63  → v2.6 VDN factorised (5 feat + 57 glob + 1 act)
-                       837 → pre-VDN monolithic (obs 707 + actions 130)
-        key_format  : 'flat'    → critic.qf0.0.weight  (nn.Sequential subclass)
-                      'wrapped' → critic.qf0.local_q_net.0.weight
-                                  (nn.Module + wrapper)
+                       67  -> v2.8 VDN factorised (9 feat + 57 glob + 1 act)
+                       66  -> v2.7 VDN factorised (8 feat + 57 glob + 1 act)
+                       63  -> v2.6 VDN factorised (5 feat + 57 glob + 1 act)
+                       837 -> pre-VDN monolithic (obs 707 + actions 130)
+        key_format  : 'flat'    -> critic.qf0.0.weight
+                      'wrapped' -> critic.qf0.local_q_net.0.weight
     """
     with zipfile.ZipFile(str(model_path)) as zf:
         with zf.open('policy.pth') as f:
@@ -88,20 +93,11 @@ def _detect_critic_input_dim(model_path: Path) -> int:
 def _load_sac_model(model_path: Path, device: str = 'cpu'):
     """Load a SAC model, auto-selecting the matching policy class.
 
-    Five known checkpoint variants:
-      dim=67,  flat     → CTDESACPolicy            (v2.8 — DEFAULT)
-      dim=66,  flat     → V27CTDESACPolicy         (v2.7)
-      dim=63,  wrapped  → WrappedVDNCTDESACPolicy  (v2.6 best_model.zip)
-      dim=63,  flat     → WrappedVDNCTDESACPolicy  (v2.6 alt-key, defensive)
-      dim=837, flat     → MonolithicCTDESACPolicy  (pre-VDN)
-
     Returns
     -------
     (SAC, str, str)
         model, arch_label, obs_layout
-        obs_layout: 'v28' (1227-dim, 9 feat/agent),
-                    'v27' (1097-dim, 8 feat/agent),
-                    'v26' (707-dim, 5 feat/agent).
+        obs_layout: 'v28', 'v27', or 'v26'.
     """
     dim, key_fmt = _detect_critic_arch(model_path)
     if dim == 837:
@@ -110,24 +106,24 @@ def _load_sac_model(model_path: Path, device: str = 'cpu'):
         obs_layout   = 'v26'
     elif dim == 63 and key_fmt == 'wrapped':
         policy_class = WrappedVDNCTDESACPolicy
-        label        = 'VDN factorised – v2.6 (local_q_net wrapper)'
+        label        = 'VDN factorised - v2.6 (local_q_net wrapper)'
         obs_layout   = 'v26'
     elif dim == 63 and key_fmt == 'flat':
         policy_class = WrappedVDNCTDESACPolicy
-        label        = 'VDN factorised – v2.6 (flat keys, treated as legacy)'
+        label        = 'VDN factorised - v2.6 (flat keys, treated as legacy)'
         obs_layout   = 'v26'
     elif dim == 66 and key_fmt == 'flat':
         policy_class = V27CTDESACPolicy
-        label        = 'VDN factorised – v2.7 (8 features/agent)'
+        label        = 'VDN factorised - v2.7 (8 features/agent)'
         obs_layout   = 'v27'
     elif dim == 67 and key_fmt == 'flat':
         policy_class = CTDESACPolicy
-        label        = 'VDN factorised – v2.8 (9 features/agent)'
+        label        = 'VDN factorised - v2.8 (9 features/agent)'
         obs_layout   = 'v28'
     else:
         raise ValueError(
             f"Unrecognised critic architecture: dim={dim}, key_format={key_fmt!r}. "
-            f"Expected (837, flat), (63, wrapped), (63, flat), (66, flat), or (67, flat)."
+            f"Expected (837,flat), (63,wrapped), (63,flat), (66,flat), or (67,flat)."
         )
     model = SAC.load(
         str(model_path),
@@ -141,21 +137,20 @@ DEFAULT_FORECAST_HORIZON = 8
 
 
 class RLController(Controller):
-    """Controller wrapping a trained SAC model for inference (v2.8).
+    """Controller wrapping a trained SAC model for inference (v2.8.1).
 
-    Builds the observation in the layout matching the checkpoint's training
-    architecture (v2.8 = 1227-dim, v2.7 = 1097-dim, v2.6 = 707-dim) and
-    queries the SAC policy to produce a 130-dim irrigation action.
+    Builds the observation matching the checkpoint's training architecture
+    using formulas that exactly mirror gym_env.py _build_obs() (v2.8.1 fix).
 
     Parameters
     ----------
     model_path : str or Path
     deterministic : bool
-    forecast_horizon : int  (default 8 — must match training)
+    forecast_horizon : int  (default 8)
     forecast_mode : str  ('perfect' or 'noisy')
-    noise_sigma : float  (base AR(1) std at 1-day lead; default 0.15)
+    noise_sigma : float  (AR(1) base std; default 0.15)
     noise_rho   : float  (AR(1) persistence; default 0.6)
-    noise_seed  : int or None  (RNG seed for NoisyForecast; match MPC's 42)
+    noise_seed  : int or None
     verbose : bool
     """
 
@@ -196,6 +191,7 @@ class RLController(Controller):
                 'v26': '707-dim, 5 features/agent',
             }
             print(f"  Observation layout = {obs_layout} ({layout_desc[obs_layout]})")
+            print(f"  Obs normalisation:  v2.8.1 (matches gym_env.py exactly)")
 
         self._inference_times = []
         self._noisy_forecast = None
@@ -211,9 +207,8 @@ class RLController(Controller):
         self._season_days = season_days
         self._budget_total = float(budget_total)
 
-        # Static topographic features.  v2.8 uses all four (elev + Nr + Nr_internal
-        # + n_upstream), v2.7 uses all four, v2.6 uses elev_norm only.  We compute
-        # all four unconditionally and branch in _build_obs().
+        # Static topographic features (all versions need elev_norm; v2.7/v2.8
+        # additionally need Nr_norm, Nr_internal_norm, n_upstream_norm).
         N = self._N
         self._elev_norm = terrain['gamma_flat'].astype(np.float32)
         self._Nr_norm = np.array(
@@ -230,7 +225,14 @@ class RLController(Controller):
                 _ups[m_dst] += 1
         self._n_upstream_norm = (_ups / 8.0).astype(np.float32)
 
-        self._fc_total = crop['theta6'] * crop['theta5']
+        # ── soil-moisture thresholds (v2.8.1 fix) ────────────────────────────
+        # Mirror gym_env.py:
+        #   _FC_MM = crop['theta6'] * crop['theta5']
+        #   _WP_MM = crop['theta2'] * crop['theta5']
+        self._fc_total = crop['theta6'] * crop['theta5']          # FC in mm
+        self._wp_total = crop['theta2'] * crop['theta5']          # WP in mm
+        self._x1_range = max(self._fc_total - self._wp_total, 1e-6)  # FC - WP
+
         self._u_prev = np.zeros(self._N)
 
         from src.precompute import get_precomputed
@@ -271,37 +273,51 @@ class RLController(Controller):
         return u
 
     def _build_obs(self, day, state, budget_remaining):
-        """Construct the observation vector matching the checkpoint version.
+        """Construct the obs vector matching the checkpoint version.
 
-        v2.8 layout (1227-dim): per-agent block 9 × 130 = 1170, agent-major:
-          [x1_norm, x5_norm, x4_norm, x3,
-           elev_norm, Nr_norm, Nr_internal_norm, n_upstream_norm,
-           x1_overshoot_norm]
-        v2.7 layout (1097-dim): per-agent block 8 × 130 = 1040, agent-major:
-          [x1_norm, x5_norm, x4_norm, x3,
-           elev_norm, Nr_norm, Nr_internal_norm, n_upstream_norm]
-        v2.6 layout (707-dim):  per-agent block 5 × 130 = 650, agent-major:
-          [x1_norm, x5_norm, x4_norm, x3, elev_norm]
+        Dynamic feature formulas — identical to gym_env.py _build_obs():
+          x1_norm  = clip((x1 - WP) / (FC - WP), 0.0, 1.5)
+          x5_norm  = clip(x5 / X5_REF,            0.0, 2.0)
+          x4_norm  = clip(x4 / X4_REF,            0.0, 1.5)
+          x3       = clip(x3,                      0.0, 2.0)
 
-        Scalar block (9, unchanged across versions):
-          [day_frac, budget_frac, budget_total_norm, burn_rate,
-           rain_today, ETc_today, h2, h7, g_base]
-        Forecast block (48, unchanged across versions):
-          rain[0:8], ETc[0:8], rad[0:8], h2[0:8], h7[0:8], g_base[0:8]
+        Per-agent block layout:
+          v2.8 (9 feat, 1170 total): x1_norm x5_norm x4_norm x3
+                                     elev Nr Nr_int n_up x1_overshoot
+          v2.7 (8 feat, 1040 total): x1_norm x5_norm x4_norm x3
+                                     elev Nr Nr_int n_up
+          v2.6 (5 feat,  650 total): x1_norm x5_norm x4_norm x3 elev
+
+        Scalar block (9): day_frac budget_frac budget_total_norm burn_rate
+                          rain_today ETc_today h2 h7 g_base
+        Forecast block (48): rain[0:8] ETc[0:8] rad[0:8] h2[0:8] h7[0:8] g[0:8]
         """
-        N  = self._N
-        fc = self._fc_total
+        fc       = self._fc_total
+        wp       = self._wp_total
+        x1_range = self._x1_range    # FC - WP, pre-computed in reset()
 
-        # Common dynamic features
-        x1_norm = state['x1'] / fc
-        x5_norm = state['x5'] / X5_REF
-        x4_norm = state['x4'] / X4_REF
-        x3      = state['x3']
+        # ── dynamic per-agent features (v2.8.1: all match gym_env.py) ───────
+        x1_norm = np.clip(
+            (state['x1'] - wp) / x1_range,
+            0.0, 1.5,
+        ).astype(np.float32)
 
-        # Per-agent block — agent-major, branch on checkpoint version
+        x5_norm = np.clip(
+            state['x5'] / X5_REF,
+            0.0, 2.0,
+        ).astype(np.float32)
+
+        x4_norm = np.clip(
+            state['x4'] / X4_REF,
+            0.0, 1.5,
+        ).astype(np.float32)
+
+        x3 = np.clip(state['x3'], 0.0, 2.0).astype(np.float32)
+
+        # ── per-agent block — branch on checkpoint version ───────────────────
         if self._obs_layout == 'v28':
             x1_overshoot_norm = np.clip(
-                np.maximum(state['x1'] - fc, 0.0) / fc,
+                np.maximum(state['x1'] - fc, 0.0) / max(fc, 1e-6),
                 0.0, 1.0,
             ).astype(np.float32)
             agent_block = np.stack([
@@ -335,7 +351,7 @@ class RLController(Controller):
                 self._elev_norm,
             ], axis=1).flatten().astype(np.float32)   # (650,)
 
-        # Scalars — same across versions
+        # ── scalar block ─────────────────────────────────────────────────────
         day_frac          = day / self._season_days
         budget_frac       = budget_remaining / max(self._budget_total, 1e-6)
         budget_total_norm = self._budget_total / FULL_SEASON_NEED_MM
@@ -359,6 +375,7 @@ class RLController(Controller):
             rain_today, ETc_today, h2_today, h7_today, g_base_today,
         ], dtype=np.float32)
 
+        # ── forecast block ───────────────────────────────────────────────────
         H   = self.forecast_horizon
         end = min(d + H, self._season_days)
 
@@ -379,9 +396,9 @@ class RLController(Controller):
             rain_fc = _pad(fc_dict['rainfall'])
             ETc_fc  = _pad(fc_dict['ETc'])
             rad_fc  = _pad(fc_dict['radiation'])
-            h2_fc = _pad(self._precomputed.h2[d:end])
-            h7_fc = _pad(self._precomputed.h7[d:end])
-            g_fc  = _pad(self._precomputed.g_base[d:end])
+            h2_fc   = _pad(self._precomputed.h2[d:end])
+            h7_fc   = _pad(self._precomputed.h7[d:end])
+            g_fc    = _pad(self._precomputed.g_base[d:end])
         else:
             rain_fc = _pad(self._climate['rainfall'][d:end])
             ETc_fc  = _pad(self._precomputed.Kc_ET[d:end])
