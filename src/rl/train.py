@@ -1,32 +1,56 @@
-# src/rl/train.py  v2.8.0
+# src/rl/train.py  v2.9.0
 # ─────────────────────────────────────────────────────────────────────────────
-# Changes from v2.7.0  (see change_spec_v28.md for full rationale)
+# v2.9 = v2.7 baseline + Proposal B (AdaptiveLRCallback).
 #
-#  1. Version string bumped to "2.8.0".
+# Exactly ONE change from v2.7:
+#   AdaptiveLRCallback added to the callback stack.
+#   All other hyperparameters, architecture, env, reward, and obs layout
+#   are IDENTICAL to v2.7 (1097-dim obs, 8 features/agent, V27CTDESACPolicy).
 #
-#  2. Curriculum kwargs exposed via train_sac() signature:
-#       curriculum_warmup_steps (default 50_000)
-#       curriculum_short_len    (default 60)
-#     These are passed to IrrigationEnv at construction so each parallel
-#     env knows when to switch from short to full episodes.
+# What AdaptiveLRCallback does (Proposal B):
+#   Monitors a rolling window of critic_loss values.
+#   If rolling mean > CRITIC_LOSS_SPIKE_THRESHOLD (default 50):
+#     → multiply current LR by LR_REDUCTION_FACTOR (default 0.3)
+#     → clamp to LR_FLOOR (default 1e-5)
+#     → log the intervention to console and TensorBoard
+#   If rolling mean < CRITIC_LOSS_RECOVERY_THRESHOLD (default 5)
+#     AND LR was previously reduced:
+#     → restore LR to the scheduled value at the current progress step
+#     → log the recovery
+#   Intervention is rate-limited: minimum INTERVENTION_COOLDOWN_STEPS (default
+#   5000) between successive reductions to prevent oscillation.
 #
-#  3. Default TOTAL_TIMESTEPS reduced from 500_000 to 250_000 based on the
-#     v2.7 seed-0 and seed-1 evaluations: both peaked at step 200k and
-#     degraded thereafter; the EvalCallback captures the peak regardless,
-#     so the 250k → 500k window was wasted compute.  The 250k cap saves
-#     ~50% time per seed and matches what was actually used for seed-1.
+# Motivation (see THESIS_HANDOFF_v3.md §13 for full analysis):
+#   v2.7 and v2.8 both exhibit a critic-loss explosion beginning at step
+#   ~165k (v2.7) / ~195k (v2.8).  The explosion follows the standard
+#   deadly-triad mechanism: overestimated Q values → actor exploits inflated Q
+#   → critic receives larger-variance targets → divergence.  The fixed
+#   ent_coef=0.05 means the entropy brake does not scale with growing |Q|,
+#   so the feedback loop ignites once |actor_loss| crosses ~500.
 #
-#  4. Config dict updated to reflect v2.8 obs (1227-dim), feature count
-#     (9), reward (unchanged 4-term), and curriculum settings.
+#   Proposal B breaks the loop at the first sign of the spike (critic_loss >
+#   50) by reducing LR by 0.7×.  This slows the critic weight update
+#   response to the bad bootstrap target, allowing the replay buffer to
+#   dilute the pathological transitions before they amplify further.
+#   The recovery logic restores LR once critic_loss settles, so the actor
+#   is not permanently handicapped.
 #
-#  All other training logic, hyperparameters, callbacks, and WandB
-#  integration are UNCHANGED from v2.7.
+# Why v2.7 architecture (not v2.8):
+#   v2.8 (curriculum + x1_overshoot) failed because the 50k-step curriculum
+#   biased the policy toward a 60-day spending strategy that the post-warmup
+#   phase never unlearned.  The best_model was captured inside the warmup
+#   window (step 25k) and performs poorly on the full 93-day problem.
+#   v2.9 makes only the stability change to isolate its effect and uses
+#   V27CTDESACPolicy (1097-dim obs) to keep the comparison clean.
+#
+# Obs layout: v2.7 (1097-dim, 8 features/agent) — matches V27CTDESACPolicy.
 # ─────────────────────────────────────────────────────────────────────────────
 
 from __future__ import annotations
 
 import os
 import shutil
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -40,16 +64,12 @@ from stable_baselines3.common.callbacks import (
 )
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-from src.rl.gym_env import (
-    IrrigationEnv,
-    CURRICULUM_WARMUP_STEPS_DEFAULT,
-    CURRICULUM_SHORT_LEN_DEFAULT,
-)
-from src.rl.networks import CTDESACPolicy, make_sac_policy_kwargs
+from src.rl.gym_env import IrrigationEnv
+from src.rl.networks import V27CTDESACPolicy, make_sac_policy_kwargs as make_v27_sac_policy_kwargs
 
-# ── training constants ────────────────────────────────────────────────────────
-TOTAL_TIMESTEPS  = 250_000     # v2.8: reduced from 500k (see header)
-BUFFER_SIZE      = 250_000     # match — no point oversizing buffer
+# ── training constants (identical to v2.7 except version string) ──────────────
+TOTAL_TIMESTEPS  = 250_000
+BUFFER_SIZE      = 250_000
 BATCH_SIZE       = 256
 GAMMA            = 0.99
 TAU              = 0.005
@@ -57,8 +77,7 @@ LR_START         = 3e-4
 LR_END           = 5e-5
 
 ENT_COEF         = 0.05    # fixed (auto-tuning disabled since v2.5)
-
-MAX_GRAD_NORM    = 1.0     # gradient clipping (v2.5)
+MAX_GRAD_NORM    = 1.0
 LEARNING_STARTS  = 1_000
 GRADIENT_STEPS   = 1
 
@@ -69,6 +88,16 @@ CHECKPOINT_FREQ  = 50_000
 ACTOR_HIDDEN  = [128, 128]
 CRITIC_HIDDEN = [256, 256]
 
+# ── Proposal B thresholds ─────────────────────────────────────────────────────
+# These are deliberately conservative so the callback only fires when the
+# explosion is clearly starting, not on routine spikes.
+CRITIC_LOSS_SPIKE_THRESHOLD    = 50.0    # rolling-mean above this → reduce LR
+CRITIC_LOSS_RECOVERY_THRESHOLD = 5.0     # rolling-mean below this → restore LR
+LR_REDUCTION_FACTOR            = 0.3     # multiply LR by this on spike
+LR_FLOOR                       = 1e-5    # never go below this
+INTERVENTION_COOLDOWN_STEPS    = 5_000   # min steps between reductions
+ROLLING_WINDOW                 = 1_000   # steps in rolling-mean window
+
 
 def _make_lr_schedule(lr_start: float, lr_end: float):
     """Linear decay from lr_start (progress=1.0) to lr_end (progress=0.0)."""
@@ -78,7 +107,6 @@ def _make_lr_schedule(lr_start: float, lr_end: float):
 
 
 def _resolve_wandb_api_key() -> str | None:
-    """Try env var → Kaggle secrets → Colab userdata."""
     key = os.environ.get("WANDB_API_KEY")
     if key:
         return key
@@ -153,55 +181,192 @@ class GradClipCallback(BaseCallback):
         return True
 
 
+class AdaptiveLRCallback(BaseCallback):
+    """Proposal B: Reduce LR when critic_loss spikes; restore when it recovers.
+
+    Monitors the rolling mean of critic_loss over the last `window` optimizer
+    steps.  When the rolling mean exceeds `spike_threshold`, the learning rate
+    is multiplied by `reduction_factor` (floored at `lr_floor`).  When it falls
+    back below `recovery_threshold`, the LR is restored to the linear-decay
+    schedule value at the current training progress.
+
+    Parameters
+    ----------
+    lr_schedule : callable
+        The base LR schedule (progress_remaining → lr).  Used for restoration.
+    spike_threshold : float
+        Rolling-mean critic_loss above which LR is reduced.  Default 50.
+    recovery_threshold : float
+        Rolling-mean critic_loss below which LR is restored.  Default 5.
+    reduction_factor : float
+        Multiply current LR by this on spike.  Default 0.3.
+    lr_floor : float
+        Hard lower bound on LR.  Default 1e-5.
+    window : int
+        Rolling-mean window size in optimizer steps.  Default 1000.
+    cooldown_steps : int
+        Minimum env steps between successive LR reductions.  Default 5000.
+    verbose : int
+        0 = silent except on interventions.  1 = log every window.
+    """
+
+    def __init__(
+        self,
+        lr_schedule,
+        spike_threshold: float    = CRITIC_LOSS_SPIKE_THRESHOLD,
+        recovery_threshold: float = CRITIC_LOSS_RECOVERY_THRESHOLD,
+        reduction_factor: float   = LR_REDUCTION_FACTOR,
+        lr_floor: float           = LR_FLOOR,
+        window: int               = ROLLING_WINDOW,
+        cooldown_steps: int       = INTERVENTION_COOLDOWN_STEPS,
+        verbose: int              = 0,
+    ):
+        super().__init__(verbose)
+        self.lr_schedule         = lr_schedule
+        self.spike_threshold     = spike_threshold
+        self.recovery_threshold  = recovery_threshold
+        self.reduction_factor    = reduction_factor
+        self.lr_floor            = lr_floor
+        self.window              = window
+        self.cooldown_steps      = cooldown_steps
+
+        self._critic_loss_buf    = deque(maxlen=window)
+        self._lr_reduced         = False          # currently in a reduced state?
+        self._n_reductions       = 0              # total reduction events
+        self._last_reduction_step = -cooldown_steps  # step of last reduction
+
+    def _current_scheduled_lr(self) -> float:
+        """LR value the base schedule would give at current training progress."""
+        progress = 1.0 - self.num_timesteps / max(self.model._total_timesteps, 1)
+        progress = max(0.0, min(1.0, progress))
+        return float(self.lr_schedule(progress))
+
+    def _set_lr(self, lr: float) -> None:
+        """Write `lr` to all optimizer parameter groups."""
+        for opt in [self.model.policy.actor.optimizer,
+                    self.model.policy.critic.optimizer]:
+            for pg in opt.param_groups:
+                pg['lr'] = lr
+
+    def _get_lr(self) -> float:
+        return float(
+            self.model.policy.actor.optimizer.param_groups[0]['lr']
+        )
+
+    def _on_step(self) -> bool:
+        # critic_loss is logged by SB3 every gradient step into
+        # self.model.logger.  Read it from the locals dict that SB3 provides
+        # to callbacks via self.locals.  Only available after learning_starts.
+        critic_loss = self.locals.get('critic_loss', None)
+        if critic_loss is None:
+            # Try the SB3 internal logger record
+            try:
+                critic_loss = self.model.logger.name_to_value.get(
+                    'train/critic_loss', None
+                )
+            except Exception:
+                pass
+        if critic_loss is None:
+            return True
+
+        self._critic_loss_buf.append(float(critic_loss))
+        if len(self._critic_loss_buf) < self.window:
+            return True
+
+        rolling_mean = float(np.mean(self._critic_loss_buf))
+
+        # ── spike detection → reduce LR ──────────────────────────────────────
+        steps_since_last = self.num_timesteps - self._last_reduction_step
+        if (rolling_mean > self.spike_threshold
+                and steps_since_last >= self.cooldown_steps):
+            current_lr = self._get_lr()
+            new_lr = max(current_lr * self.reduction_factor, self.lr_floor)
+            self._set_lr(new_lr)
+            self._lr_reduced = True
+            self._n_reductions += 1
+            self._last_reduction_step = self.num_timesteps
+
+            # Log to TensorBoard / WandB via SB3 logger
+            self.model.logger.record(
+                "adaptive_lr/event",           float(self._n_reductions))
+            self.model.logger.record(
+                "adaptive_lr/lr_after_reduce", new_lr)
+            self.model.logger.record(
+                "adaptive_lr/rolling_critic",  rolling_mean)
+
+            print(
+                f"[AdaptiveLR] step {self.num_timesteps:>7}: "
+                f"critic_loss rolling={rolling_mean:.1f} > {self.spike_threshold} → "
+                f"LR {current_lr:.2e} → {new_lr:.2e}  "
+                f"(reduction #{self._n_reductions})"
+            )
+
+        # ── recovery detection → restore scheduled LR ─────────────────────────
+        elif self._lr_reduced and rolling_mean < self.recovery_threshold:
+            scheduled_lr = self._current_scheduled_lr()
+            self._set_lr(scheduled_lr)
+            self._lr_reduced = False
+
+            self.model.logger.record(
+                "adaptive_lr/lr_after_restore", scheduled_lr)
+            self.model.logger.record(
+                "adaptive_lr/rolling_critic",   rolling_mean)
+
+            print(
+                f"[AdaptiveLR] step {self.num_timesteps:>7}: "
+                f"critic_loss rolling={rolling_mean:.2f} < {self.recovery_threshold} → "
+                f"LR restored to scheduled {scheduled_lr:.2e}"
+            )
+
+        if self.verbose > 0:
+            self.model.logger.record(
+                "adaptive_lr/rolling_critic_verbose", rolling_mean)
+
+        return True
+
+
 def train_sac(
     seed: int = 0,
     output_dir: str = "results/rl",
     wandb_project: str | None = None,
     total_timesteps: int = TOTAL_TIMESTEPS,
-    curriculum_warmup_steps: int = CURRICULUM_WARMUP_STEPS_DEFAULT,
-    curriculum_short_len:    int = CURRICULUM_SHORT_LEN_DEFAULT,
 ) -> SAC:
-    """Train a SAC agent with the v2.8 environment and hyperparameters.
+    """Train a SAC v2.9 agent (v2.7 + Proposal B adaptive LR).
 
     Parameters
     ----------
     seed : int
-        Random seed for reproducibility.  Run seeds 2-6 for the v2.8 campaign.
+        Random seed.  Use same seeds as v2.7 baseline for paired comparison.
     output_dir : str
-        Directory for model checkpoints and best-model artefacts.
+        Root directory for checkpoints and best-model artefacts.
     wandb_project : str | None
-        WandB project name.  Pass None to disable WandB logging.
+        WandB project name.  None disables WandB logging.
     total_timesteps : int
-        Total environment steps.  Default 250 000 (v2.8 — was 500 000 in v2.7).
-    curriculum_warmup_steps : int
-        Number of env transitions during which episodes are truncated at the
-        short length.  Default 50 000 (= 20% of 250k training budget).  Set to
-        0 to disable the curriculum entirely (full episodes throughout — v2.7
-        baseline behaviour).
-    curriculum_short_len : int
-        Episode length in days during the warmup window.  Default 60.
+        Default 250 000 (same as v2.7/v2.8).
 
     Notes
     -----
-    v2.8 environment changes (gym_env.py):
-        - OBS_DIM 1097 → 1227: per-agent block now has 9 features (was 8).
-          The new feature is x1_overshoot_norm = max(x1-FC, 0)/FC, addressing
-          the v2.7 wet-year x1-conditioning weakness.
-        - Episode-length curriculum: episodes truncate at 60 days for first
-          50 000 env steps, 93 days thereafter.  Reduces critic-target
-          variance during the initial value-function learning phase.
+    Architecture: V27CTDESACPolicy (1097-dim obs, 8 features/agent).
+    This is intentionally identical to v2.7 — only the callback stack differs.
 
-    SAC hyperparameters (unchanged from v2.7):
-        ent_coef=0.05 (fixed), max_grad_norm=1.0, LR 3e-4→5e-5,
-        gradient clipping via GradClipCallback.
+    The single change vs v2.7:
+        AdaptiveLRCallback fires when rolling-1000-step mean critic_loss > 50,
+        reducing LR by 0.7× (floor 1e-5).  Restores when mean drops below 5.
+        Cooldown of 5000 steps between reductions prevents oscillation.
+
+    Falsifiable predictions:
+        - If Proposal B works: critic_loss stays below 200 throughout training;
+          best_model step shifts from step 200k toward step 225-250k.
+        - If Proposal B doesn't work: same explosion pattern as v2.7 but
+          slightly later; best_model step unchanged.
     """
-    run_name = f"sac_v28_seed{seed}"
+    run_name = f"sac_v29_seed{seed}"
     save_dir = Path(output_dir) / run_name
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── config dict for WandB logging ─────────────────────────────────────────
+    # ── config dict ───────────────────────────────────────────────────────────
     config = {
-        "version": "2.8.0",
+        "version": "2.9.0",
         "seed": seed,
         "total_timesteps": total_timesteps,
         "buffer_size": BUFFER_SIZE,
@@ -214,22 +379,21 @@ def train_sac(
         "max_grad_norm": MAX_GRAD_NORM,
         "actor_hidden": ACTOR_HIDDEN,
         "critic_hidden": CRITIC_HIDDEN,
-        # v2.8 environment
-        "obs_dim": 1227,
-        "n_agent_features": 9,
-        "curriculum_warmup_steps": curriculum_warmup_steps,
-        "curriculum_short_len":    curriculum_short_len,
-        "episode_lifecycle": "always run full season after warmup",
-        "reward_terms": "r1+r2+r3+r6 (unchanged from v2.7)",
-        # legacy values still in effect
-        "c_term": 0.0,
-        "alpha5_rl": 0.0,
-        "changes_v28": [
-            "obs_dim 1097→1227: per-agent block 8→9 features",
-            "added x1_overshoot_norm feature: max(x1-FC,0)/FC, in [0,1]",
-            "episode-length curriculum: 60d for first {0}k steps, 93d after".format(
-                curriculum_warmup_steps // 1000),
-            "total_timesteps default reduced 500k→250k (v2.7 peaked at 200k)",
+        # v2.9-specific
+        "obs_dim": 1097,
+        "n_agent_features": 8,
+        "curriculum": "NONE (v2.7 baseline)",
+        "proposal_b": True,
+        "proposal_b_spike_threshold":    CRITIC_LOSS_SPIKE_THRESHOLD,
+        "proposal_b_recovery_threshold": CRITIC_LOSS_RECOVERY_THRESHOLD,
+        "proposal_b_reduction_factor":   LR_REDUCTION_FACTOR,
+        "proposal_b_lr_floor":           LR_FLOOR,
+        "proposal_b_window":             ROLLING_WINDOW,
+        "proposal_b_cooldown_steps":     INTERVENTION_COOLDOWN_STEPS,
+        "changes_vs_v27": [
+            "AdaptiveLRCallback added (Proposal B)",
+            "No curriculum (warmup_steps=0, identical to v2.7)",
+            "No x1_overshoot feature (8 features/agent, identical to v2.7)",
         ],
     }
 
@@ -238,26 +402,20 @@ def train_sac(
     if wandb_project:
         wandb_active = _init_wandb(wandb_project, run_name, config)
 
-    # ── environments ──────────────────────────────────────────────────────────
-    def _make_env():
-        return IrrigationEnv(
-            randomize=True,
-            curriculum_warmup_steps=curriculum_warmup_steps,
-            curriculum_short_len=curriculum_short_len,
-        )
-    train_env = DummyVecEnv([_make_env])
-
-    # Eval env: NO curriculum (full episodes always, so eval is on the same
-    # distribution we ultimately care about).
+    # ── environments (no curriculum — same as v2.7) ───────────────────────────
+    train_env = DummyVecEnv([lambda: IrrigationEnv(
+        randomize=True,
+        curriculum_warmup_steps=0,   # v2.7 behaviour: full episodes throughout
+    )])
     eval_env = DummyVecEnv([lambda: IrrigationEnv(
         randomize=True,
-        curriculum_warmup_steps=0,   # disable curriculum at eval time
+        curriculum_warmup_steps=0,
     )])
     train_env.seed(seed)
     eval_env.seed(seed + 1000)
 
-    # ── policy kwargs ─────────────────────────────────────────────────────────
-    policy_kwargs = make_sac_policy_kwargs(
+    # ── policy (v2.7 architecture — 1097-dim, 8 features/agent) ───────────────
+    policy_kwargs = make_v27_sac_policy_kwargs(
         N=130,
         actor_hidden=ACTOR_HIDDEN,
         critic_hidden=CRITIC_HIDDEN,
@@ -268,7 +426,7 @@ def train_sac(
 
     # ── model ─────────────────────────────────────────────────────────────────
     model = SAC(
-        policy=CTDESACPolicy,
+        policy=V27CTDESACPolicy,
         env=train_env,
         learning_rate=lr_schedule,
         buffer_size=BUFFER_SIZE,
@@ -306,9 +464,25 @@ def train_sac(
         save_path=save_dir,
         verbose=1,
     )
-    grad_clip_callback = GradClipCallback(max_grad_norm=MAX_GRAD_NORM)
-    callbacks = CallbackList([eval_callback, checkpoint_callback,
-                              rotating_buffer_callback, grad_clip_callback])
+    grad_clip_callback   = GradClipCallback(max_grad_norm=MAX_GRAD_NORM)
+    adaptive_lr_callback = AdaptiveLRCallback(
+        lr_schedule=lr_schedule,
+        spike_threshold=CRITIC_LOSS_SPIKE_THRESHOLD,
+        recovery_threshold=CRITIC_LOSS_RECOVERY_THRESHOLD,
+        reduction_factor=LR_REDUCTION_FACTOR,
+        lr_floor=LR_FLOOR,
+        window=ROLLING_WINDOW,
+        cooldown_steps=INTERVENTION_COOLDOWN_STEPS,
+        verbose=0,
+    )
+
+    callbacks = CallbackList([
+        eval_callback,
+        checkpoint_callback,
+        rotating_buffer_callback,
+        grad_clip_callback,
+        adaptive_lr_callback,      # ← the only addition vs v2.7
+    ])
 
     if wandb_active:
         try:
@@ -318,21 +492,28 @@ def train_sac(
                 model_save_freq=CHECKPOINT_FREQ,
                 verbose=0,
             )
-            callbacks = CallbackList([eval_callback, checkpoint_callback,
-                                      rotating_buffer_callback,
-                                      grad_clip_callback, wandb_cb])
+            callbacks = CallbackList([
+                eval_callback,
+                checkpoint_callback,
+                rotating_buffer_callback,
+                grad_clip_callback,
+                adaptive_lr_callback,
+                wandb_cb,
+            ])
         except Exception as e:
             print(f"[WandB] WandbCallback unavailable ({e}); continuing without it.")
 
     # ── train ─────────────────────────────────────────────────────────────────
     print(f"\n{'='*72}")
-    print(f"  SAC training — v2.8.0 — seed {seed}")
-    print(f"  Env: obs_dim=1227 (was 1097), 9 features/agent (was 8)")
-    print(f"       new feature: x1_overshoot_norm = max(x1-FC,0)/FC")
-    print(f"  Curriculum: short episodes (length {curriculum_short_len}) for")
-    print(f"              first {curriculum_warmup_steps:,} env steps, then full 93-day episodes")
-    print(f"  Reward: r1+r2+r3+r6 (unchanged from v2.7)")
-    print(f"  SAC: ent_coef=0.05 fixed, grad_clip=1.0, LR decay 3e-4→5e-5")
+    print(f"  SAC training — v2.9.0 — seed {seed}")
+    print(f"  Architecture: v2.7 (obs_dim=1097, 8 features/agent)")
+    print(f"  Change vs v2.7: AdaptiveLRCallback (Proposal B)")
+    print(f"    spike threshold:    critic_loss rolling-{ROLLING_WINDOW} > {CRITIC_LOSS_SPIKE_THRESHOLD}")
+    print(f"    LR reduction:       ×{LR_REDUCTION_FACTOR} (floor {LR_FLOOR:.0e})")
+    print(f"    recovery threshold: critic_loss rolling-{ROLLING_WINDOW} < {CRITIC_LOSS_RECOVERY_THRESHOLD}")
+    print(f"    cooldown:           {INTERVENTION_COOLDOWN_STEPS} steps between reductions")
+    print(f"  No curriculum (full 93-day episodes throughout)")
+    print(f"  SAC: ent_coef=0.05 fixed, LR decay {LR_START:.0e}→{LR_END:.0e}")
     print(f"  Total steps: {total_timesteps:,}")
     print(f"  Output: {save_dir}")
     print(f"{'='*72}\n")
@@ -359,15 +540,11 @@ def train_sac(
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Train SAC v2.8")
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--output-dir", type=str, default="results/rl")
-    parser.add_argument("--wandb-project", type=str, default=None)
-    parser.add_argument("--total-timesteps", type=int, default=TOTAL_TIMESTEPS)
-    parser.add_argument("--curriculum-warmup-steps", type=int,
-                        default=CURRICULUM_WARMUP_STEPS_DEFAULT)
-    parser.add_argument("--curriculum-short-len", type=int,
-                        default=CURRICULUM_SHORT_LEN_DEFAULT)
+    parser = argparse.ArgumentParser(description="Train SAC v2.9 (v2.7 + Proposal B)")
+    parser.add_argument("--seed",             type=int, default=0)
+    parser.add_argument("--output-dir",       type=str, default="results/rl")
+    parser.add_argument("--wandb-project",    type=str, default=None)
+    parser.add_argument("--total-timesteps",  type=int, default=TOTAL_TIMESTEPS)
     args = parser.parse_args()
 
     train_sac(
@@ -375,6 +552,4 @@ if __name__ == "__main__":
         output_dir=args.output_dir,
         wandb_project=args.wandb_project,
         total_timesteps=args.total_timesteps,
-        curriculum_warmup_steps=args.curriculum_warmup_steps,
-        curriculum_short_len=args.curriculum_short_len,
     )
