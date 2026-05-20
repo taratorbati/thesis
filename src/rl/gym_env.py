@@ -184,14 +184,22 @@ class IrrigationEnv(gym.Env):
         randomize: bool = True,
         curriculum_warmup_steps: int = CURRICULUM_WARMUP_STEPS_DEFAULT,
         curriculum_short_len:    int = CURRICULUM_SHORT_LEN_DEFAULT,
+        use_overshoot_feature:   bool = True,
     ):
         super().__init__()
         self.randomize = randomize
         self._curriculum_warmup_steps = int(curriculum_warmup_steps)
         self._curriculum_short_len    = int(curriculum_short_len)
+        self._use_overshoot_feature   = bool(use_overshoot_feature)
+
+        # obs dim depends on whether x1_overshoot_norm is included:
+        #   use_overshoot_feature=True  (v2.8 default): 9 feat/agent → 1227-dim
+        #   use_overshoot_feature=False (v2.9 / v2.7):  8 feat/agent → 1097-dim
+        _n_feat  = 9 if self._use_overshoot_feature else 8
+        _obs_dim = _n_feat * N_AGENTS + N_GLOBAL_DIMS
 
         self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(OBS_DIM,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(_obs_dim,), dtype=np.float32
         )
         self.action_space = spaces.Box(
             low=0.0, high=1.0, shape=(N_AGENTS,), dtype=np.float32
@@ -351,23 +359,36 @@ class IrrigationEnv(gym.Env):
         # v2.8 NEW: explicit FC-overshoot feature.  Same quantity that
         # appears in r6 = -α6 × mean(this^2) / FC, giving the gradient
         # from r6 a direct, named feature to flow into.
-        x1_overshoot_norm = np.clip(
-            np.maximum(self._abm.x1 - _FC_MM, 0.0) / max(_FC_MM, 1e-6),
-            0.0, 1.0,
-        ).astype(np.float32)
-
-        # Per-agent block: 9 features, agent-major (stack axis=1 + flatten).
-        agent_block = np.stack([
-            x1_norm,
-            x5_norm,
-            x4_norm,
-            x3,
-            _ELEV_NORM,
-            _NR_NORM,
-            _NR_INTERNAL_NORM,
-            _N_UPSTREAM_NORM,
-            x1_overshoot_norm,
-        ], axis=1).flatten().astype(np.float32)   # (1170,)
+        # Only included when use_overshoot_feature=True (v2.8 obs layout).
+        # When False (v2.7/v2.9 obs layout) this block is skipped.
+        if self._use_overshoot_feature:
+            x1_overshoot_norm = np.clip(
+                np.maximum(self._abm.x1 - _FC_MM, 0.0) / max(_FC_MM, 1e-6),
+                0.0, 1.0,
+            ).astype(np.float32)
+            agent_block = np.stack([
+                x1_norm,
+                x5_norm,
+                x4_norm,
+                x3,
+                _ELEV_NORM,
+                _NR_NORM,
+                _NR_INTERNAL_NORM,
+                _N_UPSTREAM_NORM,
+                x1_overshoot_norm,
+            ], axis=1).flatten().astype(np.float32)   # (1170,) v2.8
+        else:
+            # v2.7 / v2.9: 8 features, no overshoot term
+            agent_block = np.stack([
+                x1_norm,
+                x5_norm,
+                x4_norm,
+                x3,
+                _ELEV_NORM,
+                _NR_NORM,
+                _NR_INTERNAL_NORM,
+                _N_UPSTREAM_NORM,
+            ], axis=1).flatten().astype(np.float32)   # (1040,) v2.7
 
         # ── scalar block (unchanged from v2.7) ──────────────────────────────
         day_frac          = self._day / _K
@@ -415,5 +436,9 @@ class IrrigationEnv(gym.Env):
         ]).astype(np.float32)
 
         obs = np.concatenate([agent_block, scalar_block, forecast_block])
-        assert obs.shape == (OBS_DIM,), f"obs shape {obs.shape}, expected ({OBS_DIM},)"
+        _expected = self.observation_space.shape[0]
+        assert obs.shape == (_expected,), (
+            f"obs shape {obs.shape}, expected ({_expected},)  "
+            f"[use_overshoot_feature={self._use_overshoot_feature}]"
+        )
         return obs

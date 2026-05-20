@@ -402,14 +402,16 @@ def train_sac(
     if wandb_project:
         wandb_active = _init_wandb(wandb_project, run_name, config)
 
-    # ── environments (no curriculum — same as v2.7) ───────────────────────────
+    # ── environments (no curriculum, no overshoot feature — v2.7 obs layout) ──
     train_env = DummyVecEnv([lambda: IrrigationEnv(
         randomize=True,
-        curriculum_warmup_steps=0,   # v2.7 behaviour: full episodes throughout
+        curriculum_warmup_steps=0,     # v2.7: full episodes throughout
+        use_overshoot_feature=False,   # v2.9: 8 features/agent, 1097-dim obs
     )])
     eval_env = DummyVecEnv([lambda: IrrigationEnv(
         randomize=True,
         curriculum_warmup_steps=0,
+        use_overshoot_feature=False,   # match train env
     )])
     train_env.seed(seed)
     eval_env.seed(seed + 1000)
