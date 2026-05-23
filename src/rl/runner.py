@@ -178,9 +178,11 @@ class RLController(Controller):
         self.noise_seed = noise_seed
         self.verbose = verbose
 
-        self.model, _arch_label, obs_layout = _load_sac_model(
-            self.model_path, device='cpu'
-        )
+        # v2.10 refactor: model loading is delegated to _load_model() so
+        # subclasses (TQCRLController) can override only the loader without
+        # duplicating the rest of __init__.  Behaviour for SAC checkpoints
+        # is unchanged.
+        self.model, _arch_label, obs_layout = self._load_model()
         self._obs_layout = obs_layout    # 'v28' | 'v27' | 'v26'
 
         if self.verbose:
@@ -198,6 +200,24 @@ class RLController(Controller):
 
         name = f"sac_{'det' if deterministic else 'stoch'}_{forecast_mode}"
         super().__init__(name=name)
+
+    def _load_model(self):
+        """Load the SB3 model checkpoint.
+
+        Default implementation loads a SAC checkpoint via _load_sac_model.
+        Subclasses (e.g. TQCRLController) override this to load other
+        algorithm classes while inheriting the rest of RLController's
+        observation-building and inference logic.
+
+        Returns
+        -------
+        (model, arch_label, obs_layout)
+            model      : the loaded SB3 algorithm instance (must expose
+                         model.predict(obs, deterministic=...))
+            arch_label : human-readable architecture string for logging
+            obs_layout : one of 'v28', 'v27', 'v26'
+        """
+        return _load_sac_model(self.model_path, device='cpu')
 
     def reset(self, terrain, crop, season_days, budget_total, scenario_name=None):
         self._inference_times = []

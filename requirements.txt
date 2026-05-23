@@ -20,6 +20,7 @@ pyyaml>=6.0           # not yet used — for Step D when MPC config moves to YAM
 # Step E (RL):
 # torch>=2.1
 # stable-baselines3>=2.2
+# sb3-contrib>=2.6.0  # provides TQC (used by train_v210_e2.py for v2.10 E2)
 # gymnasium>=0.29
 # tensorboard>=2.15  # optional, for training visualization
 # wandb>=0.16        # optional cloud-sync for long training runs (Kaggle/Colab).
