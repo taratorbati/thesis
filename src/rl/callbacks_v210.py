@@ -52,37 +52,54 @@ from stable_baselines3.common.callbacks import BaseCallback
 # Bias ratio - the cascade diagnostic.
 # -----------------------------------------------------------------------------
 class BiasRatioCallback(BaseCallback):
-    """Compute Q_pred / Realised-return at episode start.
+    """Cascade diagnostic: Q-inflation above the structural entropy baseline.
 
-    Every `eval_freq` env steps, runs `n_eval_episodes` deterministic episodes
-    in the supplied eval_env.  For each episode:
-      - Read Q_pred = critic(s_0, a_0) where a_0 = policy(s_0).
-        For TQC critics, Q_pred = mean over critics and quantiles.
-        For SAC twin critics, Q_pred = min(q1, q2).
-      - Roll out the full episode and record per-step rewards.
-      - Compute R_realised = sum_t gamma^t r_t (discounted return).
-    Logs the mean and std of (Q_pred / R_realised) across episodes to the
-    SB3 logger and optionally to a CSV sidecar.
+    Why the old bias_ratio (Q_pred / R_realised) was misleading
+    ------------------------------------------------------------
+    In this env, per-step rewards are near zero and episodes are 93 steps.
+    The realised discounted return (R_realised) is small and negative (-3 to
+    -8).  Q_pred is large and positive (+300 to +400) due to the structural
+    entropy offset in the soft Bellman equation:
+
+        Q_soft(s, a) = Σ_t γ^t [r_t - α log π(a_t)]
+
+    With α=0.05, 130-dim Gaussian policy (log π ≈ -39 per step), and
+    geometric weight Σγ^t ≈ 60:
+        Q_structural ≈ 60 × 0.05 × 39 = 117
+
+    So a healthy critic should predict Q ≈ Q_structural + discounted_rewards
+    ≈ 117 + (-4) ≈ 113.  When Q_pred ≈ +378, the inflation above structural
+    is +261 units — that's the cascade signal.
+
+    New metrics
+    -----------
+    q_pred_mean : float
+        Mean critic Q-value at episode start.  The key raw number.
+    q_structural : float
+        Estimated structural entropy-term baseline (computed from the
+        current policy entropy at episode start).  This is what Q should be
+        if the critic is well-calibrated to the entropy-regularised problem.
+    q_inflation : float
+        q_pred_mean - q_structural.  Near zero = healthy.
+        Large positive = the bootstrap has compounded far beyond the
+        entropy offset = cascade is active.
+    q_inflation_pct : float
+        100 * q_inflation / |q_structural|.  A normalised version.
+        < 20% = stable.  > 100% = cascade is likely underway.
+    return_realised : float
+        Mean realised discounted return (logged for completeness but
+        don't use it as a ratio denominator — it's too small).
 
     Parameters
     ----------
-    eval_env : gym.Env or VecEnv
-        Environment to evaluate on.  Either a single env or a VecEnv;
-        the callback unwraps a VecEnv if needed.
+    eval_env : DummyVecEnv
+        The evaluation env (separate from training env).
     eval_freq : int
-        How often (in env steps) to compute the diagnostic.  Default 25_000.
+        Steps between measurements.  Default 25_000.
     n_eval_episodes : int
-        Number of episodes per evaluation.  Default 3.
+        Number of episodes per measurement.  Default 3.
     save_path : str or Path or None
-        If not None, append one row per evaluation to
-        `save_path/bias_ratio_log.csv`.
-
-    Notes
-    -----
-    The first evaluation only fires at step >= learning_starts to avoid
-    measuring against an untrained critic.  Use `learning_starts=1000` (the
-    v2.7 default) and the first measurement happens at the first eval_freq
-    boundary >= 1000.
+        Directory for CSV sidecar.
     """
 
     def __init__(
@@ -90,80 +107,89 @@ class BiasRatioCallback(BaseCallback):
         eval_env,
         eval_freq: int = 25_000,
         n_eval_episodes: int = 3,
-        save_path: Optional[str] = None,
+        save_path=None,
         verbose: int = 0,
     ):
         super().__init__(verbose)
-        self.eval_env       = eval_env
-        self.eval_freq      = int(eval_freq)
+        self.eval_env        = eval_env
+        self.eval_freq       = int(eval_freq)
         self.n_eval_episodes = int(n_eval_episodes)
-        self.save_path      = Path(save_path) if save_path is not None else None
+        self.save_path       = Path(save_path) if save_path is not None else None
         if self.save_path is not None:
             self.save_path.mkdir(parents=True, exist_ok=True)
-        self._last_eval_step = 0
-        self._csv_initialised = False
+        self._last_eval_step   = 0
+        self._csv_initialised  = False
 
     def _is_tqc_critic(self) -> bool:
-        """True if the model's critic is a TQC-style quantile critic."""
         critic = getattr(self.model, "critic", None)
         return critic is not None and hasattr(critic, "quantiles_total")
 
     def _predict_q(self, obs: np.ndarray, action: np.ndarray) -> float:
-        """Q-value estimate at (obs, action), reduced to a scalar.
-
-        For TQC: mean over critics and quantiles.
-        For SAC: min over twin Q-nets (clipped double-Q convention).
-        """
+        """Mean Q-prediction at (obs, action)."""
         device = self.model.device
         obs_t    = torch.as_tensor(obs,    dtype=torch.float32, device=device).unsqueeze(0)
         action_t = torch.as_tensor(action, dtype=torch.float32, device=device).unsqueeze(0)
-
         with torch.no_grad():
             if self._is_tqc_critic():
-                # TQC: (1, n_critics, n_quantiles) -> scalar via mean-mean.
-                quantiles = self.model.critic(obs_t, action_t)
-                q_scalar  = quantiles.mean().item()
+                q = self.model.critic(obs_t, action_t).mean().item()
             else:
-                # SAC: tuple of (1, 1) twin-Q tensors -> min.
                 q_tuple = self.model.critic(obs_t, action_t)
-                q_vals  = [q.item() for q in q_tuple]
-                q_scalar = min(q_vals)
-        return float(q_scalar)
+                q = min(v.item() for v in q_tuple)
+        return float(q)
+
+    def _estimate_log_prob(self, obs: np.ndarray) -> float:
+        """Sample the policy log-probability at this obs.
+
+        Used to estimate the structural entropy baseline.  Returns the summed
+        log π across all agents (130 agents × per-agent log π).
+        """
+        device = self.model.device
+        obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
+        with torch.no_grad():
+            _, log_prob = self.model.actor.action_log_prob(obs_t)
+        return float(log_prob.item())
 
     def _unwrap_env(self):
-        """Return a callable that resets and steps a non-vec env."""
-        # eval_env may be a DummyVecEnv with one inner env or a raw Env.
         env = self.eval_env
         if hasattr(env, "envs"):
             return env.envs[0]
         return env
 
-    def _run_one_episode(self) -> tuple[float, float]:
-        """Return (q_pred, r_realised_discounted)."""
+    def _run_one_episode(self):
+        """Run one deterministic episode.
+
+        Returns
+        -------
+        q_pred : float
+            Q-value at episode start.
+        r_realised : float
+            Discounted sum of actual rewards.
+        log_prob_start : float
+            Sum of agent log-probs at episode start (for structural baseline).
+        """
         env   = self._unwrap_env()
         gamma = float(self.model.gamma)
 
         obs, _ = env.reset()
         action, _ = self.model.predict(obs, deterministic=True)
-        q_pred = self._predict_q(obs, action)
+        q_pred        = self._predict_q(obs, action)
+        log_prob_start = self._estimate_log_prob(obs)
 
         discounted_return = 0.0
         discount = 1.0
         done = False
         step = 0
         while not done:
-            obs, reward, terminated, truncated, _info = env.step(action)
+            obs, reward, terminated, truncated, _ = env.step(action)
             discounted_return += discount * float(reward)
             discount *= gamma
             done = bool(terminated or truncated)
             step += 1
             if not done:
                 action, _ = self.model.predict(obs, deterministic=True)
-            # safety cap (full season is 93 days; budget exhaustion no
-            # longer terminates the episode under v2.7+ logic)
             if step > 200:
                 break
-        return q_pred, discounted_return
+        return q_pred, discounted_return, log_prob_start
 
     def _on_step(self) -> bool:
         if self.num_timesteps - self._last_eval_step < self.eval_freq:
@@ -172,44 +198,47 @@ class BiasRatioCallback(BaseCallback):
             return True
         self._last_eval_step = self.num_timesteps
 
-        q_preds  = []
-        returns  = []
+        q_preds, returns, log_probs = [], [], []
         for _ in range(self.n_eval_episodes):
-            q, r = self._run_one_episode()
+            q, r, lp = self._run_one_episode()
             q_preds.append(q)
             returns.append(r)
+            log_probs.append(lp)
 
-        q_preds_a = np.array(q_preds, dtype=np.float64)
-        returns_a = np.array(returns, dtype=np.float64)
+        q_pred_mean   = float(np.mean(q_preds))
+        return_mean   = float(np.mean(returns))
+        lp_mean       = float(np.mean(log_probs))
 
-        # Avoid division by zero - if a return is exactly 0 (unlikely),
-        # mask it out of the ratio computation.
-        valid = np.abs(returns_a) > 1e-9
-        if valid.any():
-            ratios = q_preds_a[valid] / returns_a[valid]
-            ratio_mean = float(np.mean(ratios))
-            ratio_std  = float(np.std(ratios))
+        # Structural entropy baseline: α × Σγ^t × (−log π_start)
+        # −log π is positive for well-calibrated Gaussians (log π < 0).
+        # geometric_weight ≈ 1/(1-γ) capped at episode length 93.
+        gamma = float(self.model.gamma)
+        geom_weight = min(1.0 / max(1.0 - gamma, 1e-6), 93.0)
+        alpha = float(self.model.ent_coef)
+        q_structural = alpha * geom_weight * (-lp_mean)
+
+        q_inflation     = q_pred_mean - q_structural
+        if abs(q_structural) > 1e-9:
+            q_inflation_pct = 100.0 * q_inflation / abs(q_structural)
         else:
-            ratio_mean = float("nan")
-            ratio_std  = float("nan")
+            q_inflation_pct = float("nan")
 
-        q_pred_mean   = float(np.mean(q_preds_a))
-        return_mean   = float(np.mean(returns_a))
-
-        self.model.logger.record("v210/bias_ratio_mean",   ratio_mean)
-        self.model.logger.record("v210/bias_ratio_std",    ratio_std)
-        self.model.logger.record("v210/q_pred_mean",       q_pred_mean)
-        self.model.logger.record("v210/return_realised",   return_mean)
+        self.model.logger.record("v210/q_pred_mean",      q_pred_mean)
+        self.model.logger.record("v210/q_structural",     q_structural)
+        self.model.logger.record("v210/q_inflation",      q_inflation)
+        self.model.logger.record("v210/q_inflation_pct",  q_inflation_pct)
+        self.model.logger.record("v210/return_realised",  return_mean)
+        self.model.logger.record("v210/log_prob_start",   lp_mean)
 
         if self.verbose:
             print(
                 f"[BiasRatio] step {self.num_timesteps:>7}: "
-                f"Q_pred={q_pred_mean:+.2f}  "
-                f"R_real={return_mean:+.2f}  "
-                f"ratio={ratio_mean:.3f}+/-{ratio_std:.3f}"
+                f"Q_pred={q_pred_mean:+.1f}  "
+                f"Q_struct={q_structural:+.1f}  "
+                f"Q_inflation={q_inflation:+.1f} ({q_inflation_pct:+.0f}%)  "
+                f"R_real={return_mean:+.2f}"
             )
 
-        # CSV sidecar
         if self.save_path is not None:
             csv_path = self.save_path / "bias_ratio_log.csv"
             new_file = not csv_path.exists()
@@ -217,18 +246,18 @@ class BiasRatioCallback(BaseCallback):
                 w = csv.writer(f)
                 if new_file or not self._csv_initialised:
                     w.writerow([
-                        "step", "q_pred_mean", "return_realised",
-                        "bias_ratio_mean", "bias_ratio_std",
-                        "n_episodes",
+                        "step", "q_pred_mean", "q_structural", "q_inflation",
+                        "q_inflation_pct", "return_realised", "log_prob_start",
                     ])
                     self._csv_initialised = True
                 w.writerow([
                     self.num_timesteps,
-                    f"{q_pred_mean:.6f}",
-                    f"{return_mean:.6f}",
-                    f"{ratio_mean:.6f}",
-                    f"{ratio_std:.6f}",
-                    self.n_eval_episodes,
+                    f"{q_pred_mean:.4f}",
+                    f"{q_structural:.4f}",
+                    f"{q_inflation:.4f}",
+                    f"{q_inflation_pct:.2f}",
+                    f"{return_mean:.4f}",
+                    f"{lp_mean:.4f}",
                 ])
         return True
 
