@@ -1,24 +1,68 @@
-# src/rl/networks.py  v2.8.0
+# src/rl/networks.py  v2.11.0
 # ─────────────────────────────────────────────────────────────────────────────
-# Changes from v2.7.0  (see change_spec_v28.md for full rationale)
+# Changes from v2.8.0  (see change_spec_v211.md for full rationale)
 #
-#   1. CURRENT (v2.8) per-agent feature count: 8 → 9.
-#        The v2.8 obs adds x1_overshoot_norm as a 9th per-agent feature.
-#        The actor and critic first-layer widths grow accordingly:
-#            PER_AGENT_INPUT_DIM        : 65 → 66
-#            PER_AGENT_CRITIC_INPUT_DIM : 66 → 67
-#            OBS_DIM_DEFAULT            : 1097 → 1227
-#        Hidden widths, activation, twin-Q architecture: unchanged.
+#   v2.11 ADDITION — LayerNorm-regularised VDN critic for cascade prevention.
 #
-#   2. LEGACY CHECKPOINT LOADING PRESERVED for both v2.7 and v2.6.
-#        - v2.7 best_model.zip (8 features/agent, dim=66 critic input):
-#          loaded via _V27SharedActor + _V27FactorizedQNet.
-#        - v2.6 best_model.zip (5 features/agent, dim=63 critic input,
-#          local_q_net wrapper): loaded via _LegacySharedActor +
-#          _WrappedFactorizedCritic.
-#        - pre-VDN monolithic (837-dim flat): MonolithicCTDESACPolicy.
+#   Motivation:
+#     v2.7 SAC exhibits a deadly-triad cascade at step ~155k-170k in which the
+#     critic loss diverges geometrically (~6-10× per 10k steps) and the actor
+#     collapses to a near-uniform policy.  The v2.10 study (E2/E3/E4) showed
+#     that quantile truncation is structurally inert under VDN-sum (E2), naïve
+#     n-step buffers break the soft-Bellman target (E3), and γ-reduction stops
+#     the cascade but breaks credit assignment for the 93-day task (E4).
+#
+#     Yue et al. NeurIPS 2023 ("Understanding, Predicting and Better Resolving
+#     Q-Value Divergence in Offline-RL", arXiv:2310.04411) prove via Neural
+#     Tangent Kernel analysis that LayerNorm in the critic's hidden layers
+#     suppresses the Self-Excite Eigenvalue Measure (SEEM) and reliably
+#     prevents Q-divergence with no detrimental bias on the learned policy.
+#     Nauman et al. RLC 2024 ("Dissecting Deep RL with High Update Ratios:
+#     Combatting Value Overestimation and Divergence", arXiv:2403.05996)
+#     confirm the same effect in *online* RL on the dm_control suite.
+#
+#     v2.11 adds LayerNorm after each hidden Linear layer in the critic
+#     (Yue 2023 placement, before the activation) while preserving the v2.7
+#     observation layout (8 features/agent, 1097-dim obs) and all other
+#     hyperparameters (γ=0.99, α=0.05 fixed, τ=0.005, LR 3e-4→5e-5, 250k
+#     steps).  This is the single experimental variable.
+#
+#   New names exported:
+#     _V211FactorizedQNet              — per-quantile MLP + LayerNorm
+#     _V211FactorizedContinuousCritic  — twin-Q v2.11 critic
+#     V211CTDESACPolicy                — SACPolicy for the v2.11 critic
+#     V211_*                            — dimension constants (mirror V27_*)
+#
+#   Backwards compatibility:
+#     - All v2.6 / v2.7 / v2.8 / v2.10 critic classes and policy classes are
+#       UNCHANGED.  Their state-dict keys are unchanged.
+#     - The v2.11 critic uses the same v2.7 obs layout (8 features/agent,
+#       1097-dim total, 66-dim per-agent critic input), so the runner's
+#       observation builder needs no changes.
+#     - The v2.11 state dict contains LayerNorm parameter keys
+#       (critic.qf{0,1}.{1,4}.{weight,bias}) absent in v2.7.  The runner's
+#       _detect_critic_arch is updated (in src/rl/runner.py) to detect this
+#       and dispatch to V211CTDESACPolicy.
+#
+#   v2.8 changes from v2.7.0  (preserved, see change_spec_v28.md):
+#     1. CURRENT (v2.8) per-agent feature count: 8 → 9.
+#          The v2.8 obs adds x1_overshoot_norm as a 9th per-agent feature.
+#          The actor and critic first-layer widths grow accordingly:
+#              PER_AGENT_INPUT_DIM        : 65 → 66
+#              PER_AGENT_CRITIC_INPUT_DIM : 66 → 67
+#              OBS_DIM_DEFAULT            : 1097 → 1227
+#          Hidden widths, activation, twin-Q architecture: unchanged.
+#
+#     2. LEGACY CHECKPOINT LOADING PRESERVED for both v2.7 and v2.6.
+#          - v2.7 best_model.zip (8 features/agent, dim=66 critic input):
+#            loaded via _V27SharedActor + _V27FactorizedQNet.
+#          - v2.6 best_model.zip (5 features/agent, dim=63 critic input,
+#            local_q_net wrapper): loaded via _LegacySharedActor +
+#            _WrappedFactorizedCritic.
+#          - pre-VDN monolithic (837-dim flat): MonolithicCTDESACPolicy.
 #
 # Critic checkpoint variants (loaded by runner.py):
+#   dim=66, flat, LN   → V211CTDESACPolicy        (v2.11 — LayerNorm critic, NEW)
 #   dim=67, flat       → CTDESACPolicy            (v2.8 — DEFAULT)
 #   dim=66, flat       → V27CTDESACPolicy         (v2.7)
 #   dim=63, wrapped    → WrappedVDNCTDESACPolicy  (v2.6 best_model.zip)
@@ -65,6 +109,17 @@ V27_N_AGENT_FEATURES           = 8
 V27_OBS_DIM                    = V27_N_AGENT_FEATURES * N_AGENTS_DEFAULT + N_GLOBAL_DIMS   # 1097
 V27_PER_AGENT_INPUT_DIM        = V27_N_AGENT_FEATURES + N_GLOBAL_DIMS                       # 65
 V27_PER_AGENT_CRITIC_INPUT_DIM = V27_N_AGENT_FEATURES + N_GLOBAL_DIMS + 1                   # 66
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v2.11 dimensions  (LayerNorm critic, otherwise same layout as v2.7)
+# Per-agent block: 8 features, same as v2.7.  Only the critic's internal
+# architecture differs (LayerNorm inserted after each hidden Linear).  The
+# actor is identical to v2.7's _V27SharedActor.
+# ─────────────────────────────────────────────────────────────────────────────
+V211_N_AGENT_FEATURES           = V27_N_AGENT_FEATURES                                       # 8
+V211_OBS_DIM                    = V27_OBS_DIM                                                # 1097
+V211_PER_AGENT_INPUT_DIM        = V27_PER_AGENT_INPUT_DIM                                    # 65
+V211_PER_AGENT_CRITIC_INPUT_DIM = V27_PER_AGENT_CRITIC_INPUT_DIM                             # 66
 
 # ─────────────────────────────────────────────────────────────────────────────
 # v2.6 LEGACY dimensions  (for loading v2.6 best_model.zip and earlier)
@@ -366,6 +421,93 @@ class _V27FactorizedContinuousCritic(FactorizedContinuousCritic):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+#  v2.11 FACTORIZED CRITIC  (LayerNorm-regularised, 66-dim per-agent input)
+#
+#  Architecture identical to _V27FactorizedQNet EXCEPT a LayerNorm is inserted
+#  after each hidden Linear layer (before the activation).  This follows the
+#  placement recommended by Yue et al. NeurIPS 2023 (Section 4.3) and confirmed
+#  online by Nauman et al. RLC 2024.
+#
+#  Per-quantile (here per-Q) structure for net_arch=[256, 256]:
+#      [0] Linear(66, 256)
+#      [1] LayerNorm(256)     <- NEW in v2.11
+#      [2] ReLU
+#      [3] Linear(256, 256)
+#      [4] LayerNorm(256)     <- NEW in v2.11
+#      [5] ReLU
+#      [6] Linear(256, 1)
+#
+#  State-dict keys: critic.qf{0,1}.{0,3}.{weight,bias} (Linear) and
+#                   critic.qf{0,1}.{1,4}.{weight,bias} (LayerNorm).
+#  The v2.7 critic has no qf{0,1}.1.weight key (index 1 was ReLU, no params).
+#  This is the unique signal the runner uses to dispatch the correct class.
+#
+#  LayerNorm overhead: ~2 × 256 + 2 × 256 = 1024 extra parameters per Q-net.
+#  Twin critic → 2048 extra parameters total.  Trivial compared to the ~85k
+#  parameters in the rest of the per-agent MLP.
+# ═════════════════════════════════════════════════════════════════════════════
+class _V211FactorizedQNet(nn.Sequential):
+    """Q_total = Σ_n Q_local(s_n, g, a_n) with LayerNorm-regularised local Q.
+
+    Same per-agent factorization as _V27FactorizedQNet (sum-decomposition over
+    the 130 agents), but each per-agent MLP has LayerNorm inserted after each
+    hidden Linear, before the activation.  Critically, the LayerNorm is
+    applied PER PER-AGENT INPUT (i.e. the (B*N, hidden_dim) tensor flowing
+    through the MLP), not across agents — this is the standard interpretation
+    of LayerNorm in MLP-based critics.
+    """
+
+    _N_AGENT_FEATURES           = V211_N_AGENT_FEATURES
+    _PER_AGENT_CRITIC_INPUT_DIM = V211_PER_AGENT_CRITIC_INPUT_DIM
+
+    def __init__(
+        self,
+        N: int,
+        net_arch: List[int],
+        activation_fn: Type[nn.Module] = nn.ReLU,
+    ):
+        # SB3 2.6.0's create_mlp natively supports `post_linear_modules`,
+        # which are inserted after each Linear and before the activation.
+        # This is exactly the Yue et al. 2023 LayerNorm placement.
+        layers = create_mlp(
+            input_dim=self._PER_AGENT_CRITIC_INPUT_DIM,
+            output_dim=1,
+            net_arch=net_arch,
+            activation_fn=activation_fn,
+            post_linear_modules=[nn.LayerNorm],
+        )
+        super().__init__(*layers)
+        self.N = N
+
+    def forward(self, obs: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+        B = obs.shape[0]
+        N = self.N
+        F = self._N_AGENT_FEATURES
+
+        local_obs       = obs[:, : F * N].reshape(B, N, F)
+        global_block    = obs[:, F * N:]
+        global_expanded = global_block.unsqueeze(1).expand(-1, N, -1)
+        local_actions   = actions.reshape(B, N, 1)
+
+        local_inputs = torch.cat(
+            [local_obs, global_expanded, local_actions], dim=-1
+        )
+        local_inputs_flat = local_inputs.reshape(
+            B * N, self._PER_AGENT_CRITIC_INPUT_DIM
+        )
+        # LayerNorm applies along the feature dim of (B*N, hidden_dim).
+        local_q = nn.Sequential.forward(self, local_inputs_flat).reshape(B, N, 1)
+        q_total = local_q.sum(dim=1)
+        return q_total
+
+
+class _V211FactorizedContinuousCritic(FactorizedContinuousCritic):
+    """FactorizedContinuousCritic for v2.11 checkpoints (LayerNorm critic)."""
+    _N_AGENT_FEATURES = V211_N_AGENT_FEATURES
+    _QNET_CLS         = _V211FactorizedQNet
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 #  v2.8 CTDE SAC POLICY  (DEFAULT — used by train.py for new runs)
 # ═════════════════════════════════════════════════════════════════════════════
 class CTDESACPolicy(SACPolicy):
@@ -408,6 +550,36 @@ class V27CTDESACPolicy(SACPolicy):
         kw = self._update_features_extractor(self.critic_kwargs, features_extractor)
         kw["N"] = get_action_dim(self.action_space)
         return _V27FactorizedContinuousCritic(**kw).to(self.device)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  v2.11 CTDE SAC POLICY  (LayerNorm critic + v2.7 actor)
+#
+#  This is the policy class used for the v2.11 cascade-prevention experiment.
+#  Actor: identical to v2.7 (_V27SharedActor — 8 features/agent, 65-dim per
+#         per-agent input).  No LayerNorm in the actor (Yue 2023 and Nauman
+#         2024 apply LayerNorm to the critic only; adding it to the actor
+#         would alter the policy entropy distribution and conflate effects).
+#  Critic: _V211FactorizedContinuousCritic — twin Q, VDN-summed,
+#          LayerNorm-regularised per Yue NeurIPS 2023 placement.
+# ═════════════════════════════════════════════════════════════════════════════
+class V211CTDESACPolicy(SACPolicy):
+    """CTDESACPolicy for v2.11 (LayerNorm critic, v2.7 actor and obs layout).
+
+    Drop-in replacement for V27CTDESACPolicy.  The actor and the observation
+    layout are unchanged from v2.7; only the critic's hidden-layer
+    regularisation differs.
+    """
+
+    def make_actor(self, features_extractor=None):
+        kw = self._update_features_extractor(self.actor_kwargs, features_extractor)
+        kw["N"] = get_action_dim(self.action_space)
+        return _V27SharedActor(**kw).to(self.device)
+
+    def make_critic(self, features_extractor=None):
+        kw = self._update_features_extractor(self.critic_kwargs, features_extractor)
+        kw["N"] = get_action_dim(self.action_space)
+        return _V211FactorizedContinuousCritic(**kw).to(self.device)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

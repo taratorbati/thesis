@@ -32,6 +32,13 @@ from src.rl.networks import (
     V27CTDESACPolicy,
     _V27SharedActor,
     _V27FactorizedContinuousCritic,
+    # v2.11 (LayerNorm critic)
+    V211_OBS_DIM,
+    V211_N_AGENT_FEATURES,
+    V211_PER_AGENT_CRITIC_INPUT_DIM,
+    V211CTDESACPolicy,
+    _V211FactorizedQNet,
+    _V211FactorizedContinuousCritic,
     # v2.6 legacy
     V26_OBS_DIM,
     V26_N_AGENT_FEATURES,
@@ -310,4 +317,152 @@ def test_v26_legacy_load_shape():
     assert first_layer.weight.shape[1] == V26_PER_AGENT_CRITIC_INPUT_DIM, (
         f"v2.6 critic first-layer input dim is {first_layer.weight.shape[1]}, "
         f"expected {V26_PER_AGENT_CRITIC_INPUT_DIM}."
+    )
+
+
+# ── v2.11: LayerNorm critic shape and forward-pass guard ─────────────────────
+def test_v211_layernorm_critic_shape():
+    """v2.11 critic must build with the 1097-dim obs space (v2.7 layout) and
+    expose a LayerNorm layer at index 1 of each per-agent MLP.
+
+    The state-dict keys of the per-agent Q-net must include a 1-D
+    'qf0.1.weight' entry (LayerNorm gamma).  The v2.7 critic has no key at
+    index 1 (index 1 is ReLU, no params).  This is the unique signal the
+    runner's _detect_critic_arch uses to dispatch the correct policy class.
+    """
+    obs_space = spaces.Box(
+        low=-np.inf, high=np.inf, shape=(V211_OBS_DIM,), dtype=np.float32
+    )
+    act_space = spaces.Box(low=0.0, high=1.0, shape=(N,), dtype=np.float32)
+    extractor = FlattenExtractor(obs_space)
+
+    critic = _V211FactorizedContinuousCritic(
+        observation_space=obs_space,
+        action_space=act_space,
+        net_arch=[256, 256],
+        features_extractor=extractor,
+        features_dim=V211_OBS_DIM,
+        activation_fn=torch.nn.ReLU,
+        n_critics=2,
+        share_features_extractor=True,
+        N=N,
+    )
+
+    # Forward-pass shape
+    obs = torch.randn(B, V211_OBS_DIM)
+    actions = torch.rand(B, N)
+    q1, q2 = critic(obs, actions)
+    assert q1.shape == (B, 1)
+    assert q2.shape == (B, 1)
+
+    # First Linear input dim is 66 (same as v2.7)
+    assert critic.qf0[0].weight.shape[1] == V211_PER_AGENT_CRITIC_INPUT_DIM
+
+    # Layer at index 1 must be LayerNorm (NOT ReLU as in v2.7)
+    assert isinstance(critic.qf0[1], torch.nn.LayerNorm), (
+        f"v2.11 critic qf0[1] should be LayerNorm, got {type(critic.qf0[1])}"
+    )
+
+    # State-dict must contain the 1-D LayerNorm key for runner detection
+    sd = critic.state_dict()
+    assert 'qf0.1.weight' in sd
+    assert sd['qf0.1.weight'].ndim == 1, (
+        "qf0.1.weight should be 1-D LayerNorm gamma, not 2-D Linear weight"
+    )
+    assert sd['qf0.1.weight'].shape == (256,)
+
+
+def test_v211_param_count_vs_v27():
+    """v2.11 critic should have exactly 2048 more params than v2.7 critic
+    (4 LayerNorms total: 2 critics x 2 hidden layers, each adds 2x256 params).
+    """
+    obs_space = spaces.Box(
+        low=-np.inf, high=np.inf, shape=(V211_OBS_DIM,), dtype=np.float32
+    )
+    act_space = spaces.Box(low=0.0, high=1.0, shape=(N,), dtype=np.float32)
+    extractor = FlattenExtractor(obs_space)
+
+    c27 = _V27FactorizedContinuousCritic(
+        observation_space=obs_space, action_space=act_space,
+        net_arch=[256, 256], features_extractor=extractor,
+        features_dim=V211_OBS_DIM, activation_fn=torch.nn.ReLU,
+        n_critics=2, share_features_extractor=True, N=N,
+    )
+    c211 = _V211FactorizedContinuousCritic(
+        observation_space=obs_space, action_space=act_space,
+        net_arch=[256, 256], features_extractor=extractor,
+        features_dim=V211_OBS_DIM, activation_fn=torch.nn.ReLU,
+        n_critics=2, share_features_extractor=True, N=N,
+    )
+
+    n_v27  = sum(p.numel() for p in c27.parameters())
+    n_v211 = sum(p.numel() for p in c211.parameters())
+    diff = n_v211 - n_v27
+    assert diff == 2048, (
+        f"v2.11 - v2.7 param diff is {diff}, expected 2048 "
+        f"(2 critics x 2 LN x 2x256). "
+        f"Has the LayerNorm placement or net_arch changed?"
+    )
+
+
+def test_v211_policy_actor_is_v27_compatible():
+    """V211CTDESACPolicy must use _V27SharedActor (8-feature input).
+
+    The whole point of v2.11 is that the actor and observation layout are
+    UNCHANGED from v2.7 — only the critic's regularisation differs.
+    """
+    obs_space = spaces.Box(
+        low=-np.inf, high=np.inf, shape=(V211_OBS_DIM,), dtype=np.float32
+    )
+    act_space = spaces.Box(low=0.0, high=1.0, shape=(N,), dtype=np.float32)
+
+    # Build a policy via make_sac_policy_kwargs (the runtime path)
+    kwargs = make_sac_policy_kwargs(N=N, actor_hidden=(128, 128), critic_hidden=(256, 256))
+
+    def _lr(progress_remaining):  # SB3 SACPolicy needs lr_schedule
+        return 3e-4
+
+    policy = V211CTDESACPolicy(
+        observation_space=obs_space,
+        action_space=act_space,
+        lr_schedule=_lr,
+        **kwargs,
+    )
+
+    # Actor must be the v2.7 8-feature actor
+    assert isinstance(policy.actor, _V27SharedActor), (
+        f"V211 actor should be _V27SharedActor (8 features), "
+        f"got {type(policy.actor).__name__}"
+    )
+    # Critic must be the v2.11 LayerNorm critic
+    assert isinstance(policy.critic, _V211FactorizedContinuousCritic), (
+        f"V211 critic should be _V211FactorizedContinuousCritic, "
+        f"got {type(policy.critic).__name__}"
+    )
+
+    # Forward pass through the policy
+    obs = torch.randn(B, V211_OBS_DIM)
+    actions = torch.rand(B, N)
+    q1, q2 = policy.critic(obs, actions)
+    assert q1.shape == (B, 1) and q2.shape == (B, 1)
+
+
+def test_v211_layernorm_actually_normalises():
+    """Sanity check: a LayerNorm layer with default affine=True should make
+    its outputs have mean ~0 and variance ~1 across the feature dim BEFORE
+    the learned gamma/beta are applied.  This is just to confirm the
+    structure is wired correctly (not a perf test).
+    """
+    ln = torch.nn.LayerNorm(256)
+    x = torch.randn(32, 256) * 100 + 50   # wildly off-distribution input
+    y = ln(x)
+    # After LayerNorm but before learned scale (defaults gamma=1, beta=0),
+    # mean ~ 0 and std ~ 1 along feature dim.
+    mean = y.mean(dim=-1)
+    std  = y.std(dim=-1, unbiased=False)
+    assert mean.abs().max().item() < 1e-4, (
+        f"LayerNorm output mean not centered: max |mean| = {mean.abs().max().item()}"
+    )
+    assert (std - 1.0).abs().max().item() < 1e-2, (
+        f"LayerNorm output std not unit: max |std-1| = {(std-1.0).abs().max().item()}"
     )

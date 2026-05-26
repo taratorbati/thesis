@@ -49,6 +49,7 @@ from src.rl.gym_env import (
 )
 from src.rl.networks import (
     CTDESACPolicy,              # v2.8 default — dim 67
+    V211CTDESACPolicy,          # v2.11 — LayerNorm critic, dim 66 + LN params
     V27CTDESACPolicy,           # v2.7 — dim 66
     WrappedVDNCTDESACPolicy,    # v2.6 VDN — dim 63
     MonolithicCTDESACPolicy,    # pre-VDN — dim 837
@@ -56,27 +57,36 @@ from src.rl.networks import (
 
 
 def _detect_critic_arch(model_path: Path):
-    """Peek inside a saved SB3 zip and return (input_dim, key_format).
+    """Peek inside a saved SB3 zip and return (input_dim, key_format, has_layernorm).
 
     Returns
     -------
-    (int, str)
+    (int, str, bool)
         input_dim   : first Linear layer's input dimension
                        67  -> v2.8 VDN factorised (9 feat + 57 glob + 1 act)
-                       66  -> v2.7 VDN factorised (8 feat + 57 glob + 1 act)
+                       66  -> v2.7/v2.11 VDN factorised (8 feat + 57 glob + 1 act)
                        63  -> v2.6 VDN factorised (5 feat + 57 glob + 1 act)
                        837 -> pre-VDN monolithic (obs 707 + actions 130)
         key_format  : 'flat'    -> critic.qf0.0.weight
                       'wrapped' -> critic.qf0.local_q_net.0.weight
+        has_layernorm : True if 'critic.qf0.1.weight' is present and 1-D
+                        (signal that LayerNorm was inserted after the first
+                        hidden Linear; v2.11 critic).  v2.7 has no
+                        'qf0.1.weight' (index 1 = ReLU, no params).
     """
     with zipfile.ZipFile(str(model_path)) as zf:
         with zf.open('policy.pth') as f:
             state_dict = torch.load(io.BytesIO(f.read()), map_location='cpu',
                                     weights_only=False)
+    # LayerNorm-after-Linear signature: 'critic.qf0.1.weight' with ndim==1.
+    has_layernorm = (
+        'critic.qf0.1.weight' in state_dict
+        and state_dict['critic.qf0.1.weight'].ndim == 1
+    )
     if 'critic.qf0.0.weight' in state_dict:
-        return state_dict['critic.qf0.0.weight'].shape[1], 'flat'
+        return state_dict['critic.qf0.0.weight'].shape[1], 'flat', has_layernorm
     if 'critic.qf0.local_q_net.0.weight' in state_dict:
-        return state_dict['critic.qf0.local_q_net.0.weight'].shape[1], 'wrapped'
+        return state_dict['critic.qf0.local_q_net.0.weight'].shape[1], 'wrapped', has_layernorm
     raise KeyError(
         f"Cannot detect critic architecture from {model_path}. "
         f"Keys starting with 'critic.qf0': "
@@ -86,7 +96,7 @@ def _detect_critic_arch(model_path: Path):
 
 def _detect_critic_input_dim(model_path: Path) -> int:
     """Backwards-compat wrapper — returns only the input dim."""
-    dim, _ = _detect_critic_arch(model_path)
+    dim, _, _ = _detect_critic_arch(model_path)
     return dim
 
 
@@ -99,7 +109,7 @@ def _load_sac_model(model_path: Path, device: str = 'cpu'):
         model, arch_label, obs_layout
         obs_layout: 'v28', 'v27', or 'v26'.
     """
-    dim, key_fmt = _detect_critic_arch(model_path)
+    dim, key_fmt, has_ln = _detect_critic_arch(model_path)
     if dim == 837:
         policy_class = MonolithicCTDESACPolicy
         label        = 'monolithic (pre-VDN)'
@@ -112,6 +122,12 @@ def _load_sac_model(model_path: Path, device: str = 'cpu'):
         policy_class = WrappedVDNCTDESACPolicy
         label        = 'VDN factorised - v2.6 (flat keys, treated as legacy)'
         obs_layout   = 'v26'
+    elif dim == 66 and key_fmt == 'flat' and has_ln:
+        # v2.11: same obs layout as v2.7 (8 features/agent, 1097-dim) but
+        # the critic has LayerNorm after each hidden Linear layer.
+        policy_class = V211CTDESACPolicy
+        label        = 'VDN factorised - v2.11 (8 features/agent, LayerNorm critic)'
+        obs_layout   = 'v27'
     elif dim == 66 and key_fmt == 'flat':
         policy_class = V27CTDESACPolicy
         label        = 'VDN factorised - v2.7 (8 features/agent)'
@@ -122,8 +138,10 @@ def _load_sac_model(model_path: Path, device: str = 'cpu'):
         obs_layout   = 'v28'
     else:
         raise ValueError(
-            f"Unrecognised critic architecture: dim={dim}, key_format={key_fmt!r}. "
-            f"Expected (837,flat), (63,wrapped), (63,flat), (66,flat), or (67,flat)."
+            f"Unrecognised critic architecture: dim={dim}, key_format={key_fmt!r}, "
+            f"has_layernorm={has_ln}. "
+            f"Expected (837,flat,*), (63,wrapped,*), (63,flat,*), "
+            f"(66,flat,True)=v2.11, (66,flat,False)=v2.7, or (67,flat,*)=v2.8."
         )
     model = SAC.load(
         str(model_path),
