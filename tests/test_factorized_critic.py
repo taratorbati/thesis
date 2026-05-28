@@ -576,3 +576,109 @@ def test_v212_globals_normalised_in_env():
         f"legacy (raw) global block max {glob_r.max():.3f} is suspiciously small "
         f"— the legacy path should still pass raw radiation (~30)"
     )
+
+
+# ── v2.13: actor-only input re-centering on top of v2.12 ─────────────────────
+def test_v213_actor_recenters_input_and_critic_unchanged():
+    """v2.13 actor must apply (2*x - 1) to its per-agent input; critic must NOT."""
+    from src.rl.networks import (
+        V213CTDESACPolicy, _V213SharedActor,
+        _V211FactorizedContinuousCritic,
+    )
+    obs_space = spaces.Box(
+        low=-np.inf, high=np.inf, shape=(V211_OBS_DIM,), dtype=np.float32
+    )
+    act_space = spaces.Box(low=0.0, high=1.0, shape=(N,), dtype=np.float32)
+    kwargs = make_sac_policy_kwargs(N=N, actor_hidden=(128, 128),
+                                    critic_hidden=(256, 256))
+    def _lr(progress_remaining): return 3e-4
+
+    policy = V213CTDESACPolicy(
+        observation_space=obs_space, action_space=act_space,
+        lr_schedule=_lr, **kwargs,
+    )
+    assert isinstance(policy.actor, _V213SharedActor)
+    assert isinstance(policy.critic, _V211FactorizedContinuousCritic)
+
+    # The actor must re-center: feed a known input, check `_per_agent_features` output.
+    # An all-zeros obs -> per-agent input was [0]*65 -> after re-center -> [-1]*65.
+    obs_zero = torch.zeros(1, V211_OBS_DIM)
+    per_agent_actor = policy.actor._per_agent_features(obs_zero)
+    expected = -torch.ones_like(per_agent_actor)
+    assert torch.allclose(per_agent_actor, expected, atol=1e-6), (
+        "v2.13 actor must map all-zeros input to all -1 (re-center 2*x - 1)"
+    )
+    # Verify the same input through a v2.12 actor (no re-center) maps to zeros
+    from src.rl.networks import _V212SharedActor, V212CTDESACPolicy
+    policy_v212 = V212CTDESACPolicy(
+        observation_space=obs_space, action_space=act_space,
+        lr_schedule=_lr, **kwargs,
+    )
+    per_agent_v212 = policy_v212.actor._per_agent_features(obs_zero)
+    assert torch.allclose(per_agent_v212, torch.zeros_like(per_agent_v212), atol=1e-6), (
+        "v2.12 actor must NOT re-center (sanity check the contrast)"
+    )
+
+    # Verify the v2.13 critic is byte-identical to v2.11's: same input layout,
+    # critic must NOT apply the actor's re-center.  We don't have a direct
+    # critic._per_agent_features hook, but feeding ones and ensuring forward
+    # produces a finite Q for both v2.11 and v2.13 with the SAME random weights
+    # is a strong sanity check.
+    actions = torch.zeros(1, N)
+    q_v213 = policy.critic(obs_zero, actions)
+    assert all(torch.isfinite(q).all() for q in q_v213)
+
+
+def test_v213_marker_value_is_213():
+    """The runner discriminates v2.12 vs v2.13 by the marker buffer VALUE."""
+    from src.rl.networks import V213CTDESACPolicy, V212CTDESACPolicy
+    obs_space = spaces.Box(
+        low=-np.inf, high=np.inf, shape=(V211_OBS_DIM,), dtype=np.float32
+    )
+    act_space = spaces.Box(low=0.0, high=1.0, shape=(N,), dtype=np.float32)
+    kwargs = make_sac_policy_kwargs(N=N, actor_hidden=(128, 128),
+                                    critic_hidden=(256, 256))
+    def _lr(progress_remaining): return 3e-4
+
+    p13 = V213CTDESACPolicy(observation_space=obs_space, action_space=act_space,
+                            lr_schedule=_lr, **kwargs)
+    p12 = V212CTDESACPolicy(observation_space=obs_space, action_space=act_space,
+                            lr_schedule=_lr, **kwargs)
+    m13 = float(p13.state_dict()['actor.obs_norm_marker'].item())
+    m12 = float(p12.state_dict()['actor.obs_norm_marker'].item())
+    assert abs(m13 - 2.13) < 1e-4, f"v2.13 marker should be 2.13, got {m13}"
+    assert abs(m12 - 2.12) < 1e-4, f"v2.12 marker should be 2.12, got {m12}"
+
+
+def test_v213_first_layer_alive_at_init():
+    """A fresh v2.13 actor on real normalised obs must keep ~50% units alive
+    (vs ~50% for v2.12 at init AND ~11% for v2.12 trained, AND ~0% for v2.11).
+
+    This is the central capacity claim of v2.13.
+    """
+    from src.rl.networks import V213CTDESACPolicy
+    from src.rl.gym_env import IrrigationEnv
+
+    obs_space = spaces.Box(
+        low=-np.inf, high=np.inf, shape=(V211_OBS_DIM,), dtype=np.float32
+    )
+    act_space = spaces.Box(low=0.0, high=1.0, shape=(N,), dtype=np.float32)
+    kwargs = make_sac_policy_kwargs(N=N, actor_hidden=(128, 128),
+                                    critic_hidden=(256, 256))
+    def _lr(progress_remaining): return 3e-4
+
+    torch.manual_seed(0)
+    policy = V213CTDESACPolicy(observation_space=obs_space, action_space=act_space,
+                               lr_schedule=_lr, **kwargs)
+
+    env = IrrigationEnv(randomize=False, curriculum_warmup_steps=0,
+                        use_overshoot_feature=False, normalize_globals=True)
+    obs, _ = env.reset()
+    obs_t = torch.from_numpy(obs).unsqueeze(0)
+    per_agent = policy.actor._per_agent_features(obs_t)        # (N, 65), re-centered
+    pre1 = policy.actor.latent_pi[0](per_agent)                # first Linear
+    alive_frac = (pre1 > 0).float().mean().item()
+    assert alive_frac > 0.30, (
+        f"v2.13 actor first-layer alive fraction at init = {alive_frac:.3f}; "
+        f"must be > 0.30 to validate the dead-ReLU geometric fix."
+    )

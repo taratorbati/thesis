@@ -312,6 +312,73 @@ class _V212SharedActor(SharedActor):
         self.register_buffer("obs_norm_marker", torch.tensor([2.12]))
 
 
+class _V213SharedActor(_V212SharedActor):
+    """SharedActor for v2.13 (actor-only input re-centering).
+
+    Diagnosis behind v2.13: v2.12 fixed the literal dead-ReLU (LeakyReLU + 
+    normalised globals lifted live-unit count from ~0 to ~14/128), but the
+    actor still ran at ~11% capacity — 117/128 first-layer units sat in 
+    LeakyReLU's negative regime (100x attenuated) on real observations.
+    Trace of the cause:
+
+      - The observation block is 98% non-negative features with E[x] = 0.66
+        per dim, summing to ~43 across 65 dims.
+      - The policy faces strong downward output pressure: the SAC entropy term
+        pulls pre-tanh mu toward 0, AND the overshoot penalty r6 (verified
+        -44.9/season in wet years, 40x any other term) punishes over-irrigation.
+      - With all-positive inputs, the cheapest way to lower output is negative
+        weight row-sums.  The optimiser does exactly this: row-sums went from
+        ~0 at init to -5.3 by 250k, driving W@E[x] = -0.94, which puts 117/128
+        units below zero.  Empirically simulated: under downward output 
+        pressure, raw-positive inputs collapse to 0% alive within a few epochs;
+        centered inputs stay at ~50%.
+
+    The fix: re-center the actor's input to roughly [-1, +1] by mapping the
+    [0, 1.x] per-agent + global block via x' = 2*x - 1, applied as the first
+    op inside the actor's `_per_agent_features`.  The transform is fixed (no
+    parameters), surgical (actor-only — the critic still sees raw [0, 1.x]
+    inputs through its own per-agent path), and adds zero train/eval-skew risk
+    (it's a deterministic linear op baked into the model's forward).
+
+    Empirical validation on the v2.12 trained weights:
+      - alive units: 11% -> 63.6% (Option C in v2.13 comparison)
+      - forecast-rain response (+0.3): +0.001 (broken) -> -0.38 (correct sign)
+
+    The marker is updated to 2.13 so the runner can dispatch to V213CTDESACPolicy.
+    No changes to the critic, the obs builder, the reward, the env, or the LR.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Overwrite the v2.12 marker with the v2.13 value.  Presence + value
+        # let the runner distinguish v2.12 (no re-center) from v2.13 (re-center).
+        self.obs_norm_marker.data = torch.tensor([2.13])
+
+    def _per_agent_features(self, features: torch.Tensor) -> torch.Tensor:
+        """Same reshape as the base SharedActor, then re-center to ~[-1, +1].
+
+        The per-agent block is in [0, 1.5] and the global block in [0, ~1];
+        2*x - 1 maps them to [-1, 2] and [-1, 1] respectively.  Both blocks
+        end up with means close to zero, which is what the dead-ReLU fix needs.
+
+        The critic uses a parallel `_per_agent_features` path on its own
+        `obs->per-agent input` pipeline and is NOT touched by this override.
+        """
+        B = features.shape[0]
+        N = self.N
+        F = self._N_AGENT_FEATURES
+        per_agent = features[:, : F * N].reshape(B, N, F)
+        global_block = features[:, F * N:]
+        global_expanded = global_block.unsqueeze(1).expand(-1, N, -1)
+        combined = torch.cat([per_agent, global_expanded], dim=-1)
+        # v2.13 actor-only re-center: [0, 1.x] -> [-1, +1.x].
+        # Centers the input distribution so the downward output pressure
+        # (entropy + overshoot penalty) no longer drives weight row-sums
+        # uniformly negative and kills the first-layer ReLUs.
+        combined = 2.0 * combined - 1.0
+        return combined.reshape(B * N, self._PER_AGENT_INPUT_DIM)
+
+
 class _LegacySharedActor(SharedActor):
     """SharedActor for v2.6 checkpoints (5 per-agent features, 62-dim input)."""
     _N_AGENT_FEATURES    = V26_N_AGENT_FEATURES
@@ -660,8 +727,39 @@ class V212CTDESACPolicy(SACPolicy):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  v2.6 LEGACY VDN POLICY (for loading v2.6 best_model.zip)
+#  v2.13 CTDE SAC POLICY  (actor-only input re-centering on top of v2.12)
+#
+#  v2.13 = v2.12 critic and actor architecture, with ONE additional surgical
+#  change: the actor re-centers its per-agent input via x' = 2*x - 1 as the
+#  first operation in its forward pass.  This addresses the "actor runs at
+#  ~11% capacity" finding (117/128 first-layer units sat below zero in v2.12)
+#  by killing the all-positive-input × negative-row-sum geometry that drives
+#  the LeakyReLU into its 100x-attenuated regime.
+#
+#  The critic is byte-identical to v2.11 (LayerNorm VDN, cascade-suppressing)
+#  and sees the original [0, 1.x] obs through its OWN per-agent path; only the
+#  actor's forward applies the re-center.  Detection signal for the runner:
+#  `actor.obs_norm_marker` buffer with value 2.13 (vs 2.12 for v2.12).
 # ═════════════════════════════════════════════════════════════════════════════
+class V213CTDESACPolicy(SACPolicy):
+    """CTDESACPolicy for v2.13 (v2.12 + actor-only input re-centering).
+
+    Drop-in for V212CTDESACPolicy.  Same observation dimensionality (1097),
+    same global/forecast normalisation (RAIN_REF/ETC_REF/RAD_REF), same critic
+    (V211 LayerNorm), same LeakyReLU actor activation.  The single change is
+    that the actor re-centers its input from ~[0, 1] to ~[-1, +1] inside
+    `_V213SharedActor._per_agent_features`.
+    """
+
+    def make_actor(self, features_extractor=None):
+        kw = self._update_features_extractor(self.actor_kwargs, features_extractor)
+        kw["N"] = get_action_dim(self.action_space)
+        return _V213SharedActor(**kw).to(self.device)
+
+    def make_critic(self, features_extractor=None):
+        kw = self._update_features_extractor(self.critic_kwargs, features_extractor)
+        kw["N"] = get_action_dim(self.action_space)
+        return _V211FactorizedContinuousCritic(**kw).to(self.device)
 class _FactorizedQNetWrapped(nn.Module):
     """_FactorizedQNet with local_q_net wrapper — matches v2.6 best_model.zip keys."""
 

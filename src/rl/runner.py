@@ -52,6 +52,7 @@ from src.rl.gym_env import (
 )
 from src.rl.networks import (
     CTDESACPolicy,              # v2.8 default — dim 67
+    V213CTDESACPolicy,          # v2.13 — v2.12 + actor-only input re-centering
     V212CTDESACPolicy,          # v2.12 — LayerNorm critic + LeakyReLU actor + normalised obs
     V211CTDESACPolicy,          # v2.11 — LayerNorm critic, dim 66 + LN params
     V27CTDESACPolicy,           # v2.7 — dim 66
@@ -61,42 +62,39 @@ from src.rl.networks import (
 
 
 def _detect_critic_arch(model_path: Path):
-    """Peek inside a saved SB3 zip and return (input_dim, key_format, has_layernorm).
+    """Peek inside a saved SB3 zip and return architecture signature tuple.
 
     Returns
     -------
-    (int, str, bool)
-        input_dim   : first Linear layer's input dimension
-                       67  -> v2.8 VDN factorised (9 feat + 57 glob + 1 act)
-                       66  -> v2.7/v2.11 VDN factorised (8 feat + 57 glob + 1 act)
-                       63  -> v2.6 VDN factorised (5 feat + 57 glob + 1 act)
-                       837 -> pre-VDN monolithic (obs 707 + actions 130)
-        key_format  : 'flat'    -> critic.qf0.0.weight
-                      'wrapped' -> critic.qf0.local_q_net.0.weight
-        has_layernorm : True if 'critic.qf0.1.weight' is present and 1-D
-                        (signal that LayerNorm was inserted after the first
-                        hidden Linear; v2.11 critic).  v2.7 has no
-                        'qf0.1.weight' (index 1 = ReLU, no params).
+    (int, str, bool, float)
+        input_dim     : first Linear layer's input dimension (67=v2.8, 66=v2.7/11/12/13,
+                        63=v2.6, 837=pre-VDN monolithic)
+        key_format    : 'flat' | 'wrapped'
+        has_layernorm : True if critic.qf0.1.weight exists and is 1-D (v2.11+ marker)
+        obs_marker    : float value of actor.obs_norm_marker buffer, or 0.0 if absent.
+                          0.0  -> v2.7 / v2.11 (raw global obs, ReLU actor)
+                          2.12 -> v2.12 (normalised globals + LeakyReLU actor)
+                          2.13 -> v2.13 (v2.12 + actor-only input re-centering)
     """
     with zipfile.ZipFile(str(model_path)) as zf:
         with zf.open('policy.pth') as f:
             state_dict = torch.load(io.BytesIO(f.read()), map_location='cpu',
                                     weights_only=False)
-    # LayerNorm-after-Linear signature: 'critic.qf0.1.weight' with ndim==1.
     has_layernorm = (
         'critic.qf0.1.weight' in state_dict
         and state_dict['critic.qf0.1.weight'].ndim == 1
     )
-    # v2.12 signature: the actor registers an 'actor.obs_norm_marker' buffer,
-    # signalling that the checkpoint was trained on the normalised global/
-    # forecast observation block (and a LeakyReLU actor).  Absent in v2.7/v2.11.
-    has_obs_norm = 'actor.obs_norm_marker' in state_dict
+    # Marker buffer: presence + value distinguishes v2.12 (= 2.12) from v2.13 (= 2.13).
+    if 'actor.obs_norm_marker' in state_dict:
+        obs_marker = float(state_dict['actor.obs_norm_marker'].item())
+    else:
+        obs_marker = 0.0
     if 'critic.qf0.0.weight' in state_dict:
         return (state_dict['critic.qf0.0.weight'].shape[1], 'flat',
-                has_layernorm, has_obs_norm)
+                has_layernorm, obs_marker)
     if 'critic.qf0.local_q_net.0.weight' in state_dict:
         return (state_dict['critic.qf0.local_q_net.0.weight'].shape[1], 'wrapped',
-                has_layernorm, has_obs_norm)
+                has_layernorm, obs_marker)
     raise KeyError(
         f"Cannot detect critic architecture from {model_path}. "
         f"Keys starting with 'critic.qf0': "
@@ -121,7 +119,9 @@ def _load_sac_model(model_path: Path, device: str = 'cpu'):
         normalize_globals: True for v2.12 checkpoints (the global/forecast
         block must be normalised at eval time to match training).
     """
-    dim, key_fmt, has_ln, has_obs_norm = _detect_critic_arch(model_path)
+    dim, key_fmt, has_ln, obs_marker = _detect_critic_arch(model_path)
+    # obs_marker: 0.0=v2.7/v2.11 (raw obs), 2.12=v2.12 (normalised globals),
+    # 2.13=v2.13 (normalised globals + actor-only input re-centering).
     normalize_globals = False
     if dim == 837:
         policy_class = MonolithicCTDESACPolicy
@@ -135,7 +135,16 @@ def _load_sac_model(model_path: Path, device: str = 'cpu'):
         policy_class = WrappedVDNCTDESACPolicy
         label        = 'VDN factorised - v2.6 (flat keys, treated as legacy)'
         obs_layout   = 'v26'
-    elif dim == 66 and key_fmt == 'flat' and has_ln and has_obs_norm:
+    elif dim == 66 and key_fmt == 'flat' and has_ln and obs_marker >= 2.13:
+        # v2.13: v2.12 + actor-only input re-centering (2*x - 1 on the actor's
+        # per-agent input).  Same global/forecast normalisation as v2.12 (the
+        # runner must still divide rainfall/Kc_ET/radiation by their refs).
+        policy_class = V213CTDESACPolicy
+        label        = ('VDN factorised - v2.13 (v2.12 + actor-only input '
+                        're-centering for dead-ReLU capacity recovery)')
+        obs_layout   = 'v27'
+        normalize_globals = True
+    elif dim == 66 and key_fmt == 'flat' and has_ln and obs_marker >= 2.12:
         # v2.12: v2.11 LayerNorm critic + LeakyReLU actor, trained on the
         # NORMALISED global/forecast observation block.  Eval must apply the
         # same normalisation (normalize_globals=True).
@@ -161,10 +170,10 @@ def _load_sac_model(model_path: Path, device: str = 'cpu'):
     else:
         raise ValueError(
             f"Unrecognised critic architecture: dim={dim}, key_format={key_fmt!r}, "
-            f"has_layernorm={has_ln}, has_obs_norm={has_obs_norm}. "
+            f"has_layernorm={has_ln}, obs_marker={obs_marker}. "
             f"Expected (837,flat), (63,wrapped), (63,flat), "
-            f"(66,flat,LN,obsnorm)=v2.12, (66,flat,LN)=v2.11, "
-            f"(66,flat)=v2.7, or (67,flat)=v2.8."
+            f"(66,flat,LN,marker>=2.13)=v2.13, (66,flat,LN,marker>=2.12)=v2.12, "
+            f"(66,flat,LN)=v2.11, (66,flat)=v2.7, or (67,flat)=v2.8."
         )
     model = SAC.load(
         str(model_path),
