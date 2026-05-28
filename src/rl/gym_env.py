@@ -69,6 +69,29 @@ X5_REF              = 50.0    # reference surface ponding (mm)
 FULL_SEASON_NEED_MM = 484.0   # 100% seasonal budget reference (mm)
 FORECAST_H          = 8       # forecast horizon (days)
 
+# ── v2.12 GLOBAL/FORECAST FEATURE NORMALISATION (consumed by runner.py) ───────
+# v2.7..v2.11 fed the global scalar block and the forecast block to the actor
+# with RAW physical magnitudes (rainfall up to ~11 mm in-season / 64 mm in the
+# raw record, Kc_ET up to ~7, radiation up to ~32).  The per-agent dynamic block
+# was already normalised to [0, 1.5], but these raw global features dominated the
+# actor's first-layer pre-activations and (combined with the LayerNorm-bounded
+# critic gradient in v2.11) drove every first-layer ReLU below zero — a verified
+# dead-ReLU collapse (≈0/128 units firing on real observations).  v2.12 divides
+# each raw feature by a physical reference with headroom so all global features
+# land in roughly [0, 1], matching the per-agent block.
+#
+# Denominators are chosen against the full 2000-2025 climate record maxima
+# (rainfall 64.31 mm, radiation 31.69, ET0 7.05) with margin so even unseen
+# extreme years stay <= ~1.0:
+#     rainfall  : / 70.0   (record max 64.31)
+#     Kc_ET     : /  8.0   (record max  7.05)
+#     radiation : / 35.0   (record max 31.69)
+# h2, h7, g_base already live in [0, ~1], so they are left unscaled.
+RAIN_REF = 70.0    # mm/day normaliser for rainfall + rainfall forecast
+ETC_REF  = 8.0     # mm/day normaliser for Kc_ET + Kc_ET forecast
+RAD_REF  = 35.0    # MJ m^-2 d^-1 normaliser for radiation forecast
+NORMALIZE_GLOBALS_DEFAULT = True   # v2.12 default; set False to reproduce v2.7/v2.11 obs
+
 # ── reward weights (unchanged from v2.7) ──────────────────────────────────────
 ALPHA1 = 1.0     # biomass increment
 ALPHA2 = 0.016   # water cost
@@ -185,12 +208,14 @@ class IrrigationEnv(gym.Env):
         curriculum_warmup_steps: int = CURRICULUM_WARMUP_STEPS_DEFAULT,
         curriculum_short_len:    int = CURRICULUM_SHORT_LEN_DEFAULT,
         use_overshoot_feature:   bool = True,
+        normalize_globals:       bool = NORMALIZE_GLOBALS_DEFAULT,
     ):
         super().__init__()
         self.randomize = randomize
         self._curriculum_warmup_steps = int(curriculum_warmup_steps)
         self._curriculum_short_len    = int(curriculum_short_len)
         self._use_overshoot_feature   = bool(use_overshoot_feature)
+        self._normalize_globals       = bool(normalize_globals)
 
         # obs dim depends on whether x1_overshoot_norm is included:
         #   use_overshoot_feature=True  (v2.8 default): 9 feat/agent → 1227-dim
@@ -401,19 +426,28 @@ class IrrigationEnv(gym.Env):
         else:
             burn_rate = 0.0
 
+        # ── scalar block ────────────────────────────────────────────────────
+        # v2.12: rainfall / Kc_ET are divided by physical references so they
+        # sit in ~[0, 1] like the per-agent block.  h2, h7, g_base already in
+        # [0, ~1].  When normalize_globals=False the raw v2.7/v2.11 values are
+        # used (for reproducing / evaluating legacy checkpoints).
+        _rain_s = RAIN_REF if self._normalize_globals else 1.0
+        _etc_s  = ETC_REF  if self._normalize_globals else 1.0
+        _rad_s  = RAD_REF  if self._normalize_globals else 1.0
+
         scalar_block = np.array([
             day_frac,
             budget_frac,
             budget_total_norm,
             burn_rate,
-            float(self._climate['rainfall'][d]),
-            float(p.Kc_ET[d]),
+            float(self._climate['rainfall'][d]) / _rain_s,
+            float(p.Kc_ET[d]) / _etc_s,
             float(p.h2[d]),
             float(p.h7[d]),
             float(p.g_base[d]),
         ], dtype=np.float32)
 
-        # ── forecast block (unchanged from v2.7) ────────────────────────────
+        # ── forecast block (v2.12: same normalisation as the scalar block) ──
         def _fc_slice(arr, start, length):
             arr = np.asarray(arr, dtype=np.float32)
             end = min(start + length, len(arr))
@@ -427,9 +461,9 @@ class IrrigationEnv(gym.Env):
             return chunk
 
         forecast_block = np.concatenate([
-            _fc_slice(self._climate['rainfall'],  d, FORECAST_H),
-            _fc_slice(p.Kc_ET,                    d, FORECAST_H),
-            _fc_slice(self._climate['radiation'], d, FORECAST_H),
+            _fc_slice(self._climate['rainfall'],  d, FORECAST_H) / _rain_s,
+            _fc_slice(p.Kc_ET,                    d, FORECAST_H) / _etc_s,
+            _fc_slice(self._climate['radiation'], d, FORECAST_H) / _rad_s,
             _fc_slice(p.h2,                       d, FORECAST_H),
             _fc_slice(p.h7,                       d, FORECAST_H),
             _fc_slice(p.g_base,                   d, FORECAST_H),

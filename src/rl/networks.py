@@ -278,6 +278,40 @@ class _V27SharedActor(SharedActor):
     _PER_AGENT_INPUT_DIM = V27_PER_AGENT_INPUT_DIM
 
 
+class _V212SharedActor(SharedActor):
+    """SharedActor for v2.12 (8 per-agent features, 65-dim input).
+
+    Two changes vs _V27SharedActor, both targeting the v2.11 dead-ReLU collapse:
+
+      1. The actor's hidden MLP uses LeakyReLU(0.01) instead of ReLU, so a
+         hidden unit whose pre-activation drifts negative still passes a small
+         gradient and can recover, instead of dying permanently.  (The critic
+         keeps plain ReLU + LayerNorm — this change is actor-only.)
+
+      2. A non-learnable buffer ``obs_norm_marker`` is registered so that the
+         evaluation runner can detect, purely from the saved ``policy.pth``
+         state-dict, that this checkpoint was trained on the v2.12 normalised
+         global/forecast observation block (rainfall/Kc_ET/radiation divided by
+         physical references in gym_env.py).  The runner must apply the *same*
+         normalisation at eval time or the actor sees an out-of-distribution
+         observation.  v2.7/v2.11 checkpoints have no such key.
+
+    The per-agent feature count, input dim, hidden widths, mu/log_std heads,
+    action distribution and reshape conventions are all identical to v2.7.
+    """
+    _N_AGENT_FEATURES    = V27_N_AGENT_FEATURES
+    _PER_AGENT_INPUT_DIM = V27_PER_AGENT_INPUT_DIM
+
+    def __init__(self, *args, **kwargs):
+        # Force LeakyReLU for the actor's hidden activation, regardless of the
+        # activation_fn that flows in from policy_kwargs (which controls the
+        # critic).  This keeps the critic on ReLU while the actor uses LeakyReLU.
+        kwargs["activation_fn"] = nn.LeakyReLU
+        super().__init__(*args, **kwargs)
+        # Detection marker (value is informational only; presence is the signal).
+        self.register_buffer("obs_norm_marker", torch.tensor([2.12]))
+
+
 class _LegacySharedActor(SharedActor):
     """SharedActor for v2.6 checkpoints (5 per-agent features, 62-dim input)."""
     _N_AGENT_FEATURES    = V26_N_AGENT_FEATURES
@@ -575,6 +609,49 @@ class V211CTDESACPolicy(SACPolicy):
         kw = self._update_features_extractor(self.actor_kwargs, features_extractor)
         kw["N"] = get_action_dim(self.action_space)
         return _V27SharedActor(**kw).to(self.device)
+
+    def make_critic(self, features_extractor=None):
+        kw = self._update_features_extractor(self.critic_kwargs, features_extractor)
+        kw["N"] = get_action_dim(self.action_space)
+        return _V211FactorizedContinuousCritic(**kw).to(self.device)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  v2.12 CTDE SAC POLICY  (LayerNorm critic + LeakyReLU actor + normalised obs)
+#
+#  v2.12 = v2.11 critic (LayerNorm VDN, cascade-suppressing) PLUS three
+#  actor/observation fixes that together cure the v2.11 dead-ReLU collapse:
+#
+#    (a) Observation fix (in gym_env.py / runner.py): the global scalar block
+#        and the 48-dim forecast block are normalised (rainfall/RAIN_REF,
+#        Kc_ET/ETC_REF, radiation/RAD_REF) so no raw physical magnitude (~10-32)
+#        reaches the actor's first Linear.  This is the root-cause fix: in
+#        v2.11 the unnormalised radiation block contributed ≈ -3.2 to every
+#        first-layer pre-activation, pushing all 128 ReLU units below zero.
+#
+#    (b) Actor activation: LeakyReLU(0.01) (in _V212SharedActor) so units that
+#        drift negative still pass gradient and can recover.
+#
+#    (c) Asymmetric learning rate (set in train_v212.py, not here): the actor
+#        optimiser uses a higher LR than the critic, compensating for the
+#        LayerNorm-bounded critic gradient (the second, independent mechanism
+#        that left the E4/γ=0.98 actor barely modulating even with live ReLUs).
+#
+#  The critic is byte-identical to v2.11 (_V211FactorizedContinuousCritic), so
+#  cascade suppression is preserved.  Detection: the actor carries an
+#  ``obs_norm_marker`` buffer absent from v2.7/v2.11 checkpoints.
+# ═════════════════════════════════════════════════════════════════════════════
+class V212CTDESACPolicy(SACPolicy):
+    """CTDESACPolicy for v2.12 (LayerNorm critic, LeakyReLU actor, normalised obs).
+
+    Drop-in for V211CTDESACPolicy.  Same observation dimensionality (1097) and
+    same critic; the actor uses LeakyReLU and registers a normalisation marker.
+    """
+
+    def make_actor(self, features_extractor=None):
+        kw = self._update_features_extractor(self.actor_kwargs, features_extractor)
+        kw["N"] = get_action_dim(self.action_space)
+        return _V212SharedActor(**kw).to(self.device)
 
     def make_critic(self, features_extractor=None):
         kw = self._update_features_extractor(self.critic_kwargs, features_extractor)

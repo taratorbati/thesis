@@ -46,9 +46,13 @@ from src.rl.gym_env import (
     X4_REF,
     X5_REF,
     FULL_SEASON_NEED_MM,
+    RAIN_REF,
+    ETC_REF,
+    RAD_REF,
 )
 from src.rl.networks import (
     CTDESACPolicy,              # v2.8 default — dim 67
+    V212CTDESACPolicy,          # v2.12 — LayerNorm critic + LeakyReLU actor + normalised obs
     V211CTDESACPolicy,          # v2.11 — LayerNorm critic, dim 66 + LN params
     V27CTDESACPolicy,           # v2.7 — dim 66
     WrappedVDNCTDESACPolicy,    # v2.6 VDN — dim 63
@@ -83,10 +87,16 @@ def _detect_critic_arch(model_path: Path):
         'critic.qf0.1.weight' in state_dict
         and state_dict['critic.qf0.1.weight'].ndim == 1
     )
+    # v2.12 signature: the actor registers an 'actor.obs_norm_marker' buffer,
+    # signalling that the checkpoint was trained on the normalised global/
+    # forecast observation block (and a LeakyReLU actor).  Absent in v2.7/v2.11.
+    has_obs_norm = 'actor.obs_norm_marker' in state_dict
     if 'critic.qf0.0.weight' in state_dict:
-        return state_dict['critic.qf0.0.weight'].shape[1], 'flat', has_layernorm
+        return (state_dict['critic.qf0.0.weight'].shape[1], 'flat',
+                has_layernorm, has_obs_norm)
     if 'critic.qf0.local_q_net.0.weight' in state_dict:
-        return state_dict['critic.qf0.local_q_net.0.weight'].shape[1], 'wrapped', has_layernorm
+        return (state_dict['critic.qf0.local_q_net.0.weight'].shape[1], 'wrapped',
+                has_layernorm, has_obs_norm)
     raise KeyError(
         f"Cannot detect critic architecture from {model_path}. "
         f"Keys starting with 'critic.qf0': "
@@ -96,7 +106,7 @@ def _detect_critic_arch(model_path: Path):
 
 def _detect_critic_input_dim(model_path: Path) -> int:
     """Backwards-compat wrapper — returns only the input dim."""
-    dim, _, _ = _detect_critic_arch(model_path)
+    dim, _, _, _ = _detect_critic_arch(model_path)
     return dim
 
 
@@ -105,11 +115,14 @@ def _load_sac_model(model_path: Path, device: str = 'cpu'):
 
     Returns
     -------
-    (SAC, str, str)
-        model, arch_label, obs_layout
+    (SAC, str, str, bool)
+        model, arch_label, obs_layout, normalize_globals
         obs_layout: 'v28', 'v27', or 'v26'.
+        normalize_globals: True for v2.12 checkpoints (the global/forecast
+        block must be normalised at eval time to match training).
     """
-    dim, key_fmt, has_ln = _detect_critic_arch(model_path)
+    dim, key_fmt, has_ln, has_obs_norm = _detect_critic_arch(model_path)
+    normalize_globals = False
     if dim == 837:
         policy_class = MonolithicCTDESACPolicy
         label        = 'monolithic (pre-VDN)'
@@ -122,6 +135,15 @@ def _load_sac_model(model_path: Path, device: str = 'cpu'):
         policy_class = WrappedVDNCTDESACPolicy
         label        = 'VDN factorised - v2.6 (flat keys, treated as legacy)'
         obs_layout   = 'v26'
+    elif dim == 66 and key_fmt == 'flat' and has_ln and has_obs_norm:
+        # v2.12: v2.11 LayerNorm critic + LeakyReLU actor, trained on the
+        # NORMALISED global/forecast observation block.  Eval must apply the
+        # same normalisation (normalize_globals=True).
+        policy_class = V212CTDESACPolicy
+        label        = ('VDN factorised - v2.12 (8 features/agent, LayerNorm '
+                        'critic, LeakyReLU actor, normalised globals)')
+        obs_layout   = 'v27'
+        normalize_globals = True
     elif dim == 66 and key_fmt == 'flat' and has_ln:
         # v2.11: same obs layout as v2.7 (8 features/agent, 1097-dim) but
         # the critic has LayerNorm after each hidden Linear layer.
@@ -139,16 +161,17 @@ def _load_sac_model(model_path: Path, device: str = 'cpu'):
     else:
         raise ValueError(
             f"Unrecognised critic architecture: dim={dim}, key_format={key_fmt!r}, "
-            f"has_layernorm={has_ln}. "
-            f"Expected (837,flat,*), (63,wrapped,*), (63,flat,*), "
-            f"(66,flat,True)=v2.11, (66,flat,False)=v2.7, or (67,flat,*)=v2.8."
+            f"has_layernorm={has_ln}, has_obs_norm={has_obs_norm}. "
+            f"Expected (837,flat), (63,wrapped), (63,flat), "
+            f"(66,flat,LN,obsnorm)=v2.12, (66,flat,LN)=v2.11, "
+            f"(66,flat)=v2.7, or (67,flat)=v2.8."
         )
     model = SAC.load(
         str(model_path),
         device=device,
         custom_objects={"policy_class": policy_class},
     )
-    return model, label, obs_layout
+    return model, label, obs_layout, normalize_globals
 
 
 DEFAULT_FORECAST_HORIZON = 8
@@ -199,9 +222,16 @@ class RLController(Controller):
         # v2.10 refactor: model loading is delegated to _load_model() so
         # subclasses (TQCRLController) can override only the loader without
         # duplicating the rest of __init__.  Behaviour for SAC checkpoints
-        # is unchanged.
-        self.model, _arch_label, obs_layout = self._load_model()
+        # is unchanged.  v2.12: _load_model may also return a normalize_globals
+        # flag (4-tuple); older overrides returning a 3-tuple still work.
+        _loaded = self._load_model()
+        if len(_loaded) == 4:
+            self.model, _arch_label, obs_layout, normalize_globals = _loaded
+        else:
+            self.model, _arch_label, obs_layout = _loaded
+            normalize_globals = False
         self._obs_layout = obs_layout    # 'v28' | 'v27' | 'v26'
+        self._normalize_globals = bool(normalize_globals)
 
         if self.verbose:
             print(f"  Loaded checkpoint: critic architecture = {_arch_label}")
@@ -211,7 +241,10 @@ class RLController(Controller):
                 'v26': '707-dim, 5 features/agent',
             }
             print(f"  Observation layout = {obs_layout} ({layout_desc[obs_layout]})")
-            print(f"  Obs normalisation:  v2.8.1 (matches gym_env.py exactly)")
+            _normdesc = ('v2.12 (per-agent + normalised global/forecast block)'
+                         if self._normalize_globals
+                         else 'v2.8.1 (per-agent only; raw global/forecast block)')
+            print(f"  Obs normalisation:  {_normdesc}")
 
         self._inference_times = []
         self._noisy_forecast = None
@@ -402,8 +435,15 @@ class RLController(Controller):
         )
 
         d = min(day, self._season_days - 1)
-        rain_today   = float(self._climate['rainfall'][d])
-        ETc_today    = float(self._precomputed.Kc_ET[d])
+        # v2.12: divide raw weather by physical references so the actor sees the
+        # same normalised scale it was trained on.  Legacy checkpoints
+        # (normalize_globals=False) keep the raw magnitudes.
+        _rain_s = RAIN_REF if self._normalize_globals else 1.0
+        _etc_s  = ETC_REF  if self._normalize_globals else 1.0
+        _rad_s  = RAD_REF  if self._normalize_globals else 1.0
+
+        rain_today   = float(self._climate['rainfall'][d]) / _rain_s
+        ETc_today    = float(self._precomputed.Kc_ET[d]) / _etc_s
         h2_today     = float(self._precomputed.h2[d])
         h7_today     = float(self._precomputed.h7[d])
         g_base_today = float(self._precomputed.g_base[d])
@@ -431,16 +471,16 @@ class RLController(Controller):
             fc_dict = self._noisy_forecast(
                 day, self._climate, self._precomputed, H
             )
-            rain_fc = _pad(fc_dict['rainfall'])
-            ETc_fc  = _pad(fc_dict['ETc'])
-            rad_fc  = _pad(fc_dict['radiation'])
+            rain_fc = _pad(fc_dict['rainfall']) / _rain_s
+            ETc_fc  = _pad(fc_dict['ETc']) / _etc_s
+            rad_fc  = _pad(fc_dict['radiation']) / _rad_s
             h2_fc   = _pad(self._precomputed.h2[d:end])
             h7_fc   = _pad(self._precomputed.h7[d:end])
             g_fc    = _pad(self._precomputed.g_base[d:end])
         else:
-            rain_fc = _pad(self._climate['rainfall'][d:end])
-            ETc_fc  = _pad(self._precomputed.Kc_ET[d:end])
-            rad_fc  = _pad(self._climate['radiation'][d:end])
+            rain_fc = _pad(self._climate['rainfall'][d:end]) / _rain_s
+            ETc_fc  = _pad(self._precomputed.Kc_ET[d:end]) / _etc_s
+            rad_fc  = _pad(self._climate['radiation'][d:end]) / _rad_s
             h2_fc   = _pad(self._precomputed.h2[d:end])
             h7_fc   = _pad(self._precomputed.h7[d:end])
             g_fc    = _pad(self._precomputed.g_base[d:end])

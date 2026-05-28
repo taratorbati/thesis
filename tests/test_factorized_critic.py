@@ -39,6 +39,9 @@ from src.rl.networks import (
     V211CTDESACPolicy,
     _V211FactorizedQNet,
     _V211FactorizedContinuousCritic,
+    # v2.12 (LayerNorm critic + LeakyReLU actor + normalised obs)
+    V212CTDESACPolicy,
+    _V212SharedActor,
     # v2.6 legacy
     V26_OBS_DIM,
     V26_N_AGENT_FEATURES,
@@ -465,4 +468,111 @@ def test_v211_layernorm_actually_normalises():
     )
     assert (std - 1.0).abs().max().item() < 1e-2, (
         f"LayerNorm output std not unit: max |std-1| = {(std-1.0).abs().max().item()}"
+    )
+
+
+# ── v2.12: LeakyReLU actor + normalised-obs marker + cascade-fix critic ──────
+def test_v212_policy_uses_leakyrelu_actor_and_layernorm_critic():
+    """V212CTDESACPolicy must pair a LeakyReLU actor with the v2.11 LayerNorm
+    critic.  The critic is byte-identical to v2.11 (cascade suppression
+    preserved); only the actor activation differs (dead-ReLU insurance)."""
+    obs_space = spaces.Box(
+        low=-np.inf, high=np.inf, shape=(V211_OBS_DIM,), dtype=np.float32
+    )
+    act_space = spaces.Box(low=0.0, high=1.0, shape=(N,), dtype=np.float32)
+    kwargs = make_sac_policy_kwargs(N=N, actor_hidden=(128, 128), critic_hidden=(256, 256))
+
+    def _lr(progress_remaining):
+        return 3e-4
+
+    policy = V212CTDESACPolicy(
+        observation_space=obs_space,
+        action_space=act_space,
+        lr_schedule=_lr,
+        **kwargs,
+    )
+
+    # Actor must be the v2.12 LeakyReLU actor
+    assert isinstance(policy.actor, _V212SharedActor), (
+        f"V212 actor should be _V212SharedActor, got {type(policy.actor).__name__}"
+    )
+    # Actor hidden activations must be LeakyReLU
+    leaky = [m for m in policy.actor.latent_pi if isinstance(m, torch.nn.LeakyReLU)]
+    assert len(leaky) >= 1, "v2.12 actor should use LeakyReLU in latent_pi"
+    plain_relu = [m for m in policy.actor.latent_pi if type(m) is torch.nn.ReLU]
+    assert len(plain_relu) == 0, "v2.12 actor must not use plain ReLU"
+
+    # Critic must be the v2.11 LayerNorm critic (cascade fix preserved)
+    assert isinstance(policy.critic, _V211FactorizedContinuousCritic), (
+        f"V212 critic should be _V211FactorizedContinuousCritic, "
+        f"got {type(policy.critic).__name__}"
+    )
+    # Critic must still use plain ReLU (LeakyReLU is actor-only)
+    assert any(type(m) is torch.nn.ReLU for m in policy.critic.qf0), (
+        "v2.12 critic should keep plain ReLU; LeakyReLU is actor-only"
+    )
+
+    # Forward pass sanity
+    obs = torch.randn(B, V211_OBS_DIM)
+    actions = torch.rand(B, N)
+    q1, q2 = policy.critic(obs, actions)
+    assert q1.shape == (B, 1) and q2.shape == (B, 1)
+
+
+def test_v212_actor_has_obs_norm_marker_for_runner_detection():
+    """The v2.12 actor must register an 'obs_norm_marker' buffer so the eval
+    runner can detect from policy.pth that the checkpoint was trained on the
+    normalised global/forecast block.  v2.7/v2.11 actors have no such key."""
+    obs_space = spaces.Box(
+        low=-np.inf, high=np.inf, shape=(V211_OBS_DIM,), dtype=np.float32
+    )
+    act_space = spaces.Box(low=0.0, high=1.0, shape=(N,), dtype=np.float32)
+    kwargs = make_sac_policy_kwargs(N=N, actor_hidden=(128, 128), critic_hidden=(256, 256))
+
+    def _lr(progress_remaining):
+        return 3e-4
+
+    policy = V212CTDESACPolicy(
+        observation_space=obs_space, action_space=act_space,
+        lr_schedule=_lr, **kwargs,
+    )
+    sd = policy.state_dict()
+    marker_keys = [k for k in sd if 'obs_norm_marker' in k]
+    assert len(marker_keys) == 1, (
+        f"v2.12 policy must expose exactly one obs_norm_marker buffer, "
+        f"found {marker_keys}"
+    )
+
+    # v2.11 policy must NOT have the marker (so detection can distinguish them)
+    policy_v211 = V211CTDESACPolicy(
+        observation_space=obs_space, action_space=act_space,
+        lr_schedule=_lr, **kwargs,
+    )
+    assert not any('obs_norm_marker' in k for k in policy_v211.state_dict()), (
+        "v2.11 policy must NOT carry obs_norm_marker (it would break detection)"
+    )
+
+
+def test_v212_globals_normalised_in_env():
+    """With normalize_globals=True the env's global+forecast block must land in
+    ~[0, 1.x]; with it False (legacy) raw magnitudes (~30) must reappear.
+    Guards against silently shipping the wrong observation scale."""
+    from src.rl.gym_env import IrrigationEnv
+
+    env_norm = IrrigationEnv(randomize=False, curriculum_warmup_steps=0,
+                             use_overshoot_feature=False, normalize_globals=True)
+    obs_n, _ = env_norm.reset()
+    glob_n = obs_n[8 * 130:]
+    assert glob_n.max() <= 1.5 + 1e-6, (
+        f"normalised global block max {glob_n.max():.3f} exceeds 1.5 — "
+        f"a feature is not being divided by its reference"
+    )
+
+    env_raw = IrrigationEnv(randomize=False, curriculum_warmup_steps=0,
+                            use_overshoot_feature=False, normalize_globals=False)
+    obs_r, _ = env_raw.reset()
+    glob_r = obs_r[8 * 130:]
+    assert glob_r.max() > 5.0, (
+        f"legacy (raw) global block max {glob_r.max():.3f} is suspiciously small "
+        f"— the legacy path should still pass raw radiation (~30)"
     )
