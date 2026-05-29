@@ -379,6 +379,37 @@ class _V213SharedActor(_V212SharedActor):
         return combined.reshape(B * N, self._PER_AGENT_INPUT_DIM)
 
 
+class _V214SharedActor(_V213SharedActor):
+    """SharedActor for v2.14 (v2.13 architecture, trained with α=0.01).
+
+    v2.14 is architecturally identical to v2.13.  The only difference is the
+    training hyperparameter ENT_COEF (= α): v2.13 used 0.05, v2.14 uses 0.01.
+    This is a one-variable test of the entropy/reward SNR hypothesis derived
+    from the v2.7-200k peak-actor anchor:
+
+        - At v2.7-200k (the responsive-actor snapshot whose policy gave the
+          best yields in any v2.* run), the per-agent SNR Q/(α·H) ≈ 290.
+        - In v2.12 and v2.13, the SAME SNR is only ~80 because the LayerNorm-
+          bounded critic keeps |Q| ≈ 3 per agent (vs 11 at v2.7-200k) while
+          the entropy term α·H ≈ 0.039 is identical across all runs.
+        - To recover the v2.7-200k SNR ratio in the v2.13 architecture (which
+          we cannot raise Q in without re-introducing the deadly-triad
+          cascade), the cleanest lever is α: drop it ~4-5× so the entropy
+          contribution shrinks proportionally.  α=0.01 lands the SNR back in
+          the v2.7-200k regime (Q/αH ≈ 290).
+
+    Why a separate class instead of just a config flag in train_v214:
+        The marker buffer (2.14) lets the eval runner identify this checkpoint
+        and load it with the right policy class.  No other architecture diff.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # v2.14 marker.  Same architecture as v2.13; differentiated only so
+        # the runner can recognise α=0.01 checkpoints in saved files.
+        self.obs_norm_marker.data = torch.tensor([2.14])
+
+
 class _LegacySharedActor(SharedActor):
     """SharedActor for v2.6 checkpoints (5 per-agent features, 62-dim input)."""
     _N_AGENT_FEATURES    = V26_N_AGENT_FEATURES
@@ -760,6 +791,39 @@ class V213CTDESACPolicy(SACPolicy):
         kw = self._update_features_extractor(self.critic_kwargs, features_extractor)
         kw["N"] = get_action_dim(self.action_space)
         return _V211FactorizedContinuousCritic(**kw).to(self.device)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  v2.14 CTDE SAC POLICY  (v2.13 architecture, trained with α=0.01)
+#
+#  v2.14 = v2.13 architecture (LayerNorm critic + LeakyReLU actor + actor-only
+#  input re-center) PLUS a single training-time change: ENT_COEF lowered from
+#  0.05 to 0.01.  This is a one-variable test of the entropy/reward SNR
+#  hypothesis derived from the v2.7-200k peak-actor anchor.
+#
+#  Architecturally, v2.14 is identical to v2.13.  The only diff is the marker
+#  buffer (2.14 vs 2.13), present so the runner can identify α=0.01 checkpoints
+#  in saved files.
+# ═════════════════════════════════════════════════════════════════════════════
+class V214CTDESACPolicy(SACPolicy):
+    """CTDESACPolicy for v2.14 (v2.13 architecture, trained with α=0.01).
+
+    Architecturally identical to V213CTDESACPolicy.  Uses _V214SharedActor
+    only to mark the checkpoint with marker=2.14, so eval-time dispatch can
+    tell α=0.01 v2.14 checkpoints apart from α=0.05 v2.13 ones.
+    """
+
+    def make_actor(self, features_extractor=None):
+        kw = self._update_features_extractor(self.actor_kwargs, features_extractor)
+        kw["N"] = get_action_dim(self.action_space)
+        return _V214SharedActor(**kw).to(self.device)
+
+    def make_critic(self, features_extractor=None):
+        kw = self._update_features_extractor(self.critic_kwargs, features_extractor)
+        kw["N"] = get_action_dim(self.action_space)
+        return _V211FactorizedContinuousCritic(**kw).to(self.device)
+
+
 class _FactorizedQNetWrapped(nn.Module):
     """_FactorizedQNet with local_q_net wrapper — matches v2.6 best_model.zip keys."""
 

@@ -682,3 +682,65 @@ def test_v213_first_layer_alive_at_init():
         f"v2.13 actor first-layer alive fraction at init = {alive_frac:.3f}; "
         f"must be > 0.30 to validate the dead-ReLU geometric fix."
     )
+
+
+# ── v2.14: v2.13 architecture trained with α=0.01 ──────────────────────────
+def test_v214_uses_v213_architecture():
+    """v2.14 must be architecturally identical to v2.13 (same actor/critic
+    classes and forward behaviour).  The only checkpoint-level diff is the
+    marker buffer value (2.14 vs 2.13)."""
+    from src.rl.networks import (
+        V214CTDESACPolicy, V213CTDESACPolicy,
+        _V214SharedActor, _V213SharedActor, _V211FactorizedContinuousCritic,
+    )
+    obs_space = spaces.Box(
+        low=-np.inf, high=np.inf, shape=(V211_OBS_DIM,), dtype=np.float32
+    )
+    act_space = spaces.Box(low=0.0, high=1.0, shape=(N,), dtype=np.float32)
+    kwargs = make_sac_policy_kwargs(N=N, actor_hidden=(128, 128),
+                                    critic_hidden=(256, 256))
+    def _lr(progress_remaining): return 3e-4
+
+    p14 = V214CTDESACPolicy(observation_space=obs_space, action_space=act_space,
+                            lr_schedule=_lr, **kwargs)
+    p13 = V213CTDESACPolicy(observation_space=obs_space, action_space=act_space,
+                            lr_schedule=_lr, **kwargs)
+
+    # Actor class lineage: v2.14 actor inherits from v2.13
+    assert isinstance(p14.actor, _V214SharedActor)
+    assert isinstance(p14.actor, _V213SharedActor), (
+        "_V214SharedActor must inherit _V213SharedActor so the input "
+        "re-centering and LeakyReLU are preserved."
+    )
+    # Critic identical to v2.11/v2.12/v2.13
+    assert isinstance(p14.critic, _V211FactorizedContinuousCritic)
+    # The input recenter must still happen (inherited from v2.13)
+    obs_zero = torch.zeros(1, V211_OBS_DIM)
+    per_agent = p14.actor._per_agent_features(obs_zero)
+    assert torch.allclose(per_agent, -torch.ones_like(per_agent), atol=1e-6), (
+        "v2.14 actor must still re-center input (inherits v2.13 behaviour)"
+    )
+
+
+def test_v214_marker_is_214():
+    """Runner discriminates v2.14 vs v2.13 via marker value."""
+    from src.rl.networks import V214CTDESACPolicy, V213CTDESACPolicy
+    obs_space = spaces.Box(
+        low=-np.inf, high=np.inf, shape=(V211_OBS_DIM,), dtype=np.float32
+    )
+    act_space = spaces.Box(low=0.0, high=1.0, shape=(N,), dtype=np.float32)
+    kwargs = make_sac_policy_kwargs(N=N, actor_hidden=(128, 128),
+                                    critic_hidden=(256, 256))
+    def _lr(progress_remaining): return 3e-4
+
+    p14 = V214CTDESACPolicy(observation_space=obs_space, action_space=act_space,
+                            lr_schedule=_lr, **kwargs)
+    p13 = V213CTDESACPolicy(observation_space=obs_space, action_space=act_space,
+                            lr_schedule=_lr, **kwargs)
+    m14 = float(p14.state_dict()['actor.obs_norm_marker'].item())
+    m13 = float(p13.state_dict()['actor.obs_norm_marker'].item())
+    assert abs(m14 - 2.14) < 1e-4, f"v2.14 marker should be 2.14, got {m14}"
+    assert abs(m13 - 2.13) < 1e-4, f"v2.13 marker should be 2.13, got {m13}"
+    # Important: discriminating threshold in runner dispatch is >= 2.14, so
+    # values must be strictly separated by at least 0.005 (well > float noise).
+    assert (m14 - m13) > 0.005, "markers must be cleanly separable"

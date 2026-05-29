@@ -52,6 +52,7 @@ from src.rl.gym_env import (
 )
 from src.rl.networks import (
     CTDESACPolicy,              # v2.8 default — dim 67
+    V214CTDESACPolicy,          # v2.14 — v2.13 architecture, α=0.01
     V213CTDESACPolicy,          # v2.13 — v2.12 + actor-only input re-centering
     V212CTDESACPolicy,          # v2.12 — LayerNorm critic + LeakyReLU actor + normalised obs
     V211CTDESACPolicy,          # v2.11 — LayerNorm critic, dim 66 + LN params
@@ -121,7 +122,8 @@ def _load_sac_model(model_path: Path, device: str = 'cpu'):
     """
     dim, key_fmt, has_ln, obs_marker = _detect_critic_arch(model_path)
     # obs_marker: 0.0=v2.7/v2.11 (raw obs), 2.12=v2.12 (normalised globals),
-    # 2.13=v2.13 (normalised globals + actor-only input re-centering).
+    # 2.13=v2.13 (normalised globals + actor-only input re-centering),
+    # 2.14=v2.14 (v2.13 architecture trained with α=0.01).
     normalize_globals = False
     if dim == 837:
         policy_class = MonolithicCTDESACPolicy
@@ -135,19 +137,35 @@ def _load_sac_model(model_path: Path, device: str = 'cpu'):
         policy_class = WrappedVDNCTDESACPolicy
         label        = 'VDN factorised - v2.6 (flat keys, treated as legacy)'
         obs_layout   = 'v26'
-    elif dim == 66 and key_fmt == 'flat' and has_ln and obs_marker >= 2.13:
+    elif dim == 66 and key_fmt == 'flat' and has_ln and obs_marker >= 2.135:
+        # v2.14: v2.13 architecture trained with α=0.01.  Architecturally
+        # identical to v2.13; the marker change lets the runner identify
+        # α-tuned checkpoints in saved files.
+        # NB: thresholds use mid-points (2.135 = midway between 2.13 and 2.14)
+        # to tolerate float32 storage precision — torch.tensor([2.14]) round-trips
+        # through the saved zip as 2.1399998... and torch.tensor([2.13]) as
+        # 2.1299999..., so a strict ">= 2.14" check would mis-classify v2.14.
+        policy_class = V214CTDESACPolicy
+        label        = ('VDN factorised - v2.14 (v2.13 architecture + α=0.01 '
+                        'for entropy/reward SNR recovery)')
+        obs_layout   = 'v27'
+        normalize_globals = True
+    elif dim == 66 and key_fmt == 'flat' and has_ln and obs_marker >= 2.125:
         # v2.13: v2.12 + actor-only input re-centering (2*x - 1 on the actor's
         # per-agent input).  Same global/forecast normalisation as v2.12 (the
         # runner must still divide rainfall/Kc_ET/radiation by their refs).
+        # 2.125 = midway between 2.12 and 2.13.
         policy_class = V213CTDESACPolicy
         label        = ('VDN factorised - v2.13 (v2.12 + actor-only input '
                         're-centering for dead-ReLU capacity recovery)')
         obs_layout   = 'v27'
         normalize_globals = True
-    elif dim == 66 and key_fmt == 'flat' and has_ln and obs_marker >= 2.12:
+    elif dim == 66 and key_fmt == 'flat' and has_ln and obs_marker >= 2.0:
         # v2.12: v2.11 LayerNorm critic + LeakyReLU actor, trained on the
         # NORMALISED global/forecast observation block.  Eval must apply the
         # same normalisation (normalize_globals=True).
+        # Threshold 2.0 catches the v2.12 marker (2.119...) while excluding
+        # legacy v2.11/v2.7 checkpoints which have NO marker (treated as 0.0).
         policy_class = V212CTDESACPolicy
         label        = ('VDN factorised - v2.12 (8 features/agent, LayerNorm '
                         'critic, LeakyReLU actor, normalised globals)')
@@ -172,7 +190,8 @@ def _load_sac_model(model_path: Path, device: str = 'cpu'):
             f"Unrecognised critic architecture: dim={dim}, key_format={key_fmt!r}, "
             f"has_layernorm={has_ln}, obs_marker={obs_marker}. "
             f"Expected (837,flat), (63,wrapped), (63,flat), "
-            f"(66,flat,LN,marker>=2.13)=v2.13, (66,flat,LN,marker>=2.12)=v2.12, "
+            f"(66,flat,LN,marker>=2.14)=v2.14, (66,flat,LN,marker>=2.13)=v2.13, "
+            f"(66,flat,LN,marker>=2.12)=v2.12, "
             f"(66,flat,LN)=v2.11, (66,flat)=v2.7, or (67,flat)=v2.8."
         )
     model = SAC.load(
