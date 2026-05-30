@@ -410,6 +410,55 @@ class _V214SharedActor(_V213SharedActor):
         self.obs_norm_marker.data = torch.tensor([2.14])
 
 
+class _V215SharedActor(_V214SharedActor):
+    """SharedActor for v2.15 (v2.14 architecture, trained with LINEAR r6).
+
+    v2.15 is architecturally identical to v2.14 (and therefore v2.13).  The
+    only difference is the training-time reward function: r6 changes from
+    QUADRATIC (-ALPHA6 * mean(overshoot^2) / FC^2) to LINEAR
+    (-ALPHA6_LIN * mean(overshoot) / FC) with ALPHA6_LIN=1.5 calibrated
+    against v2.14 rollouts to preserve season-sum r6 magnitude.
+
+    Why linear r6 is the next single-variable test:
+
+        v2.14 diagnostic (perfect-forecast wet/100 rollout vs MPC):
+          metric              v2.14   MPC
+          daily u 10th-pctile  2.50   0.16  mm/day  (cannot push action low)
+          corr(u, rain_fwd7)  +0.03  -0.42         (forecast-blind)
+          waterlog-days/agent  80.2  19.0          (4x MPC)
+          WUE (kg/ha/mm)       8.62  12.12         (12% efficiency gap)
+
+        The actor's primary defect is that it cannot push u toward zero on
+        days when rain is coming.  Two compounding causes both addressed by
+        a linear r6:
+          1. d(quadratic r6)/d(overshoot) = -2*ALPHA6*overshoot/FC^2 is
+             small at moderate overshoot (the operating regime).  The
+             critic's dQ/du signal at the policy's operating point is weak.
+          2. The ABM's waterlog yield-loss term h6 is LINEAR in (x1-FC)/FC,
+             but r6 is QUADRATIC -> the reward proxy is misaligned with the
+             physical objective.  The critic learns the proxy, not the
+             physics.
+
+        Linear r6 gives uniform marginal penalty across the overshoot range
+        and aligns r6 with h6.  This is a single-variable test of the
+        reward-shape hypothesis: if linearisation closes the wet-year gap,
+        the quadratic shape was the bottleneck.  If it doesn't, the next
+        suspects are buffer concentration (replay never saw low actions) and
+        twin-critic pessimism at OOD actions - addressed by exploration-σ
+        boost or by switching min(Q1,Q2) to mean(Q1,Q2).
+
+    Why a separate class instead of just a config flag:
+        The marker buffer (2.15) lets the eval runner identify this checkpoint
+        and load it with the right policy class.  No other architecture diff.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # v2.15 marker.  Architecturally byte-identical to v2.14 / v2.13;
+        # marker change only so the runner can recognise r6-linear checkpoints.
+        self.obs_norm_marker.data = torch.tensor([2.15])
+
+
 class _LegacySharedActor(SharedActor):
     """SharedActor for v2.6 checkpoints (5 per-agent features, 62-dim input)."""
     _N_AGENT_FEATURES    = V26_N_AGENT_FEATURES
@@ -817,6 +866,37 @@ class V214CTDESACPolicy(SACPolicy):
         kw = self._update_features_extractor(self.actor_kwargs, features_extractor)
         kw["N"] = get_action_dim(self.action_space)
         return _V214SharedActor(**kw).to(self.device)
+
+    def make_critic(self, features_extractor=None):
+        kw = self._update_features_extractor(self.critic_kwargs, features_extractor)
+        kw["N"] = get_action_dim(self.action_space)
+        return _V211FactorizedContinuousCritic(**kw).to(self.device)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  v2.15 CTDE SAC POLICY  (v2.14 architecture, trained with LINEAR r6)
+#
+#  v2.15 = v2.14 architecture (LayerNorm critic + LeakyReLU actor + actor input
+#  re-center + α=0.01) PLUS a single training-time reward-function change:
+#  r6 switches from quadratic to linear in overshoot, with ALPHA6_LIN=1.5
+#  calibrated against v2.14 rollouts to preserve season-sum magnitude.
+#
+#  Architecturally, v2.15 is identical to v2.14 (and therefore v2.13).  The
+#  only diff is the marker buffer (2.15) and the IrrigationEnv constructor
+#  argument reward_overshoot_mode='linear' passed by train_v215.
+# ═════════════════════════════════════════════════════════════════════════════
+class V215CTDESACPolicy(SACPolicy):
+    """CTDESACPolicy for v2.15 (v2.14 architecture, trained with linear r6).
+
+    Architecturally identical to V214CTDESACPolicy.  Uses _V215SharedActor
+    only to mark the checkpoint with marker=2.15, so eval-time dispatch can
+    tell r6-linear v2.15 checkpoints apart from r6-quadratic v2.14 ones.
+    """
+
+    def make_actor(self, features_extractor=None):
+        kw = self._update_features_extractor(self.actor_kwargs, features_extractor)
+        kw["N"] = get_action_dim(self.action_space)
+        return _V215SharedActor(**kw).to(self.device)
 
     def make_critic(self, features_extractor=None):
         kw = self._update_features_extractor(self.critic_kwargs, features_extractor)

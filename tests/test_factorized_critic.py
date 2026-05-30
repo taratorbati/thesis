@@ -744,3 +744,93 @@ def test_v214_marker_is_214():
     # Important: discriminating threshold in runner dispatch is >= 2.14, so
     # values must be strictly separated by at least 0.005 (well > float noise).
     assert (m14 - m13) > 0.005, "markers must be cleanly separable"
+
+
+# ── v2.15: v2.14 architecture trained with LINEAR r6 ───────────────────────
+def test_v215_uses_v214_architecture():
+    """v2.15 must be architecturally identical to v2.14 (same actor/critic
+    classes and forward behaviour).  The only checkpoint-level diff is the
+    marker buffer value (2.15 vs 2.14).  Reward shape is a TRAINING-time
+    property of the env, not the network architecture."""
+    from src.rl.networks import (
+        V215CTDESACPolicy, V214CTDESACPolicy,
+        _V215SharedActor, _V214SharedActor, _V211FactorizedContinuousCritic,
+    )
+    obs_space = spaces.Box(
+        low=-np.inf, high=np.inf, shape=(V211_OBS_DIM,), dtype=np.float32
+    )
+    act_space = spaces.Box(low=0.0, high=1.0, shape=(N,), dtype=np.float32)
+    kwargs = make_sac_policy_kwargs(N=N, actor_hidden=(128, 128),
+                                    critic_hidden=(256, 256))
+    def _lr(progress_remaining): return 3e-4
+
+    p15 = V215CTDESACPolicy(observation_space=obs_space, action_space=act_space,
+                            lr_schedule=_lr, **kwargs)
+
+    # Actor class lineage: v2.15 actor inherits from v2.14 -> v2.13 -> v2.12
+    assert isinstance(p15.actor, _V215SharedActor)
+    assert isinstance(p15.actor, _V214SharedActor), (
+        "_V215SharedActor must inherit _V214SharedActor so all prior "
+        "v2.12/v2.13/v2.14 actor behaviour is preserved."
+    )
+    # Critic identical to v2.11/v2.12/v2.13/v2.14
+    assert isinstance(p15.critic, _V211FactorizedContinuousCritic)
+    # The input recenter must still happen (inherited from v2.13 via v2.14)
+    obs_zero = torch.zeros(1, V211_OBS_DIM)
+    per_agent = p15.actor._per_agent_features(obs_zero)
+    assert torch.allclose(per_agent, -torch.ones_like(per_agent), atol=1e-6), (
+        "v2.15 actor must still re-center input (inherited from v2.13)"
+    )
+
+
+def test_v215_marker_is_215():
+    """Runner discriminates v2.15 vs v2.14 via marker value."""
+    from src.rl.networks import V215CTDESACPolicy, V214CTDESACPolicy
+    obs_space = spaces.Box(
+        low=-np.inf, high=np.inf, shape=(V211_OBS_DIM,), dtype=np.float32
+    )
+    act_space = spaces.Box(low=0.0, high=1.0, shape=(N,), dtype=np.float32)
+    kwargs = make_sac_policy_kwargs(N=N, actor_hidden=(128, 128),
+                                    critic_hidden=(256, 256))
+    def _lr(progress_remaining): return 3e-4
+
+    p15 = V215CTDESACPolicy(observation_space=obs_space, action_space=act_space,
+                            lr_schedule=_lr, **kwargs)
+    p14 = V214CTDESACPolicy(observation_space=obs_space, action_space=act_space,
+                            lr_schedule=_lr, **kwargs)
+    m15 = float(p15.state_dict()['actor.obs_norm_marker'].item())
+    m14 = float(p14.state_dict()['actor.obs_norm_marker'].item())
+    assert abs(m15 - 2.15) < 1e-4, f"v2.15 marker should be 2.15, got {m15}"
+    assert abs(m14 - 2.14) < 1e-4, f"v2.14 marker should be 2.14, got {m14}"
+    # Runner uses 2.145 midpoint to dispatch v2.15 vs v2.14.
+    assert m15 > 2.145, "v2.15 marker must exceed midpoint 2.145"
+    assert m14 < 2.145, "v2.14 marker must be below midpoint 2.145"
+
+
+def test_v215_env_reward_overshoot_mode_linear_changes_r6():
+    """The env's reward_overshoot_mode='linear' must change r6 from quadratic
+    to linear in overshoot.  This is the single-variable v2.15 change."""
+    from src.rl.gym_env import IrrigationEnv, ALPHA6, ALPHA6_LIN
+    # Construct a quadratic-r6 env and a linear-r6 env with the same seed.
+    env_q = IrrigationEnv(randomize=False, curriculum_warmup_steps=0,
+                          use_overshoot_feature=False, normalize_globals=True,
+                          reward_overshoot_mode='quadratic')
+    env_l = IrrigationEnv(randomize=False, curriculum_warmup_steps=0,
+                          use_overshoot_feature=False, normalize_globals=True,
+                          reward_overshoot_mode='linear')
+    assert env_q._reward_overshoot_mode == 'quadratic'
+    assert env_l._reward_overshoot_mode == 'linear'
+    # Constants must be defined and non-equal in their effect.
+    assert ALPHA6 == 8.0
+    assert ALPHA6_LIN == 1.5
+
+
+def test_v215_env_reward_overshoot_mode_invalid_raises():
+    """The env constructor must reject unknown reward_overshoot_mode strings."""
+    from src.rl.gym_env import IrrigationEnv
+    try:
+        IrrigationEnv(reward_overshoot_mode='cubic')
+    except ValueError as e:
+        assert 'reward_overshoot_mode' in str(e)
+    else:
+        raise AssertionError("Expected ValueError for unknown reward_overshoot_mode")

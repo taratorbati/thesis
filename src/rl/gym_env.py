@@ -96,8 +96,34 @@ NORMALIZE_GLOBALS_DEFAULT = True   # v2.12 default; set False to reproduce v2.7/
 ALPHA1 = 1.0     # biomass increment
 ALPHA2 = 0.016   # water cost
 ALPHA3 = 0.1     # drought stress regulariser
-ALPHA6 = 8.0     # FC-overshoot penalty
+ALPHA6 = 8.0     # FC-overshoot penalty - QUADRATIC shape (v2.7-v2.14 default)
 C_TERM = 0.0     # terminal bonus (kept as 0)
+
+# ── v2.15 NEW: alternative r6 shapes (single-variable test) ──────────────────
+# The quadratic r6 (-ALPHA6 * mean(overshoot^2) / FC^2) has been the reward
+# overshoot shape from v2.7 through v2.14.  v2.14 closed most of the gap to
+# MPC but still over-irrigated in wet years (+37.5 mm vs MPC, +44 waterlog-
+# days, WUE 9.34 vs 10.63).  Diagnostic on v2.14 wet/100 rollouts:
+#   - actor's 10th-percentile daily action is 2.50 mm (vs MPC's 0.16 mm)
+#   - corr(u, 7-day forward rain) ≈ +0.03 (vs MPC's -0.42, v2.7's -0.24)
+# The actor cannot push u toward zero on rainy days.  Two compounding causes
+# of the weak gradient signal at the operating point:
+#   1. d(quadratic r6)/d(overshoot) = -2*ALPHA6*overshoot/FC^2 is small at
+#      moderate overshoot (where the actor sits) -> weak dQ/du in those states.
+#   2. The ABM's waterlog stress h6 is LINEAR in (x1-FC)/FC, but r6 is
+#      QUADRATIC -> the reward proxy is not aligned with the physical yield loss.
+# v2.15 changes r6 to a linear shape with the same season-sum magnitude:
+#   r6_linear = -ALPHA6_LIN * mean(overshoot) / FC
+# Calibration (against 27 v2.14 + MPC rollouts):
+#   - quadratic r6 season-sum: 6.79 +- 7.86 (full distribution)
+#                              16.99 +- 4.24 (wet-year only)
+#   - linear r6 with ALPHA6_LIN=1.0 season-sum: 4.63 +- 4.22
+#   - ALPHA6_LIN to match full-distribution season-sum:  1.4657
+#   - ALPHA6_LIN to match gradient at RMS overshoot (13.4 mm):  1.5285
+# Chosen ALPHA6_LIN = 1.5 bracketed by both calibrations; preserves r6
+# dominance over r1+r2+r3 while uniformising the gradient across overshoot.
+ALPHA6_LIN  = 1.5    # FC-overshoot penalty - LINEAR shape (v2.15)
+ALPHA6_SQRT = 0.5    # FC-overshoot penalty - SQRT shape   (calibrated, unused default)
 
 # ── curriculum defaults (NEW in v2.8) ─────────────────────────────────────────
 CURRICULUM_WARMUP_STEPS_DEFAULT = 50_000    # transition point (env steps)
@@ -209,6 +235,7 @@ class IrrigationEnv(gym.Env):
         curriculum_short_len:    int = CURRICULUM_SHORT_LEN_DEFAULT,
         use_overshoot_feature:   bool = True,
         normalize_globals:       bool = NORMALIZE_GLOBALS_DEFAULT,
+        reward_overshoot_mode:   str  = 'quadratic',
     ):
         super().__init__()
         self.randomize = randomize
@@ -216,6 +243,15 @@ class IrrigationEnv(gym.Env):
         self._curriculum_short_len    = int(curriculum_short_len)
         self._use_overshoot_feature   = bool(use_overshoot_feature)
         self._normalize_globals       = bool(normalize_globals)
+        # v2.15: validate and store reward_overshoot_mode.  Default 'quadratic'
+        # preserves byte-identical behaviour for v2.7-v2.14 training scripts.
+        if reward_overshoot_mode not in ('quadratic', 'linear', 'sqrt'):
+            raise ValueError(
+                f"reward_overshoot_mode must be one of "
+                f"'quadratic' (v2.7-v2.14 default), 'linear' (v2.15), or 'sqrt'. "
+                f"Got: {reward_overshoot_mode!r}"
+            )
+        self._reward_overshoot_mode = str(reward_overshoot_mode)
 
         # obs dim depends on whether x1_overshoot_norm is included:
         #   use_overshoot_feature=True  (v2.8 default): 9 feat/agent → 1227-dim
@@ -352,7 +388,7 @@ class IrrigationEnv(gym.Env):
         }
         return self._build_obs(), float(reward), terminated, truncated, info
 
-    # ── reward (unchanged from v2.7) ──────────────────────────────────────────
+    # ── reward (v2.15: r6 shape selectable; quadratic default = v2.7-v2.14) ──
     def _compute_reward(
         self,
         x1: np.ndarray,
@@ -364,7 +400,21 @@ class IrrigationEnv(gym.Env):
         drought   = np.maximum(_ST_MM - x1, 0.0)
         r3 = -ALPHA3 * float(np.mean(drought)) / max(_ST_MM - _WP_MM, 1e-6)
         overshoot = np.maximum(x1 - _FC_MM, 0.0)
-        r6 = -ALPHA6 * float(np.mean(overshoot ** 2)) / max(_FC_MM ** 2, 1e-6)
+        if self._reward_overshoot_mode == 'linear':
+            # v2.15: linear in overshoot.  d(r6)/d(overshoot) = -ALPHA6_LIN/FC
+            # is constant across the overshoot range, giving the critic uniform
+            # gradient signal at moderate overshoot (where the actor sits).
+            # Also aligned with the ABM's linear waterlog stress term h6.
+            r6 = -ALPHA6_LIN * float(np.mean(overshoot)) / max(_FC_MM, 1e-6)
+        elif self._reward_overshoot_mode == 'sqrt':
+            # Sub-quadratic shape (steeper than quadratic at moderate overshoot,
+            # gentler than linear at large overshoot).  Provided for ablation.
+            r6 = -ALPHA6_SQRT * float(np.mean(np.sqrt(overshoot))) \
+                 / max(np.sqrt(_FC_MM), 1e-6)
+        else:
+            # Default: quadratic (v2.7-v2.14 byte-identical behaviour).
+            r6 = -ALPHA6 * float(np.mean(overshoot ** 2)) \
+                 / max(_FC_MM ** 2, 1e-6)
         return r1 + r2 + r3 + r6
 
     # ── observation (v2.8: 9-feature per-agent block) ─────────────────────────

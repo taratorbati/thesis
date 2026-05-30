@@ -52,6 +52,7 @@ from src.rl.gym_env import (
 )
 from src.rl.networks import (
     CTDESACPolicy,              # v2.8 default — dim 67
+    V215CTDESACPolicy,          # v2.15 — v2.14 architecture, linear r6
     V214CTDESACPolicy,          # v2.14 — v2.13 architecture, α=0.01
     V213CTDESACPolicy,          # v2.13 — v2.12 + actor-only input re-centering
     V212CTDESACPolicy,          # v2.12 — LayerNorm critic + LeakyReLU actor + normalised obs
@@ -137,6 +138,19 @@ def _load_sac_model(model_path: Path, device: str = 'cpu'):
         policy_class = WrappedVDNCTDESACPolicy
         label        = 'VDN factorised - v2.6 (flat keys, treated as legacy)'
         obs_layout   = 'v26'
+    elif dim == 66 and key_fmt == 'flat' and has_ln and obs_marker >= 2.145:
+        # v2.15: v2.14 architecture trained with LINEAR r6 (instead of quadratic).
+        # Architecturally byte-identical to v2.14; the marker change lets the
+        # runner identify r6-linear checkpoints in saved files.
+        # NB: thresholds use mid-points (2.145 = midway between 2.14 and 2.15)
+        # to tolerate float32 storage precision — torch.tensor([2.15]) round-trips
+        # through the saved zip as 2.1499998... and torch.tensor([2.14]) as
+        # 2.1399998..., so a strict ">= 2.15" check would mis-classify v2.15.
+        policy_class = V215CTDESACPolicy
+        label        = ('VDN factorised - v2.15 (v2.14 architecture + linear r6 '
+                        'for uniform overshoot-gradient signal)')
+        obs_layout   = 'v27'
+        normalize_globals = True
     elif dim == 66 and key_fmt == 'flat' and has_ln and obs_marker >= 2.135:
         # v2.14: v2.13 architecture trained with α=0.01.  Architecturally
         # identical to v2.13; the marker change lets the runner identify
@@ -190,8 +204,8 @@ def _load_sac_model(model_path: Path, device: str = 'cpu'):
             f"Unrecognised critic architecture: dim={dim}, key_format={key_fmt!r}, "
             f"has_layernorm={has_ln}, obs_marker={obs_marker}. "
             f"Expected (837,flat), (63,wrapped), (63,flat), "
-            f"(66,flat,LN,marker>=2.14)=v2.14, (66,flat,LN,marker>=2.13)=v2.13, "
-            f"(66,flat,LN,marker>=2.12)=v2.12, "
+            f"(66,flat,LN,marker>=2.15)=v2.15, (66,flat,LN,marker>=2.14)=v2.14, "
+            f"(66,flat,LN,marker>=2.13)=v2.13, (66,flat,LN,marker>=2.12)=v2.12, "
             f"(66,flat,LN)=v2.11, (66,flat)=v2.7, or (67,flat)=v2.8."
         )
     model = SAC.load(
