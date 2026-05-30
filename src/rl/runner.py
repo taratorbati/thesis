@@ -47,11 +47,13 @@ from src.rl.gym_env import (
     X5_REF,
     FULL_SEASON_NEED_MM,
     RAIN_REF,
+    RAIN_REF_V216,
     ETC_REF,
     RAD_REF,
 )
 from src.rl.networks import (
     CTDESACPolicy,              # v2.8 default — dim 67
+    V216CTDESACPolicy,          # v2.16 — v2.15 architecture + RAIN_REF=30 + capped auto-α
     V215CTDESACPolicy,          # v2.15 — v2.14 architecture, linear r6
     V214CTDESACPolicy,          # v2.14 — v2.13 architecture, α=0.01
     V213CTDESACPolicy,          # v2.13 — v2.12 + actor-only input re-centering
@@ -115,17 +117,23 @@ def _load_sac_model(model_path: Path, device: str = 'cpu'):
 
     Returns
     -------
-    (SAC, str, str, bool)
-        model, arch_label, obs_layout, normalize_globals
+    (SAC, str, str, bool, float)
+        model, arch_label, obs_layout, normalize_globals, rain_normaliser
         obs_layout: 'v28', 'v27', or 'v26'.
-        normalize_globals: True for v2.12 checkpoints (the global/forecast
+        normalize_globals: True for v2.12+ checkpoints (the global/forecast
         block must be normalised at eval time to match training).
+        rain_normaliser: rainfall denominator used at training time
+        (RAIN_REF=70.0 for v2.7-v2.15, RAIN_REF_V216=30.0 for v2.16).
+        Used by the eval runner to apply the same rainfall scaling.
     """
     dim, key_fmt, has_ln, obs_marker = _detect_critic_arch(model_path)
     # obs_marker: 0.0=v2.7/v2.11 (raw obs), 2.12=v2.12 (normalised globals),
     # 2.13=v2.13 (normalised globals + actor-only input re-centering),
-    # 2.14=v2.14 (v2.13 architecture trained with α=0.01).
+    # 2.14=v2.14 (v2.13 architecture trained with α=0.01),
+    # 2.15=v2.15 (v2.14 architecture trained with linear r6),
+    # 2.16=v2.16 (v2.15 architecture + RAIN_REF=30 + capped auto-α).
     normalize_globals = False
+    rain_normaliser   = RAIN_REF   # default for v2.7-v2.15 checkpoints
     if dim == 837:
         policy_class = MonolithicCTDESACPolicy
         label        = 'monolithic (pre-VDN)'
@@ -138,6 +146,21 @@ def _load_sac_model(model_path: Path, device: str = 'cpu'):
         policy_class = WrappedVDNCTDESACPolicy
         label        = 'VDN factorised - v2.6 (flat keys, treated as legacy)'
         obs_layout   = 'v26'
+    elif dim == 66 and key_fmt == 'flat' and has_ln and obs_marker >= 2.155:
+        # v2.16: v2.15 architecture + RAIN_REF=30 + capped auto-α.
+        # Architecturally byte-identical to v2.15; the marker change lets the
+        # runner identify v2.16 checkpoints AND apply the tighter rain
+        # normaliser at eval time.
+        # NB: 2.155 = midway between 2.15 and 2.16 — float32 storage of
+        # torch.tensor([2.16]) round-trips as 2.1599998... and
+        # torch.tensor([2.15]) as 2.1499998..., so strict ">= 2.16" would
+        # mis-classify v2.16.
+        policy_class = V216CTDESACPolicy
+        label        = ('VDN factorised - v2.16 (v2.15 architecture + RAIN_REF=30 '
+                        '+ capped auto-α for rain-input dynamic range)')
+        obs_layout   = 'v27'
+        normalize_globals = True
+        rain_normaliser   = RAIN_REF_V216   # tightened rainfall normaliser
     elif dim == 66 and key_fmt == 'flat' and has_ln and obs_marker >= 2.145:
         # v2.15: v2.14 architecture trained with LINEAR r6 (instead of quadratic).
         # Architecturally byte-identical to v2.14; the marker change lets the
@@ -204,8 +227,9 @@ def _load_sac_model(model_path: Path, device: str = 'cpu'):
             f"Unrecognised critic architecture: dim={dim}, key_format={key_fmt!r}, "
             f"has_layernorm={has_ln}, obs_marker={obs_marker}. "
             f"Expected (837,flat), (63,wrapped), (63,flat), "
-            f"(66,flat,LN,marker>=2.15)=v2.15, (66,flat,LN,marker>=2.14)=v2.14, "
-            f"(66,flat,LN,marker>=2.13)=v2.13, (66,flat,LN,marker>=2.12)=v2.12, "
+            f"(66,flat,LN,marker>=2.16)=v2.16, (66,flat,LN,marker>=2.15)=v2.15, "
+            f"(66,flat,LN,marker>=2.14)=v2.14, (66,flat,LN,marker>=2.13)=v2.13, "
+            f"(66,flat,LN,marker>=2.12)=v2.12, "
             f"(66,flat,LN)=v2.11, (66,flat)=v2.7, or (67,flat)=v2.8."
         )
     model = SAC.load(
@@ -213,7 +237,7 @@ def _load_sac_model(model_path: Path, device: str = 'cpu'):
         device=device,
         custom_objects={"policy_class": policy_class},
     )
-    return model, label, obs_layout, normalize_globals
+    return model, label, obs_layout, normalize_globals, rain_normaliser
 
 
 DEFAULT_FORECAST_HORIZON = 8
@@ -264,16 +288,24 @@ class RLController(Controller):
         # v2.10 refactor: model loading is delegated to _load_model() so
         # subclasses (TQCRLController) can override only the loader without
         # duplicating the rest of __init__.  Behaviour for SAC checkpoints
-        # is unchanged.  v2.12: _load_model may also return a normalize_globals
-        # flag (4-tuple); older overrides returning a 3-tuple still work.
+        # is unchanged.
+        # v2.12: _load_model may also return a normalize_globals flag (4-tuple).
+        # v2.16: _load_model may additionally return a rain_normaliser (5-tuple).
+        # Older overrides returning 3- or 4-tuples still work.
         _loaded = self._load_model()
-        if len(_loaded) == 4:
+        if len(_loaded) == 5:
+            (self.model, _arch_label, obs_layout,
+             normalize_globals, rain_normaliser) = _loaded
+        elif len(_loaded) == 4:
             self.model, _arch_label, obs_layout, normalize_globals = _loaded
+            rain_normaliser = RAIN_REF
         else:
             self.model, _arch_label, obs_layout = _loaded
             normalize_globals = False
+            rain_normaliser   = RAIN_REF
         self._obs_layout = obs_layout    # 'v28' | 'v27' | 'v26'
         self._normalize_globals = bool(normalize_globals)
+        self._rain_normaliser   = float(rain_normaliser)
 
         if self.verbose:
             print(f"  Loaded checkpoint: critic architecture = {_arch_label}")
@@ -287,6 +319,8 @@ class RLController(Controller):
                          if self._normalize_globals
                          else 'v2.8.1 (per-agent only; raw global/forecast block)')
             print(f"  Obs normalisation:  {_normdesc}")
+            if self._normalize_globals:
+                print(f"  rain_normaliser:    {self._rain_normaliser:.1f} mm/day")
 
         self._inference_times = []
         self._noisy_forecast = None
@@ -480,7 +514,10 @@ class RLController(Controller):
         # v2.12: divide raw weather by physical references so the actor sees the
         # same normalised scale it was trained on.  Legacy checkpoints
         # (normalize_globals=False) keep the raw magnitudes.
-        _rain_s = RAIN_REF if self._normalize_globals else 1.0
+        # v2.16: rainfall denominator is per-checkpoint (RAIN_REF=70.0 for
+        # v2.7-v2.15, RAIN_REF_V216=30.0 for v2.16).  Set in __init__ from
+        # the loaded model's marker.
+        _rain_s = self._rain_normaliser if self._normalize_globals else 1.0
         _etc_s  = ETC_REF  if self._normalize_globals else 1.0
         _rad_s  = RAD_REF  if self._normalize_globals else 1.0
 

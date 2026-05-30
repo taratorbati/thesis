@@ -87,10 +87,54 @@ FORECAST_H          = 8       # forecast horizon (days)
 #     Kc_ET     : /  8.0   (record max  7.05)
 #     radiation : / 35.0   (record max 31.69)
 # h2, h7, g_base already live in [0, ~1], so they are left unscaled.
-RAIN_REF = 70.0    # mm/day normaliser for rainfall + rainfall forecast
+RAIN_REF = 70.0    # mm/day normaliser for rainfall + rainfall forecast (v2.7-v2.15)
 ETC_REF  = 8.0     # mm/day normaliser for Kc_ET + Kc_ET forecast
 RAD_REF  = 35.0    # MJ m^-2 d^-1 normaliser for radiation forecast
 NORMALIZE_GLOBALS_DEFAULT = True   # v2.12 default; set False to reproduce v2.7/v2.11 obs
+
+# ── v2.16 NEW: tighter rainfall normaliser ────────────────────────────────────
+# RAIN_REF=70.0 (chosen against record-max 64.31 mm with margin) was
+# diagnostically too large.  Empirical rainfall distribution on the growing
+# season (DOY 92-185, all 26 years 2000-2025):
+#   - 36.1% of days: exactly 0
+#   - 74.0% of days: rain < 0.7 mm  (i.e. rain/70 < 0.01)
+#   - median rain/70                = 0.001
+#   - p99    rain/70                = 0.18
+#   - max    rain/70 (2023 outlier) = 0.65
+# After 2x-1 re-centering (v2.13+), median rain input sits at -0.998 and p99
+# at -0.64.  The recentered rain channel occupies only the bottom ~0.36 of the
+# [-1, +1] interval, whereas ETc and rad occupy ~1.4-1.6 of it.
+#
+# Direct gradient analysis on the v2.15 250k actor (BS=2000 realistic-distribution
+# inputs):
+#                                  |dmu/dx_i|   dynamic range   effective sensitivity
+#   rain forecast (mean over 8d)     0.434          0.36              0.156
+#   ETc  forecast (mean over 8d)     1.236          1.44              1.78
+#   rad  forecast (mean over 8d)     1.404          1.56              2.19
+# Per-unit-of-input-range, rain is the LEAST informative forecast feature -
+# not because the gradient is small but because the input never moves.  This
+# is the "rain-blindness" diagnostic that explains corr(u, rain_fwd7) ≈ +0.03
+# in v2.15 versus -0.42 in MPC.
+#
+# Candidate RAIN_REF values evaluated on 26-year season distribution:
+#   ref   train p99/ref  2024 max/ref  train %clip  2024 %clip   recenter span
+#    15        0.83         2.39          0.75%        2.15%        1.66
+#    20        0.62         1.79          0.33%        1.08%        1.24
+#    25        0.50         1.43          0.09%        1.08%        1.00
+#    30        0.42         1.19          0.09%        1.08%        0.83
+#    50        0.25         0.72          0.00%        0.00%        0.50
+#
+# RAIN_REF=15 fails the 2024-wet-year preservation test: 6 days clip (35.8,
+# 19.2, 14.2, 14.2, 13.4 mm), compressing the very events the wet-year
+# pathology occurs around.  RAIN_REF=30 preserves all moderate rain events
+# (up to 30 mm) with full signal range, clips only the 36 mm 2024 outlier
+# (now mapped to "max" rather than "unrecognisable extreme"), and triples the
+# recentered span vs ref=70 (0.83 vs 0.36).  Chosen over alternatives:
+#   - vs 15: doesn't compress wet-year heavy events
+#   - vs 25: same train-clip but slightly less wet-year clipping
+#   - vs 50: 1.7x more effective sensitivity gain
+#   - vs log/sqrt: preserves linear-scaling methodology of v2.7-v2.15
+RAIN_REF_V216 = 30.0   # tightened rainfall normaliser (v2.16)
 
 # ── reward weights (unchanged from v2.7) ──────────────────────────────────────
 ALPHA1 = 1.0     # biomass increment
@@ -236,6 +280,7 @@ class IrrigationEnv(gym.Env):
         use_overshoot_feature:   bool = True,
         normalize_globals:       bool = NORMALIZE_GLOBALS_DEFAULT,
         reward_overshoot_mode:   str  = 'quadratic',
+        rain_normaliser:         float = RAIN_REF,
     ):
         super().__init__()
         self.randomize = randomize
@@ -252,6 +297,15 @@ class IrrigationEnv(gym.Env):
                 f"Got: {reward_overshoot_mode!r}"
             )
         self._reward_overshoot_mode = str(reward_overshoot_mode)
+        # v2.16: rainfall normaliser is now configurable.  Default RAIN_REF=70.0
+        # preserves byte-identical behaviour for v2.7-v2.15 training scripts.
+        # v2.16 trains with rain_normaliser=RAIN_REF_V216=30.0 to give the
+        # rain channel a usable input dynamic range.
+        if rain_normaliser <= 0.0:
+            raise ValueError(
+                f"rain_normaliser must be positive, got {rain_normaliser!r}"
+            )
+        self._rain_normaliser = float(rain_normaliser)
 
         # obs dim depends on whether x1_overshoot_norm is included:
         #   use_overshoot_feature=True  (v2.8 default): 9 feat/agent → 1227-dim
@@ -481,7 +535,9 @@ class IrrigationEnv(gym.Env):
         # sit in ~[0, 1] like the per-agent block.  h2, h7, g_base already in
         # [0, ~1].  When normalize_globals=False the raw v2.7/v2.11 values are
         # used (for reproducing / evaluating legacy checkpoints).
-        _rain_s = RAIN_REF if self._normalize_globals else 1.0
+        # v2.16: rainfall denominator is now self._rain_normaliser (defaults to
+        # RAIN_REF=70.0 for v2.7-v2.15; v2.16 sets it to RAIN_REF_V216=30.0).
+        _rain_s = self._rain_normaliser if self._normalize_globals else 1.0
         _etc_s  = ETC_REF  if self._normalize_globals else 1.0
         _rad_s  = RAD_REF  if self._normalize_globals else 1.0
 

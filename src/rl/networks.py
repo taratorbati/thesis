@@ -459,6 +459,56 @@ class _V215SharedActor(_V214SharedActor):
         self.obs_norm_marker.data = torch.tensor([2.15])
 
 
+class _V216SharedActor(_V215SharedActor):
+    """SharedActor for v2.16 (v2.15 architecture + tighter rain normaliser
+    RAIN_REF=30 + auto-tuned alpha capped at 0.1).
+
+    v2.16 is architecturally identical to v2.15 (and therefore v2.14, v2.13).
+    Two training-time changes, both targeting the rain-blindness diagnostic
+    on v2.15's 250k policy:
+
+        DIAGNOSTIC (v2.15 250k actor, gradient analysis on realistic obs):
+          feature              |dmu/dx_i|   input range   effective sensitivity
+          rain forecast (8d)     0.43          0.36           0.16  <-- LOWEST
+          ETc  forecast (8d)     1.24          1.44           1.78
+          rad  forecast (8d)     1.40          1.56           2.19
+          x1 (soil moisture)     2.03          3.00           6.08
+        The actor IS responsive to ET and radiation forecasts (effective
+        sensitivity > 1.7) but rain has effective sensitivity 0.16 because
+        the input dynamic range is compressed: rainfall/70 has median 0.001
+        and p99 0.18, so the recentered input occupies only [-1.0, -0.64]
+        of the [-1, +1] range.  This is the root cause of the
+        corr(u, rain_fwd7) approx +0.03 observed across v2.14 and v2.15.
+
+        Two paired changes in v2.16:
+
+        1. RAIN_REF: 70.0 -> 30.0.  Rationale documented in gym_env.py.
+           Effective sensitivity to rain rises from 0.16 to ~0.36 - puts
+           rain in the same effective-sensitivity range as today's ET.
+
+        2. ent_coef: 0.01 fixed -> auto-tuned, capped at log(0.1)= -2.303,
+           target_entropy = -65 (vs SB3 default -130).  Anchored to the
+           original v2.4-v2.6 target_entropy range (-13 to -65) which fits
+           the VDN-factorized actor structure better than SB3's default
+           (the default was derived for monolithic action spaces, not for
+           shared per-agent actors).  log_ent_coef initialized at
+           log(0.05) approx -3.0 (v2.14/v2.15 known-stable value), allowed
+           to drift up to the 0.1 cap or arbitrarily low.
+
+    Why a separate class instead of just a config flag:
+        The marker buffer (2.16) lets the eval runner identify this
+        checkpoint AND apply the matching rain normaliser at eval time.
+        Same dispatch mechanism as v2.12->v2.15.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # v2.16 marker.  Architecturally byte-identical to v2.15; marker change
+        # lets the runner recognise checkpoints trained with RAIN_REF=30
+        # and capped auto-alpha so eval-time normalisation matches training.
+        self.obs_norm_marker.data = torch.tensor([2.16])
+
+
 class _LegacySharedActor(SharedActor):
     """SharedActor for v2.6 checkpoints (5 per-agent features, 62-dim input)."""
     _N_AGENT_FEATURES    = V26_N_AGENT_FEATURES
@@ -897,6 +947,47 @@ class V215CTDESACPolicy(SACPolicy):
         kw = self._update_features_extractor(self.actor_kwargs, features_extractor)
         kw["N"] = get_action_dim(self.action_space)
         return _V215SharedActor(**kw).to(self.device)
+
+    def make_critic(self, features_extractor=None):
+        kw = self._update_features_extractor(self.critic_kwargs, features_extractor)
+        kw["N"] = get_action_dim(self.action_space)
+        return _V211FactorizedContinuousCritic(**kw).to(self.device)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  v2.16 CTDE SAC POLICY  (v2.15 architecture + RAIN_REF=30 + capped auto-alpha)
+#
+#  v2.16 = v2.15 architecture (LayerNorm critic + LeakyReLU actor + actor
+#  input re-center + linear r6) PLUS two training-time changes targeting the
+#  rain-blindness diagnostic on v2.15's 250k policy:
+#
+#    1. IrrigationEnv constructor receives rain_normaliser=RAIN_REF_V216=30.0
+#       (was implicit RAIN_REF=70.0 in v2.7-v2.15).  Tripled effective input
+#       dynamic range for rain forecast.
+#
+#    2. SAC ent_coef changes from fixed 0.01 to auto-tuned with cap at 0.1
+#       (log_ent_coef <= log(0.1) approx -2.303) and target_entropy=-65
+#       (was SB3 default -130, mismatched to VDN-factorized actor structure).
+#       log_ent_coef initialized at log(0.05) approx -3.0 (v2.14/v2.15
+#       known-stable level), free to descend.
+#
+#  Architecturally, v2.16 is identical to v2.15 (and v2.14, v2.13).  The
+#  only diffs are the marker buffer (2.16), the env constructor args, and
+#  the SB3 ent_coef config passed by train_v216.
+# ═════════════════════════════════════════════════════════════════════════════
+class V216CTDESACPolicy(SACPolicy):
+    """CTDESACPolicy for v2.16 (v2.15 architecture + tighter rain ref + capped
+    auto-tuned alpha).
+
+    Architecturally identical to V215CTDESACPolicy.  Uses _V216SharedActor
+    only to mark the checkpoint with marker=2.16, so eval-time dispatch can
+    tell v2.16 checkpoints apart and apply the matching RAIN_REF=30 at eval.
+    """
+
+    def make_actor(self, features_extractor=None):
+        kw = self._update_features_extractor(self.actor_kwargs, features_extractor)
+        kw["N"] = get_action_dim(self.action_space)
+        return _V216SharedActor(**kw).to(self.device)
 
     def make_critic(self, features_extractor=None):
         kw = self._update_features_extractor(self.critic_kwargs, features_extractor)

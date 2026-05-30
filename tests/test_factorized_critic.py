@@ -834,3 +834,114 @@ def test_v215_env_reward_overshoot_mode_invalid_raises():
         assert 'reward_overshoot_mode' in str(e)
     else:
         raise AssertionError("Expected ValueError for unknown reward_overshoot_mode")
+
+
+# ── v2.16: v2.15 architecture + RAIN_REF=30 + capped auto-α ─────────────────
+def test_v216_uses_v215_architecture():
+    """v2.16 must be architecturally identical to v2.15 (same actor/critic
+    classes and forward behaviour).  The checkpoint-level diff is the marker
+    buffer value (2.16 vs 2.15).  RAIN_REF is a training-time env property,
+    not network architecture."""
+    from src.rl.networks import (
+        V216CTDESACPolicy, V215CTDESACPolicy,
+        _V216SharedActor, _V215SharedActor, _V214SharedActor,
+        _V211FactorizedContinuousCritic,
+    )
+    obs_space = spaces.Box(
+        low=-np.inf, high=np.inf, shape=(V211_OBS_DIM,), dtype=np.float32
+    )
+    act_space = spaces.Box(low=0.0, high=1.0, shape=(N,), dtype=np.float32)
+    kwargs = make_sac_policy_kwargs(N=N, actor_hidden=(128, 128),
+                                    critic_hidden=(256, 256))
+    def _lr(progress_remaining): return 3e-4
+
+    p16 = V216CTDESACPolicy(observation_space=obs_space, action_space=act_space,
+                            lr_schedule=_lr, **kwargs)
+
+    # Actor lineage: v2.16 inherits v2.15 -> v2.14 -> v2.13 -> v2.12
+    assert isinstance(p16.actor, _V216SharedActor)
+    assert isinstance(p16.actor, _V215SharedActor), (
+        "_V216SharedActor must inherit _V215SharedActor so all prior "
+        "v2.12-v2.15 actor behaviour is preserved."
+    )
+    assert isinstance(p16.actor, _V214SharedActor), (
+        "_V216SharedActor must transitively inherit _V214SharedActor."
+    )
+    # Critic identical to v2.11/v2.12/v2.13/v2.14/v2.15
+    assert isinstance(p16.critic, _V211FactorizedContinuousCritic)
+    # Input recenter still happens (inherited via v2.13)
+    obs_zero = torch.zeros(1, V211_OBS_DIM)
+    per_agent = p16.actor._per_agent_features(obs_zero)
+    assert torch.allclose(per_agent, -torch.ones_like(per_agent), atol=1e-6), (
+        "v2.16 actor must still re-center input (inherited from v2.13)"
+    )
+
+
+def test_v216_marker_is_216():
+    """Runner discriminates v2.16 vs v2.15 via marker value at the 2.155 midpoint."""
+    from src.rl.networks import V216CTDESACPolicy, V215CTDESACPolicy
+    obs_space = spaces.Box(
+        low=-np.inf, high=np.inf, shape=(V211_OBS_DIM,), dtype=np.float32
+    )
+    act_space = spaces.Box(low=0.0, high=1.0, shape=(N,), dtype=np.float32)
+    kwargs = make_sac_policy_kwargs(N=N, actor_hidden=(128, 128),
+                                    critic_hidden=(256, 256))
+    def _lr(progress_remaining): return 3e-4
+
+    p16 = V216CTDESACPolicy(observation_space=obs_space, action_space=act_space,
+                            lr_schedule=_lr, **kwargs)
+    p15 = V215CTDESACPolicy(observation_space=obs_space, action_space=act_space,
+                            lr_schedule=_lr, **kwargs)
+    m16 = float(p16.state_dict()['actor.obs_norm_marker'].item())
+    m15 = float(p15.state_dict()['actor.obs_norm_marker'].item())
+    assert abs(m16 - 2.16) < 1e-4, f"v2.16 marker should be 2.16, got {m16}"
+    assert abs(m15 - 2.15) < 1e-4, f"v2.15 marker should be 2.15, got {m15}"
+    # Runner uses 2.155 midpoint to dispatch v2.16 vs v2.15.
+    assert m16 > 2.155, "v2.16 marker must exceed midpoint 2.155"
+    assert m15 < 2.155, "v2.15 marker must be below midpoint 2.155"
+
+
+def test_v216_env_rain_normaliser_30_changes_obs():
+    """The env's rain_normaliser parameter must change the rainfall channel's
+    scale in the observation.  This is the single-variable v2.16 input change."""
+    from src.rl.gym_env import IrrigationEnv, RAIN_REF, RAIN_REF_V216
+    env_v15 = IrrigationEnv(randomize=False, curriculum_warmup_steps=0,
+                            use_overshoot_feature=False, normalize_globals=True,
+                            reward_overshoot_mode='linear',
+                            rain_normaliser=RAIN_REF)
+    env_v16 = IrrigationEnv(randomize=False, curriculum_warmup_steps=0,
+                            use_overshoot_feature=False, normalize_globals=True,
+                            reward_overshoot_mode='linear',
+                            rain_normaliser=RAIN_REF_V216)
+    assert env_v15._rain_normaliser == 70.0
+    assert env_v16._rain_normaliser == 30.0
+    assert RAIN_REF == 70.0
+    assert RAIN_REF_V216 == 30.0
+
+    # Reset both with the same seed and inspect the rain channel directly.
+    o15, _ = env_v15.reset(seed=0)
+    o16, _ = env_v16.reset(seed=0)
+
+    # rain_today is at index 8*130 + 4 = 1044 (per-agent block 1040 + scalar idx 4)
+    rain_idx = 8 * 130 + 4
+    rain_v15 = o15[rain_idx]
+    rain_v16 = o16[rain_idx]
+    # If rain > 0, v2.16's value must be ~70/30 = 2.333x larger than v2.15's
+    # (because both divide raw_rain by their respective normaliser).
+    if rain_v15 > 1e-6:
+        ratio = rain_v16 / rain_v15
+        assert abs(ratio - (70.0 / 30.0)) < 0.05, (
+            f"v2.16 rain channel should be {70.0/30.0:.3f}x v2.15's, got {ratio:.3f}"
+        )
+
+
+def test_v216_env_rain_normaliser_invalid_raises():
+    """The env constructor must reject non-positive rain_normaliser."""
+    from src.rl.gym_env import IrrigationEnv
+    for bad in [0.0, -1.0, -70.0]:
+        try:
+            IrrigationEnv(rain_normaliser=bad)
+        except ValueError as e:
+            assert 'rain_normaliser' in str(e)
+        else:
+            raise AssertionError(f"Expected ValueError for rain_normaliser={bad}")
