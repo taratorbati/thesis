@@ -214,7 +214,20 @@ class BiasRatioCallback(BaseCallback):
         # geometric_weight ≈ 1/(1-γ) capped at episode length 93.
         gamma = float(self.model.gamma)
         geom_weight = min(1.0 / max(1.0 - gamma, 1e-6), 93.0)
-        alpha = float(self.model.ent_coef)
+        # v2.16: SB3 stores ent_coef either as a float (fixed mode, e.g. 0.01
+        # in v2.14/v2.15) or as the original string "auto_X.XX" (auto-tune
+        # mode).  In auto mode the live value lives in self.model.log_ent_coef
+        # (a learnable scalar tensor) and the original ent_coef attribute keeps
+        # the init string for reference.  Read the live value first; fall back
+        # to ent_coef_tensor (fixed mode) and finally to the float cast for
+        # backwards compat with v2.14/v2.15 callbacks.
+        if getattr(self.model, "log_ent_coef", None) is not None:
+            import torch as _th
+            alpha = float(_th.exp(self.model.log_ent_coef.detach()).item())
+        elif getattr(self.model, "ent_coef_tensor", None) is not None:
+            alpha = float(self.model.ent_coef_tensor.detach().item())
+        else:
+            alpha = float(self.model.ent_coef)
         q_structural = alpha * geom_weight * (-lp_mean)
 
         q_inflation     = q_pred_mean - q_structural

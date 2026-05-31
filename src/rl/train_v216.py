@@ -1,13 +1,13 @@
-# src/rl/train_v216.py  v2.16.0 (v2.15 architecture + RAIN_REF=30 + capped auto-alpha)
+# src/rl/train_v216.py  v2.16.0 (v2.15 architecture + RAIN_REF=30, fixed alpha=0.01)
 # -----------------------------------------------------------------------------
 # WHY v2.16 EXISTS
 # ----------------
 # v2.15 (v2.14 architecture + linear r6) trained stably and reached
 # u_min=1.32 mm at 250k (proving the actor CAN produce low actions) but did
-# not improve yield over v2.14 - in particular, wet-year yield dropped
-# 31-64 kg/ha across all three budgets, with wet/100 water USE rising from
-# 402 mm (v2.14) to 428 mm (v2.15).  Direct gradient analysis on the v2.15
-# 250k actor (BS=2000, realistic-distribution inputs) revealed:
+# not improve yield over v2.14 - wet-year yield dropped 31-64 kg/ha across
+# all three budgets, with wet/100 water USE rising from 402 mm (v2.14) to
+# 428 mm (v2.15).  Direct gradient analysis on the v2.15 250k actor (BS=2000
+# realistic-distribution inputs) revealed:
 #
 #   feature                  |dmu/dx_i|   input range   effective sensitivity
 #   ----------------------------------------------------------------------
@@ -30,46 +30,45 @@
 # enough to drive the actor's output even though the gradient through it
 # is moderate.
 #
-# TWO PAIRED CHANGES IN v2.16
-# ---------------------------
-# 1. RAIN_REF: 70.0 -> 30.0.  Rationale documented in gym_env.py.
-#    - Effective sensitivity to rain rises from 0.16 to ~0.36-0.40.
-#    - Median rain still maps to ~-1 (near floor, correct: no rain = no signal).
-#    - 5 mm rain: -1.0 -> -0.67 (was -0.98)  --  small rain becomes legible.
-#    - 15 mm rain: -1.0 -> 0.0   (was -0.57)
-#    - 30 mm rain: -1.0 -> +1.0  (was -0.14)  --  heavy rain saturates.
-#    - 2024 wet-year max (36 mm) clips at +1.0 with 1.08% of days clipped.
-#    - Training-year clip rate: 0.09%.
-#    - Compared to RAIN_REF=15 (clips 2.15% of 2024 days including 14, 19, 35 mm
-#      events), RAIN_REF=30 preserves the moderate-heavy rain events the
-#      wet-year over-irrigation pathology occurs around.
-#    - All other normalisers (ETC_REF=8, RAD_REF=35) unchanged.
+# THE v2.16 CHANGE (one variable, true single-variable test)
+# ----------------------------------------------------------
+#    rain_normaliser: 70.0 -> 30.0
 #
-# 2. ent_coef: 0.01 fixed -> auto-tuned, capped at 0.1, target_entropy=-65.
-#    - SB3's default target_entropy for SAC is -dim(action) = -130 for our
-#      action space.  This default was derived for monolithic action spaces
-#      (one independent head per action dimension).  Our actor is VDN-factorised:
-#      130 actions are produced by a SHARED per-agent network.  Per-cell
-#      entropy is the actual control variable.  Target -130 means -1.0
-#      per cell (very low entropy per cell, encouraging near-deterministic
-#      per-cell actions).  Target -65 means -0.5 per cell (moderately
-#      stochastic per cell), which better encourages buffer diversity for
-#      the shared actor structure.
-#    - target_entropy=-65 anchors to the original v2.4-v2.6 target_entropy
-#      range (-13 to -65) which had been tuned for this VDN-factorised actor
-#      before SB3's auto-α default was adopted.
-#    - alpha cap at 0.1: v2.7's cascade happened at fixed alpha=0.05, so 0.1
-#      leaves some safety margin above without being unbounded.  SB3 defaults
-#      to alpha=1.0 unbounded.
-#    - log_ent_coef initialised at log(0.05) approx -3.0 (v2.14/v2.15 known-
-#      stable level), free to descend to arbitrarily small or rise to cap.
-#    - After each ent_coef gradient step, log_ent_coef is clipped to
-#      [-inf, log(0.1)].
+# An earlier v2.16 design also switched ent_coef from fixed 0.01 to auto-tuned
+# with cap 0.1 and target_entropy=-65.  A 25k-step run showed auto-alpha
+# pushing alpha to ~9e-05 (a 500x drop from init) by step 24k, effectively
+# turning off exploration.  Diagnosis: with VDN summing per-cell entropy
+# across 130 shared-actor cells, the policy's natural entropy already exceeded
+# target_entropy=-65 from the start, so the auto-tuner's gradient direction
+# was monotonically negative.  Auto-alpha as configured introduced a confound
+# rather than testing rain rescaling cleanly.
+#
+# v2.16 (this file, the final design) therefore reverts to fixed alpha=0.01
+# (same as v2.14/v2.15) and tests ONLY the rain normaliser change.  If wet-
+# year over-irrigation drops, the rain-blindness diagnostic is confirmed
+# without confounders.
+#
+# CALIBRATION OF RAIN_REF_V216 = 30
+# ---------------------------------
+# Evaluated against the 26-year growing-season climate record:
+#   ref   train p99/ref  2024 max/ref  train %clip  2024 %clip  recenter span
+#    15        0.83         2.39         0.75%        2.15%        1.66
+#    20        0.62         1.79         0.33%        1.08%        1.24
+#    25        0.50         1.43         0.09%        1.08%        1.00
+#    30        0.42         1.19         0.09%        1.08%        0.83
+#    50        0.25         0.72         0.00%        0.00%        0.50
+#
+# ref=15 fails the 2024-wet-year preservation test: 6 days clip (35.8, 19.2,
+# 14.2, 14.2, 13.4 mm) - the events the wet-year pathology occurs around.
+# ref=30 preserves all moderate rain (up to 30 mm), clips only the 36 mm 2024
+# outlier (now mapped to "max" rather than "unrecognisable extreme"), and
+# triples the recentered input span (0.83 vs 0.36 at ref=70).
 #
 # Architecturally byte-identical to v2.15.  All other hyperparameters
 # unchanged: V211 LayerNorm critic, LeakyReLU actor, actor input re-center,
-# normalised globals, asymmetric actor LR (5x), gamma=0.99, tau=0.005,
-# linear r6, batch 256, buffer 250k, 250k steps, MAX_GRAD_NORM=1.0.
+# normalised globals (with rain_normaliser=30), asymmetric actor LR (5x),
+# gamma=0.99, tau=0.005, alpha=0.01 (FIXED, not auto-tuned), linear r6,
+# batch 256, buffer 250k, 250k steps, MAX_GRAD_NORM=1.0.
 #
 # ACCEPTANCE CRITERIA
 # -------------------
@@ -80,8 +79,7 @@
 # Secondary  ("did wet-year over-irrigation drop?"):
 #   - wet/100 water_used_mm < 400 mm  (v2.15: 428; v2.14: 402; MPC: 310).
 #   - wet/100 waterlog_days_per_agent < 60  (v2.14: 80; MPC: 19).
-# Stability  ("alpha trajectory and Q stayed sane"):
-#   - ent_coef stays in [1e-6, 0.1] (cap not violated; entropy doesn't collapse).
+# Stability  ("Q stayed sane"):
 #   - critic_loss < 100 throughout; |q_inflation_pct| < 50%.
 # Stretch  ("policy quality improved"):
 #   - 9-cell mean yield >= 3720  (v2.14: 3710; v2.15: 3680).
@@ -92,26 +90,17 @@
 #   - The actor was already responsive to ET and rad forecasts.  If wet-year
 #     over-irrigation has causes BEYOND rain-blindness (e.g. the actor's
 #     biomass-incentive in r1 making FC the local reward optimum), rain
-#     rescaling alone won't close the gap.  We'd see corr(u, rain_fwd7)
+#     rescaling alone won't close the gap.  We would see corr(u, rain_fwd7)
 #     improve but yield and water use stay similar.
-#   - Auto-alpha could descend close to 0, collapsing exploration.  Floor at
-#     log(1e-6) approx -13.8 by construction (SB3 does not impose a floor;
-#     the optimizer's gradient typically keeps it well above this) but worth
-#     monitoring.
-#   - Auto-alpha could pin at the 0.1 cap if entropy keeps trying to rise.
-#     This would happen only if the actor is producing very low entropy and
-#     auto-alpha is pushing back hard - the symptom of action collapse.  The
-#     cap then prevents the cascade.  Cap at 0.1 is consistent with v2.13's
-#     0.05 plus 2x safety margin.
+#   - Single-seed run (seed 0).  Multi-seed validation deferred to v2.16b
+#     after the seed-0 result is interpreted.
 # -----------------------------------------------------------------------------
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 from typing import Optional
 
-import torch
 from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import (
     CallbackList,
@@ -137,8 +126,7 @@ from src.rl.train_v212 import AsymmetricLRSAC
 
 
 # -----------------------------------------------------------------------------
-# Hyperparameters - identical to v2.15 EXCEPT ent_coef, target_entropy, and the
-# env's rain_normaliser.
+# Hyperparameters - identical to v2.15 EXCEPT the env's rain_normaliser.
 # -----------------------------------------------------------------------------
 TOTAL_TIMESTEPS  = 250_000
 BUFFER_SIZE      = 250_000
@@ -149,14 +137,7 @@ TAU              = 0.005
 LR_START         = 3e-4
 LR_END           = 5e-5
 ACTOR_LR_MULT    = 5.0           # same asymmetric LR as v2.12-v2.15
-
-# v2.16 ent_coef config:
-#   SB3 string 'auto_X.XX' = auto-tune log_ent_coef, initialised at log(X.XX).
-#   Initial value chosen at 0.05 (v2.14/v2.15 known-stable; also equal to the
-#   cap so the cap engages immediately on the first upward step).
-ENT_COEF_INIT    = "auto_0.05"
-ENT_COEF_CAP     = 0.1           # log(0.1) approx -2.303 is the upper bound
-TARGET_ENTROPY   = -65.0         # vs SB3 default -130 (-dim(action_space))
+ENT_COEF         = 0.01          # carried forward from v2.14/v2.15 (FIXED)
 
 MAX_GRAD_NORM    = 1.0
 LEARNING_STARTS  = 1_000
@@ -177,46 +158,7 @@ LR_LOG_FREQ              = 1_000
 
 # v2.16 env config:
 REWARD_OVERSHOOT_MODE = 'linear'        # carried forward from v2.15 (unchanged)
-RAIN_NORMALISER       = RAIN_REF_V216   # 30.0 — *** THE v2.16 ENV CHANGE ***
-
-
-# -----------------------------------------------------------------------------
-# AsymmetricLRSAC + capped auto-alpha
-# -----------------------------------------------------------------------------
-# SB3's SAC implements auto-alpha by storing log_ent_coef as a learnable
-# scalar parameter (self.log_ent_coef).  Each train() step:
-#   1. computes ent_coef = exp(log_ent_coef.detach()) and uses it in the
-#      critic target and actor loss,
-#   2. computes ent_coef_loss = -(log_ent_coef * (log_prob + target_entropy).detach()).mean()
-#   3. backprops and steps self.ent_coef_optimizer.
-# To cap alpha at 0.1 we clip log_ent_coef.data <= log(0.1) AFTER each ent_coef
-# optimizer step.  This is the minimum-invasiveness implementation; it does
-# not modify the gradient computation, only the post-update parameter value.
-# -----------------------------------------------------------------------------
-class CappedAutoAlphaAsymmetricLRSAC(AsymmetricLRSAC):
-    """AsymmetricLRSAC variant that caps log_ent_coef at log(ent_coef_cap)
-    after every gradient step.  Class attribute ent_coef_cap controls the
-    cap (set externally before instantiation).
-
-    The cap is enforced AFTER the auto-tune optimizer step, so the gradient
-    is computed against the unrestricted objective and only the resulting
-    parameter is clipped.  This matches the standard "projected gradient"
-    pattern.
-    """
-
-    ent_coef_cap: float = 0.1   # default; set externally before .learn()
-
-    def train(self, gradient_steps: int, batch_size: int = 64) -> None:
-        # Run the standard SAC train (which steps log_ent_coef if
-        # ent_coef_optimizer is present).
-        super().train(gradient_steps=gradient_steps, batch_size=batch_size)
-        # Clip log_ent_coef to enforce the cap.  Only applies when SB3 is
-        # running in auto-tune mode (ent_coef_optimizer is not None).
-        if (self.ent_coef_optimizer is not None
-                and getattr(self, "log_ent_coef", None) is not None):
-            cap = math.log(float(self.ent_coef_cap))
-            with torch.no_grad():
-                self.log_ent_coef.data.clamp_(max=cap)
+RAIN_NORMALISER       = RAIN_REF_V216   # 30.0 -- *** THE v2.16 CHANGE ***
 
 
 def train_sac_v216(
@@ -226,22 +168,18 @@ def train_sac_v216(
     total_timesteps: int = TOTAL_TIMESTEPS,
     gamma: float = GAMMA,
     actor_lr_mult: float = ACTOR_LR_MULT,
-    ent_coef_init: str = ENT_COEF_INIT,
-    ent_coef_cap: float = ENT_COEF_CAP,
-    target_entropy: float = TARGET_ENTROPY,
+    ent_coef: float = ENT_COEF,
     reward_overshoot_mode: str = REWARD_OVERSHOOT_MODE,
     rain_normaliser: float = RAIN_NORMALISER,
 ) -> SAC:
     """Train a SAC v2.16 agent.
 
     v2.16 = v2.15 architecture (LayerNorm critic, LeakyReLU actor, normalised
-    globals, actor input re-center, asymmetric LR, linear r6) with two
-    paired training-time changes:
-      - rain normaliser tightened from 70 to 30 to give the rain forecast
-        channel a usable input dynamic range (3x effective sensitivity);
-      - SAC ent_coef switches from fixed 0.01 to auto-tuned with cap 0.1 and
-        target_entropy=-65 (matches the VDN-factorised actor structure
-        better than SB3's default -130).
+    globals, actor input re-center, asymmetric LR, linear r6, fixed alpha=0.01)
+    with ONE training-time change: rainfall normaliser tightened from 70 to 30
+    to give the rain forecast channel a usable input dynamic range (3x
+    effective sensitivity).  Single-variable test of the rain-blindness
+    diagnostic on v2.15.
     """
     run_name = f"sac_v216_seed{seed}"
     save_dir = Path(output_dir) / run_name
@@ -249,9 +187,9 @@ def train_sac_v216(
 
     config = {
         "version": "2.16.0",
-        "experiment": "v216_v215_arch_PLUS_rain_ref_30_PLUS_capped_autoalpha",
+        "experiment": "v216_v215_arch_PLUS_rain_ref_30",
         "seed": seed,
-        "algorithm": "SAC (stable_baselines3) + asymmetric LR + capped auto-alpha",
+        "algorithm": "SAC (stable_baselines3) + asymmetric actor LR",
         "policy_class": "V216CTDESACPolicy (V215 actor/critic, marker=2.16)",
         "total_timesteps": total_timesteps,
         "buffer_size": BUFFER_SIZE,
@@ -261,11 +199,9 @@ def train_sac_v216(
         "lr_start": LR_START,
         "lr_end": LR_END,
         "actor_lr_mult": actor_lr_mult,
-        "ent_coef_init": ent_coef_init,            # *** NEW: auto-tune ***
-        "ent_coef_cap": ent_coef_cap,              # *** NEW: alpha cap ***
-        "target_entropy": target_entropy,          # *** NEW: -65 vs SB3 -130 ***
+        "ent_coef": ent_coef,
         "reward_overshoot_mode": reward_overshoot_mode,
-        "rain_normaliser": rain_normaliser,        # *** NEW: 30 vs prior 70 ***
+        "rain_normaliser": rain_normaliser,        # *** THE NEW VARIABLE ***
         "alpha6_lin": 1.5,
         "max_grad_norm": MAX_GRAD_NORM,
         "actor_hidden": ACTOR_HIDDEN,
@@ -291,17 +227,9 @@ def train_sac_v216(
             "actor showed effective sensitivity to rain was 0.16, vs 1.78 for "
             "ETc and 2.19 for radiation - the actor was rain-blind not because "
             "the gradient through rain was small but because the input never "
-            "moved.  RAIN_REF=30 triples the effective sensitivity.",
-            "ent_coef: 0.01 fixed -> auto-tuned, capped at 0.1, target_entropy "
-            "= -65.  SB3's default target_entropy (-dim(action) = -130) was "
-            "derived for monolithic action spaces and is too aggressive for "
-            "our VDN-factorised actor structure (shared per-agent network "
-            "producing 130 actions).  Target -65 corresponds to -0.5 per cell, "
-            "matching the original v2.4-v2.6 target_entropy range that had "
-            "been hand-tuned for this architecture.  Initial log_ent_coef at "
-            "log(0.05) approx -3.0 (v2.14/v2.15 known-stable value).  Cap at "
-            "log(0.1) approx -2.303 enforced by post-step parameter clipping "
-            "in CappedAutoAlphaAsymmetricLRSAC.train()."
+            "moved.  RAIN_REF=30 triples the effective sensitivity.  ALL "
+            "other hyperparameters (alpha=0.01 fixed, linear r6) are byte-"
+            "identical to v2.15 for a clean single-variable test."
         ],
     }
 
@@ -337,12 +265,8 @@ def train_sac_v216(
 
     lr_schedule = _make_lr_schedule(LR_START, LR_END)
 
-    # Configure the asymmetric-LR SAC subclass:
     AsymmetricLRSAC.actor_lr_mult = float(actor_lr_mult)
-    CappedAutoAlphaAsymmetricLRSAC.actor_lr_mult = float(actor_lr_mult)
-    CappedAutoAlphaAsymmetricLRSAC.ent_coef_cap  = float(ent_coef_cap)
-
-    model = CappedAutoAlphaAsymmetricLRSAC(
+    model = AsymmetricLRSAC(
         policy=V216CTDESACPolicy,
         env=train_env,
         learning_rate=lr_schedule,
@@ -350,8 +274,7 @@ def train_sac_v216(
         batch_size=BATCH_SIZE,
         gamma=gamma,
         tau=TAU,
-        ent_coef=ent_coef_init,        # *** auto-tune, initial 0.05 ***
-        target_entropy=target_entropy, # *** -65 (vs SB3 default -130) ***
+        ent_coef=ent_coef,                          # *** FIXED 0.01 ***
         learning_starts=LEARNING_STARTS,
         gradient_steps=GRADIENT_STEPS,
         train_freq=TRAIN_FREQ,
@@ -360,18 +283,6 @@ def train_sac_v216(
         seed=seed,
         tensorboard_log=str(save_dir / "tensorboard"),
     )
-
-    # Verify the cap is enforced from the start by clipping the initial value.
-    # log(0.05) approx -3.0 is below log(0.1) approx -2.303, so this is a no-op,
-    # but assert to fail loudly if SB3 changes the auto-alpha initialisation.
-    if model.ent_coef_optimizer is not None and model.log_ent_coef is not None:
-        cap_log = math.log(float(ent_coef_cap))
-        initial_log_alpha = float(model.log_ent_coef.detach().item())
-        assert initial_log_alpha <= cap_log + 1e-6, (
-            f"Initial log_ent_coef {initial_log_alpha:.4f} exceeds cap "
-            f"log({ent_coef_cap}) = {cap_log:.4f}.  SB3's auto-alpha "
-            f"initialisation has changed; review CappedAutoAlphaAsymmetricLRSAC."
-        )
 
     # -------------------------------------------------------------------------
     # Callbacks (identical set to v2.14/v2.15).
@@ -434,12 +345,11 @@ def train_sac_v216(
     callbacks = CallbackList(cb_list)
 
     print(f"\n{'='*72}")
-    print(f"  SAC training - v2.16 (RAIN_REF=30 + capped auto-alpha) - seed {seed}")
+    print(f"  SAC training - v2.16 (RAIN_REF=30, fixed alpha=0.01) - seed {seed}")
     print(f"  Architecture: v2.15 (V211 LN critic + LeakyReLU actor + recenter)")
     print(f"  Reward r6:    {reward_overshoot_mode}  (carried from v2.15)")
     print(f"  rain_normaliser: {rain_normaliser:.1f} mm/day  (was 70.0 in v2.15)")
-    print(f"  ent_coef:     auto-tune, init {ent_coef_init}, cap {ent_coef_cap}")
-    print(f"  target_entropy: {target_entropy}  (SB3 default would be -130)")
+    print(f"  ent_coef:     {ent_coef}  FIXED  (carried from v2.14/v2.15)")
     print(f"  GAMMA:        {gamma}")
     print(f"  Critic LR:    {LR_START:.0e} -> {LR_END:.0e} (linear)")
     print(f"  Actor  LR:    {actor_lr_mult}x critic LR (asymmetric)")
@@ -474,9 +384,9 @@ if __name__ == "__main__":
         description=(
             "Train SAC v2.16: v2.15 architecture (LayerNorm critic, LeakyReLU "
             "actor, normalised globals, actor input re-center, asymmetric LR, "
-            "linear r6) with two paired training-time changes: (1) rainfall "
-            "normaliser tightened from 70 to 30, and (2) ent_coef switches "
-            "from fixed 0.01 to auto-tuned with cap 0.1 and target_entropy=-65."
+            "linear r6, fixed alpha=0.01) with ONE training-time change: "
+            "rainfall normaliser tightened from 70 to 30.  Single-variable "
+            "test of the rain-blindness diagnostic on v2.15."
         )
     )
     parser.add_argument("--seed",            type=int,   default=0)
@@ -485,12 +395,8 @@ if __name__ == "__main__":
     parser.add_argument("--total-timesteps", type=int,   default=TOTAL_TIMESTEPS)
     parser.add_argument("--gamma",           type=float, default=GAMMA)
     parser.add_argument("--actor-lr-mult",   type=float, default=ACTOR_LR_MULT)
-    parser.add_argument("--ent-coef-init",   type=str,   default=ENT_COEF_INIT,
-                        help="SB3 ent_coef string; 'auto_X.XX' enables tuning at init X.XX.")
-    parser.add_argument("--ent-coef-cap",    type=float, default=ENT_COEF_CAP,
-                        help="Upper bound on alpha (default 0.1 = v2.16 anchor).")
-    parser.add_argument("--target-entropy",  type=float, default=TARGET_ENTROPY,
-                        help="Target entropy (default -65 vs SB3 default -130).")
+    parser.add_argument("--ent-coef",        type=float, default=ENT_COEF,
+                        help="Entropy coefficient (default 0.01 = inherited from v2.14/v2.15).")
     parser.add_argument("--reward-overshoot-mode", type=str,
                         default=REWARD_OVERSHOOT_MODE,
                         choices=['quadratic', 'linear', 'sqrt'],
@@ -506,9 +412,7 @@ if __name__ == "__main__":
         total_timesteps=args.total_timesteps,
         gamma=args.gamma,
         actor_lr_mult=args.actor_lr_mult,
-        ent_coef_init=args.ent_coef_init,
-        ent_coef_cap=args.ent_coef_cap,
-        target_entropy=args.target_entropy,
+        ent_coef=args.ent_coef,
         reward_overshoot_mode=args.reward_overshoot_mode,
         rain_normaliser=args.rain_normaliser,
     )
