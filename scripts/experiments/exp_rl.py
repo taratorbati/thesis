@@ -48,6 +48,22 @@ import argparse
 import sys
 from pathlib import Path
 
+# -----------------------------------------------------------------------------
+# Windows console encoding fix.
+# On Windows the default stdout encoding is cp1252, which cannot encode the
+# non-ASCII characters (Greek alpha, em-dashes, box-drawing) used in some of
+# the checkpoint architecture labels printed by src/rl/runner.py.  Without this
+# the eval entrypoint crashes with UnicodeEncodeError before producing any
+# results (e.g. on v2.16/v2.17 checkpoints whose label contains the alpha
+# character).  Reconfigure to UTF-8 with a safe fallback so prints never crash.
+for _stream_name in ("stdout", "stderr"):
+    _stream = getattr(sys, _stream_name, None)
+    if _stream is not None and hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 

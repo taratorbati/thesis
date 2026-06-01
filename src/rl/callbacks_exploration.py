@@ -184,32 +184,37 @@ class LowActionCoverageCallback(BaseCallback):
         low_thresh: float = 1.0 / 12.0,
         log_freq: int = 1_000,
         csv_path: Optional[str] = None,
+        wet_rain_threshold_mm: float = 120.0,
         verbose: int = 0,
     ):
         super().__init__(verbose=verbose)
         self.low_thresh = float(low_thresh)
         self.log_freq = int(log_freq)
         self.csv_path = Path(csv_path) if csv_path is not None else None
+        self.wet_rain_threshold_mm = float(wet_rain_threshold_mm)
         self._csv_initialised = False
 
     def _is_wet_episode(self) -> Optional[bool]:
-        # Try infos first (DummyVecEnv exposes them in self.locals['infos']).
-        infos = self.locals.get("infos", None)
-        if infos:
-            info0 = infos[0] if isinstance(infos, (list, tuple)) else infos
-            if isinstance(info0, dict):
-                for key in ("scenario", "climate", "climate_type", "year_type"):
-                    val = info0.get(key, None)
-                    if isinstance(val, str):
-                        return "wet" in val.lower()
-        # Fall back to env attribute inspection.
+        """Detect a wet episode by PHYSICAL seasonal rainfall, not a label.
+
+        During training (randomize=True) the env samples a year from 20
+        TRAINING_YEARS; only 3 years (2022/2018/2024) carry dry/moderate/wet
+        labels, so a label-based check returns None almost always (the bug in
+        the v2.17 run, where frac_low_action_wet was NaN for all rows).
+
+        Instead we read the env's current-episode rainfall array
+        (self._climate['rainfall']) and call the episode "wet" if the season
+        total exceeds wet_rain_threshold_mm.  Reference seasonal totals:
+        dry=39.7, moderate=108.8, wet=176.8 mm; threshold 120 mm cleanly
+        separates the upper (wet-ish) episodes.
+        """
         try:
             env0 = self.training_env.envs[0]
             base = getattr(env0, "unwrapped", env0)
-            for key in ("_scenario", "scenario", "_climate", "climate"):
-                val = getattr(base, key, None)
-                if isinstance(val, str):
-                    return "wet" in val.lower()
+            climate = getattr(base, "_climate", None)
+            if climate is not None and "rainfall" in climate:
+                season_rain = float(np.sum(climate["rainfall"]))
+                return season_rain >= self.wet_rain_threshold_mm
         except Exception:
             pass
         return None
@@ -245,4 +250,142 @@ class LowActionCoverageCallback(BaseCallback):
                 csv.writer(f).writerow(
                     [int(self.num_timesteps), frac_low, frac_low_wet, min_action]
                 )
+        return True
+
+
+class LateNoiseReinjectionCallback(BaseCallback):
+    """Two-phase exploration noise: initial anneal, then a late re-injected pulse.
+
+    Motivation (v2.18-P3b):
+        v2.17-P3 annealed exploration to 0 by step 60k, then exploited for
+        190k steps and converged to a policy that improved wet-year behaviour
+        (x1 152->144, waterlog 76->54) but did NOT fully reach the MPC / auto-
+        alpha operating point (x1 ~130).  The residual over-watering is
+        consistent with the critic having thin data on the EVEN-LOWER actions
+        (0-2 mm in wet states) that the converged policy stopped sampling once
+        noise decayed.  By a late point the critic is well-trained where the
+        policy currently visits, so a short re-injected noise pulse repopulates
+        the low-water region with transitions that get accurate value estimates
+        immediately -- pulling mu down the last bit without the early-training
+        instability of running high noise throughout.
+
+    Schedule (piecewise-linear on num_timesteps):
+        [0, decay_steps]                 sigma: sigma_start -> sigma_floor
+        (decay_steps, reinject_start]    sigma: sigma_floor  (held)
+        [reinject_start, +ramp]          sigma: sigma_floor -> sigma_reinject
+        [peak, reinject_end]             sigma: sigma_reinject -> sigma_floor
+        (reinject_end, end]              sigma: sigma_floor  (held)
+
+    With sigma_floor=0.0 this is exactly: decay to 0, then a triangular pulse
+    of height sigma_reinject centred over [reinject_start, reinject_end].
+
+    The schedule is driven off self.num_timesteps (true global env steps), and
+    sets model.action_noise._sigma each step -- same robust mechanism as
+    ExplorationNoiseDecayCallback (avoids the v2.9 per-call-counter desync bug).
+
+    Parameters
+    ----------
+    sigma_start : float
+        Initial per-dim noise std in normalised action units ([0, 1]).
+    sigma_floor : float
+        Noise std held between phases (default 0.0 = exploration fully off).
+    sigma_reinject : float
+        Peak per-dim noise std of the late pulse.
+    decay_steps : int
+        Steps over which the initial sigma_start -> sigma_floor anneal happens.
+    reinject_start, reinject_end : int
+        Env-step window of the late pulse. The pulse ramps up over the first
+        half and down over the second half (triangular), peaking at the midpoint.
+    log_freq : int
+    csv_path : str or Path, optional
+    verbose : int
+    """
+
+    def __init__(
+        self,
+        sigma_start: float = 0.30,
+        sigma_floor: float = 0.0,
+        sigma_reinject: float = 0.15,
+        decay_steps: int = 60_000,
+        reinject_start: int = 150_000,
+        reinject_end: int = 180_000,
+        log_freq: int = 1_000,
+        csv_path: Optional[str] = None,
+        verbose: int = 1,
+    ):
+        super().__init__(verbose=verbose)
+        self.sigma_start = float(sigma_start)
+        self.sigma_floor = float(sigma_floor)
+        self.sigma_reinject = float(sigma_reinject)
+        self.decay_steps = int(decay_steps)
+        self.reinject_start = int(reinject_start)
+        self.reinject_end = int(reinject_end)
+        self.log_freq = int(log_freq)
+        self.csv_path = Path(csv_path) if csv_path is not None else None
+        self._action_dim: Optional[int] = None
+        self._warned_no_noise = False
+        self._csv_initialised = False
+        self._peak = (self.reinject_start + self.reinject_end) / 2.0
+
+    def _current_sigma(self) -> float:
+        t = self.num_timesteps
+        # Phase 1: initial anneal.
+        if t <= self.decay_steps:
+            if self.decay_steps <= 0:
+                return self.sigma_floor
+            p = min(max(t / self.decay_steps, 0.0), 1.0)
+            return self.sigma_start + p * (self.sigma_floor - self.sigma_start)
+        # Phase 3: late triangular pulse.
+        if self.reinject_start <= t <= self.reinject_end:
+            if t <= self._peak:
+                denom = max(self._peak - self.reinject_start, 1e-9)
+                p = (t - self.reinject_start) / denom
+                return self.sigma_floor + p * (self.sigma_reinject - self.sigma_floor)
+            denom = max(self.reinject_end - self._peak, 1e-9)
+            p = (t - self._peak) / denom
+            return self.sigma_reinject + p * (self.sigma_floor - self.sigma_reinject)
+        # Phases 2 & 4: held at floor.
+        return self.sigma_floor
+
+    def _on_training_start(self) -> None:
+        noise = getattr(self.model, "action_noise", None)
+        if noise is None:
+            if not self._warned_no_noise and self.verbose:
+                print("[LateNoiseReinjection] model.action_noise is None -- "
+                      "callback is inert.")
+            self._warned_no_noise = True
+            return
+        sigma_attr = getattr(noise, "_sigma", None)
+        if sigma_attr is None:
+            raise AttributeError(
+                "LateNoiseReinjectionCallback expects an action_noise with a "
+                "mutable '_sigma' attribute (e.g. SB3 NormalActionNoise).")
+        self._action_dim = int(np.asarray(sigma_attr).reshape(-1).shape[0])
+        noise._sigma = self._current_sigma() * np.ones(self._action_dim, dtype=np.float64)
+        if self.csv_path is not None and not self._csv_initialised:
+            self.csv_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.csv_path, "w", newline="", encoding="utf-8") as f:
+                csv.writer(f).writerow(["step", "sigma", "phase"])
+            self._csv_initialised = True
+
+    def _phase_name(self) -> str:
+        t = self.num_timesteps
+        if t <= self.decay_steps:
+            return "initial_decay"
+        if self.reinject_start <= t <= self.reinject_end:
+            return "reinjection_pulse"
+        return "floor"
+
+    def _on_step(self) -> bool:
+        noise = getattr(self.model, "action_noise", None)
+        if noise is None or self._action_dim is None:
+            return True
+        sigma = self._current_sigma()
+        noise._sigma = sigma * np.ones(self._action_dim, dtype=np.float64)
+        if self.num_timesteps % self.log_freq == 0:
+            self.model.logger.record("p3b/exploration_sigma", float(sigma))
+            if self.csv_path is not None:
+                with open(self.csv_path, "a", newline="", encoding="utf-8") as f:
+                    csv.writer(f).writerow(
+                        [int(self.num_timesteps), float(sigma), self._phase_name()])
         return True
