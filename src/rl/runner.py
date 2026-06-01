@@ -93,12 +93,16 @@ def _detect_critic_arch(model_path: Path):
         obs_marker = float(state_dict['actor.obs_norm_marker'].item())
     else:
         obs_marker = 0.0
+    # TD3 vs SAC actor signal: SAC actors have a stochastic log_std head; the
+    # deterministic TD3 actor (v2.19) does not.  Absence of actor.log_std.weight
+    # is the unambiguous TD3 marker (combined with marker >= 2.185).
+    has_log_std = 'actor.log_std.weight' in state_dict
     if 'critic.qf0.0.weight' in state_dict:
         return (state_dict['critic.qf0.0.weight'].shape[1], 'flat',
-                has_layernorm, obs_marker)
+                has_layernorm, obs_marker, has_log_std)
     if 'critic.qf0.local_q_net.0.weight' in state_dict:
         return (state_dict['critic.qf0.local_q_net.0.weight'].shape[1], 'wrapped',
-                has_layernorm, obs_marker)
+                has_layernorm, obs_marker, has_log_std)
     raise KeyError(
         f"Cannot detect critic architecture from {model_path}. "
         f"Keys starting with 'critic.qf0': "
@@ -108,7 +112,7 @@ def _detect_critic_arch(model_path: Path):
 
 def _detect_critic_input_dim(model_path: Path) -> int:
     """Backwards-compat wrapper — returns only the input dim."""
-    dim, _, _, _ = _detect_critic_arch(model_path)
+    dim, _, _, _, _ = _detect_critic_arch(model_path)
     return dim
 
 
@@ -126,14 +130,33 @@ def _load_sac_model(model_path: Path, device: str = 'cpu'):
         (RAIN_REF=70.0 for v2.7-v2.15, RAIN_REF_V216=30.0 for v2.16).
         Used by the eval runner to apply the same rainfall scaling.
     """
-    dim, key_fmt, has_ln, obs_marker = _detect_critic_arch(model_path)
+    dim, key_fmt, has_ln, obs_marker, has_log_std = _detect_critic_arch(model_path)
     # obs_marker: 0.0=v2.7/v2.11 (raw obs), 2.12=v2.12 (normalised globals),
     # 2.13=v2.13 (normalised globals + actor-only input re-centering),
     # 2.14=v2.14 (v2.13 architecture trained with α=0.01),
     # 2.15=v2.15 (v2.14 architecture trained with linear r6),
-    # 2.16=v2.16 (v2.15 architecture + RAIN_REF=30 + capped auto-α).
+    # 2.16=v2.16 (v2.15 architecture + RAIN_REF=30 + capped auto-α),
+    # 2.19=v2.19 (TD3: deterministic actor, no log_std, same VDN LayerNorm critic).
     normalize_globals = False
     rain_normaliser   = RAIN_REF   # default for v2.7-v2.15 checkpoints
+
+    # ── v2.19 TD3 branch (MUST be checked before the SAC 2.155 branch) ──────────
+    # A TD3 checkpoint has the same VDN LayerNorm critic (dim=66, flat, has_ln)
+    # and a marker, but a DETERMINISTIC actor with NO log_std head.  The
+    # `not has_log_std` guard is what separates it from the v2.16 SAC family,
+    # which shares marker space (>= 2.155).  Loaded via TD3.load, not SAC.load.
+    if dim == 66 and key_fmt == 'flat' and has_ln and (not has_log_std) and obs_marker >= 2.185:
+        from stable_baselines3 import TD3
+        from src.rl.networks_td3 import TD3VDNPolicy
+        model = TD3.load(
+            str(model_path), device=device,
+            custom_objects={'policy_class': TD3VDNPolicy},
+        )
+        label = ('VDN factorised - v2.19 (TD3: deterministic actor + '
+                 'target-policy smoothing; same VDN LayerNorm critic)')
+        # v2.19 uses the v2.16 observation contract (normalised globals, RAIN_REF=30).
+        return model, label, 'v27', True, RAIN_REF_V216
+
     if dim == 837:
         policy_class = MonolithicCTDESACPolicy
         label        = 'monolithic (pre-VDN)'
