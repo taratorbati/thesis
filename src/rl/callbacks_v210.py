@@ -142,11 +142,19 @@ class BiasRatioCallback(BaseCallback):
 
         Used to estimate the structural entropy baseline.  Returns the summed
         log π across all agents (130 agents × per-agent log π).
+
+        Deterministic policies (TD3) have no action_log_prob method and no
+        meaningful log-probability; in that case return NaN so the metric is
+        simply absent rather than crashing the run.  The bias-ratio's primary
+        signal (q_pred vs realised return) does not depend on this term.
         """
+        actor = self.model.actor
+        if not hasattr(actor, "action_log_prob"):
+            return float("nan")
         device = self.model.device
         obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
         with torch.no_grad():
-            _, log_prob = self.model.actor.action_log_prob(obs_t)
+            _, log_prob = actor.action_log_prob(obs_t)
         return float(log_prob.item())
 
     def _unwrap_env(self):
@@ -226,9 +234,21 @@ class BiasRatioCallback(BaseCallback):
             alpha = float(_th.exp(self.model.log_ent_coef.detach()).item())
         elif getattr(self.model, "ent_coef_tensor", None) is not None:
             alpha = float(self.model.ent_coef_tensor.detach().item())
-        else:
+        elif getattr(self.model, "ent_coef", None) is not None:
             alpha = float(self.model.ent_coef)
+        else:
+            # Deterministic policies (TD3) have no entropy coefficient.  The
+            # entropy-based structural baseline does not apply, so alpha=0 and
+            # q_structural=0; q_inflation then equals q_pred_mean (the raw
+            # critic prediction).  The PRIMARY stability signal -- q_pred_mean
+            # and whether it goes negative -- is unaffected and remains the
+            # decision metric for TD3.
+            alpha = 0.0
         q_structural = alpha * geom_weight * (-lp_mean)
+        if np.isnan(q_structural):
+            # lp_mean is NaN for deterministic actors; force the structural
+            # baseline to 0 so q_inflation = q_pred_mean rather than NaN.
+            q_structural = 0.0
 
         q_inflation     = q_pred_mean - q_structural
         if abs(q_structural) > 1e-9:
