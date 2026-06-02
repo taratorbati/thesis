@@ -38,6 +38,7 @@
 from __future__ import annotations
 
 import csv
+from collections import deque
 from pathlib import Path
 from typing import Optional
 
@@ -388,4 +389,134 @@ class LateNoiseReinjectionCallback(BaseCallback):
                 with open(self.csv_path, "a", newline="", encoding="utf-8") as f:
                     csv.writer(f).writerow(
                         [int(self.num_timesteps), float(sigma), self._phase_name()])
+        return True
+
+
+class CollapseGuardCallback(BaseCallback):
+    """Fail-fast guard against deterministic-policy collapse to an action corner.
+
+    Motivation (the v2.19-TD3 failure):
+        Removing the SAC entropy term took away the policy's main exploration
+        and replay-buffer-coverage mechanism. With only weak action noise left,
+        the deterministic TD3 actor drove every cell to the 0 mm boundary, the
+        buffer filled with low-water/drought transitions, the twin-Q critic
+        diverged negative (q_pred_mean -21 -> -145) and there was no signal to
+        climb back. The collapse was visible by 25k steps (eval reward -7) yet
+        the run burned all 250k steps. This guard makes that mode trip EARLY.
+
+    Mechanism:
+        Every ``check_freq`` steps it reads the just-collected actions
+        (``self.locals['actions']``, env-scaled to [0, 1]) and tracks a rolling
+        mean of the fraction sitting in the low-water corner (< ``low_thresh``).
+        Once past ``warmup_steps`` (i.e. past the random learning-starts phase,
+        where ~``low_thresh`` of actions are low by chance), if the rolling
+        fraction exceeds ``collapse_frac`` it logs a prominent warning and, when
+        ``abort_on_collapse`` is set, returns False to stop training. A short
+        probe run therefore fails fast instead of producing a dead 250k policy.
+
+    One-sided BY DESIGN: under-irrigation (the low corner) is the documented TD3
+    collapse mode here. The high-water corner is bounded by the budget clip and
+    is not the failure being guarded against, so we do not test it.
+
+    Parameters
+    ----------
+    low_thresh : float
+        Low-water threshold in normalised [0, 1] action units. Default 1/12
+        (~1 mm/day at UB_MM=12) -- the same definition as
+        ``LowActionCoverageCallback``.
+    collapse_frac : float
+        Rolling low-action fraction at/above which collapse is declared.
+    warmup_steps : int
+        Do not test before this many env steps. Should sit a little past the
+        model's ``learning_starts`` so the random-action phase (where the low
+        fraction is ~``low_thresh`` by chance) never trips the guard.
+    check_freq : int
+        Steps between checks (and between rolling-window samples).
+    window : int
+        Number of recent checks averaged into the rolling fraction (debounces a
+        single noisy batch).
+    abort_on_collapse : bool
+        If True, stop training (return False) on the first trip; if False, only
+        warn and log ``guard/collapsed`` so the full run still completes.
+    csv_path : str or Path, optional
+        Append (step, frac_low, rolling, collapsed) rows for record keeping.
+    verbose : int
+    """
+
+    def __init__(
+        self,
+        low_thresh: float = 1.0 / 12.0,
+        collapse_frac: float = 0.60,
+        warmup_steps: int = 30_000,
+        check_freq: int = 2_000,
+        window: int = 8,
+        abort_on_collapse: bool = True,
+        csv_path: Optional[str] = None,
+        verbose: int = 1,
+    ):
+        super().__init__(verbose=verbose)
+        self.low_thresh = float(low_thresh)
+        self.collapse_frac = float(collapse_frac)
+        self.warmup_steps = int(warmup_steps)
+        self.check_freq = int(check_freq)
+        self.window = int(window)
+        self.abort_on_collapse = bool(abort_on_collapse)
+        self.csv_path = Path(csv_path) if csv_path is not None else None
+        self._recent: deque = deque(maxlen=self.window)
+        self._tripped = False
+        self._csv_initialised = False
+
+    def _on_training_start(self) -> None:
+        if self.csv_path is not None and not self._csv_initialised:
+            self.csv_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.csv_path, "w", newline="", encoding="utf-8") as f:
+                csv.writer(f).writerow(
+                    ["step", "frac_low_action", "frac_low_rolling", "collapsed"]
+                )
+            self._csv_initialised = True
+
+    def _on_step(self) -> bool:
+        if self.num_timesteps % self.check_freq != 0:
+            return True
+        actions = self.locals.get("actions", None)
+        if actions is None:
+            return True
+        actions = np.asarray(actions).reshape(-1)
+        frac_low = float(np.mean(actions < self.low_thresh))
+        self._recent.append(frac_low)
+        rolling = float(np.mean(self._recent))
+
+        self.model.logger.record("guard/frac_low_action", frac_low)
+        self.model.logger.record("guard/frac_low_rolling", rolling)
+
+        collapsed_now = (
+            self.num_timesteps > self.warmup_steps
+            and rolling >= self.collapse_frac
+        )
+        if self.csv_path is not None:
+            with open(self.csv_path, "a", newline="", encoding="utf-8") as f:
+                csv.writer(f).writerow(
+                    [int(self.num_timesteps), frac_low, rolling, int(collapsed_now)]
+                )
+
+        if collapsed_now and not self._tripped:
+            self._tripped = True
+            self.model.logger.record("guard/collapsed", 1.0)
+            msg = (
+                f"[CollapseGuard] COLLAPSE DETECTED at step {self.num_timesteps:,}: "
+                f"rolling low-action fraction = {rolling:.0%} >= "
+                f"{self.collapse_frac:.0%} (window={self.window}). The deterministic "
+                f"policy has collapsed to the ~0 mm corner (the v2.19 failure mode)."
+            )
+            if self.verbose:
+                bar = "=" * 72
+                print(f"\n{bar}\n{msg}")
+            if self.abort_on_collapse:
+                if self.verbose:
+                    print("[CollapseGuard] abort_on_collapse=True -> stopping "
+                          "training early to avoid burning the full run.\n" + "=" * 72)
+                return False
+            if self.verbose:
+                print("[CollapseGuard] abort_on_collapse=False -> warning only; "
+                      "run continues.\n" + "=" * 72)
         return True
