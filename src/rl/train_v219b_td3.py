@@ -52,6 +52,17 @@
 #   target_policy_noise=0.2, target_noise_clip=0.5, policy_delay=2, gamma=0.99,
 #   tau=0.005, LR 3e-4 -> 5e-5, buffer 250k, 250k steps, RAIN_REF=30, linear r6.
 #
+# v2.19c EVAL FIX (this file; architecture/env/reward/hyperparameters otherwise
+# UNCHANGED from v2.19b):  best_model selection now uses a DETERMINISTIC,
+# held-out evaluation instead of the randomize=True eval used by v2.14-v2.19b.
+# The eval env walks a fixed schedule = DEV_YEARS {2002,2004,2013} x budget
+# {0.70,0.85,1.00} (9 episodes), rewound before each eval by
+# FixedScheduleEvalCallback, so the eval reward / best_model choice is
+# comparable across checkpoints, measured on held-out years, and reproducible.
+# The bias-ratio q_pred diagnostic is likewise put on a fixed 3-episode
+# schedule.  NOTE: eval-reward magnitudes are therefore NOT comparable to the
+# committed v2.19b run -- this only takes effect on a fresh retrain.
+#
 # ACCEPTANCE CRITERIA (same spirit as v2.19, plus an explicit no-collapse gate):
 #   NO-COLLAPSE (the v2.19 regression): eval mean-reward climbs above 0 and the
 #     trained policy's dry-year u_mean stays >~4 mm (vs v2.19's 0.92).  The
@@ -79,6 +90,7 @@ from stable_baselines3.common.noise import NormalActionNoise
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 from src.rl.gym_env import IrrigationEnv, RAIN_REF_V216
+from climate_data import DEV_YEARS
 from src.rl.networks_td3 import TD3VDNPolicy, make_td3_policy_kwargs
 from src.rl.callbacks_v210 import (
     BiasRatioCallback,
@@ -90,6 +102,7 @@ from src.rl.callbacks_exploration import (
     LowActionCoverageCallback,
     CollapseGuardCallback,
 )
+from src.rl.callbacks_eval import FixedScheduleEvalCallback
 from src.rl.train import (
     RotatingReplayBufferCheckpoint,
     GradClipCallback,
@@ -160,14 +173,27 @@ GUARD_ABORT         = True
 COVERAGE_LOG_FREQ   = 1_000
 
 EVAL_FREQ        = 25_000
-N_EVAL_EPISODES  = 9
+# *** v2.19c: DETERMINISTIC held-out evaluation for best_model selection. ***
+# Every checkpoint is scored on this fixed schedule = the 3 held-out DEV_YEARS
+# x a 3-point budget grid spanning the U(0.70,1.00) training range = 9 episodes.
+# Comparable across checkpoints and reproducible (replaces the old
+# randomize=True eval, which drew a different (year, budget) sample at every
+# evaluation and so confounded policy quality with the luck of the draw).
+EVAL_BUDGET_FRACS = (0.70, 0.85, 1.00)
+EVAL_SCHEDULE     = [(yr, bf) for yr in DEV_YEARS for bf in EVAL_BUDGET_FRACS]
+N_EVAL_EPISODES   = len(EVAL_SCHEDULE)   # 9 = 3 dev years x 3 budgets
 CHECKPOINT_FREQ  = 25_000
 
 ACTOR_HIDDEN  = [128, 128]
 CRITIC_HIDDEN = [256, 256]
 
 BIAS_RATIO_FREQ       = 25_000
-BIAS_RATIO_N_EPISODES = 3
+# *** v2.19c: deterministic bias-eval schedule (3 DEV_YEARS at full budget).
+# BiasRatioCallback does exactly n_eval_episodes resets per evaluation, so a
+# 3-entry schedule wraps cleanly (idx 0,1,2 -> 0,1,2 ...) and the q_pred drift
+# diagnostic becomes comparable across checkpoints (was randomize=True). ***
+BIAS_EVAL_SCHEDULE    = [(yr, 1.00) for yr in DEV_YEARS]
+BIAS_RATIO_N_EPISODES = len(BIAS_EVAL_SCHEDULE)   # 3
 ACTION_STATS_FREQ     = 1_000
 LR_LOG_FREQ           = 1_000
 
@@ -228,6 +254,13 @@ def train_td3_v219b(
         "guard_abort": guard_abort,
         "rain_normaliser": rain_normaliser,
         "reward_overshoot_mode": reward_overshoot_mode,
+        "eval_protocol": (
+            "v2.19c DETERMINISTIC held-out: DEV_YEARS x {0.70,0.85,1.00} = 9 "
+            "episodes, fixed schedule rewound before each eval (replaces the "
+            "randomize=True eval used by v2.14-v2.19b)."
+        ),
+        "dev_years": list(DEV_YEARS),
+        "eval_budget_fracs": list(EVAL_BUDGET_FRACS),
         "buffer_size": BUFFER_SIZE,
         "batch_size": BATCH_SIZE,
         "fixes_vs_v219": (
@@ -249,6 +282,7 @@ def train_td3_v219b(
         wandb_active = _init_wandb(wandb_project, run_name, config)
 
     def _make_env():
+        # Training env: randomized year (from the 20 TRAINING_YEARS) + budget.
         return IrrigationEnv(
             randomize=True,
             curriculum_warmup_steps=0,
@@ -258,12 +292,38 @@ def train_td3_v219b(
             rain_normaliser=rain_normaliser,
         )
 
+    def _make_eval_env():
+        # v2.19c: DETERMINISTIC held-out eval env for best_model selection.
+        # Identical to _make_env() EXCEPT randomize=False + the fixed
+        # EVAL_SCHEDULE (the 3 held-out DEV_YEARS x 3 budgets).
+        return IrrigationEnv(
+            randomize=False,
+            eval_schedule=EVAL_SCHEDULE,
+            curriculum_warmup_steps=0,
+            use_overshoot_feature=False,
+            normalize_globals=True,
+            reward_overshoot_mode=reward_overshoot_mode,
+            rain_normaliser=rain_normaliser,
+        )
+
+    def _make_bias_eval_env():
+        # v2.19c: DETERMINISTIC bias-diagnostic env (3 DEV_YEARS @ full budget).
+        return IrrigationEnv(
+            randomize=False,
+            eval_schedule=BIAS_EVAL_SCHEDULE,
+            curriculum_warmup_steps=0,
+            use_overshoot_feature=False,
+            normalize_globals=True,
+            reward_overshoot_mode=reward_overshoot_mode,
+            rain_normaliser=rain_normaliser,
+        )
+
     train_env     = DummyVecEnv([_make_env])
-    eval_env      = DummyVecEnv([_make_env])
-    bias_eval_env = DummyVecEnv([_make_env])
+    eval_env      = DummyVecEnv([_make_eval_env])        # deterministic (v2.19c)
+    bias_eval_env = DummyVecEnv([_make_bias_eval_env])   # deterministic (v2.19c)
     train_env.seed(seed)
-    eval_env.seed(seed + 1000)
-    bias_eval_env.seed(seed + 2000)
+    eval_env.seed(seed + 1000)        # harmless: eval env makes no RNG draw now
+    bias_eval_env.seed(seed + 2000)   # harmless: bias env makes no RNG draw now
 
     policy_kwargs = make_td3_policy_kwargs(
         N=N_AGENTS, actor_hidden=ACTOR_HIDDEN, critic_hidden=CRITIC_HIDDEN,
@@ -298,7 +358,10 @@ def train_td3_v219b(
         tensorboard_log=str(save_dir / "tensorboard"),
     )
 
-    eval_callback = EvalCallback(
+    # v2.19c: FixedScheduleEvalCallback rewinds the eval env's deterministic
+    # schedule before each evaluation, so every checkpoint is scored on the
+    # identical fixed set of held-out (year, budget) episodes.
+    eval_callback = FixedScheduleEvalCallback(
         eval_env,
         best_model_save_path=str(save_dir / "best_model"),
         log_path=str(save_dir / "eval_logs"),

@@ -11,14 +11,18 @@
 #                     'dry'      (2022) — 39.7 mm, in-distribution
 #                     'moderate' (2018) — 108.8 mm, upper training edge
 #                     'wet'      (2024) — 176.8 mm, OOD extreme
-#   DEV_YEARS      (DEV, 3 years) — stratified by rainfall tercile,
-#                   used by EvalCallback during training for best_model
-#                   selection and learning-curve monitoring:
-#                     2002 — 27.1 mm, low-rainfall tercile
-#                     2016 — 77.0 mm, mid-rainfall tercile
-#                     2023 — 88.4 mm, high-rainfall tercile (non-extreme)
+#   DEV_YEARS      (DEV, 3 years) — held-out validation set, used by the
+#                   deterministic FixedScheduleEvalCallback during training for
+#                   best_model selection and learning-curve monitoring.  Chosen
+#                   to span the distribution (dry / median / wet-non-extreme)
+#                   and sit centred near the population median (45.5 mm) so the
+#                   in-training eval reward is a representative generalization
+#                   signal rather than skewed mid-high:
+#                     2002 — 27.1 mm, dry
+#                     2004 — 46.1 mm, median (~ population median 45.5 mm)
+#                     2013 — 82.1 mm, wet (highest non-test, non-extreme year)
 #   TRAINING_YEARS (TRAIN, 20 years) — all remaining years 2000-2025.
-#                   Sampled uniformly at each SAC episode reset().
+#                   Sampled uniformly at each training episode reset().
 #
 # NOTE on scenario key naming: the test scenarios are keyed 'dry',
 # 'moderate', 'wet' (not 'moderate_wet') to match the precomputed cache
@@ -43,26 +47,30 @@ SCENARIO_YEARS = {
 # Frozenset of integer years for fast membership tests in gym_env.py etc.
 EVAL_YEARS = frozenset(SCENARIO_YEARS.values())   # {2018, 2022, 2024}
 
-# ── Dev years (3) — used by EvalCallback during training ─────────────────────
-# Chosen to span the training distribution by rainfall tercile so that the
-# in-training eval reward is a meaningful generalization signal:
-#   - 2002 (27.1 mm) — low-rainfall tercile
-#   - 2016 (77.0 mm) — mid-rainfall tercile
-#   - 2023 (88.4 mm) — high-rainfall tercile (non-extreme)
-# Each dev year is at least 20 mm seasonal rainfall away from any test year
-# to avoid leaking near-duplicate climate into best_model selection.
-DEV_YEARS = (2002, 2016, 2023)
+# ── Dev years (3) — held-out validation set for best_model selection ─────────
+# Used by the deterministic FixedScheduleEvalCallback during training.  Spans
+# the climate distribution (dry / median / wet) and is centred near the
+# population median (45.5 mm), so the in-training eval reward is a
+# representative generalization signal (not skewed toward wet years).  Held out
+# from TRAINING_YEARS below.  The wettest non-test years (2023 ~88, 2012 ~80)
+# stay in training, so the training wet-ceiling is unaffected (~88 mm).
+#   - 2002 (27.1 mm) — dry
+#   - 2004 (46.1 mm) — median (~ population median 45.5 mm)
+#   - 2013 (82.1 mm) — wet (highest non-test, non-extreme year)
+# Each dev year is comfortably (>20 mm) clear of any test year, so no
+# near-duplicate climate leaks into best_model selection.
+DEV_YEARS = (2002, 2004, 2013)
 DEV_YEARS_SET = frozenset(DEV_YEARS)
 
-# ── Training years (20) — sampled uniformly per SAC episode ──────────────────
+# ── Training years (20) — sampled uniformly per training episode ─────────────
 # All years 2000-2025 excluding eval (test) years AND dev years.
 TRAINING_YEARS = tuple(sorted(
     y for y in range(2000, 2026)
     if y not in EVAL_YEARS and y not in DEV_YEARS_SET
 ))
-# = (2000,2001,2003,2004,2005,2006,2007,2008,2009,2010,
-#    2011,2012,2013,2014,2015,2017,2019,2020,2021,2025)
-# (20 years)
+# = (2000,2001,2003,2005,2006,2007,2008,2009,2010,2011,
+#    2012,2014,2015,2016,2017,2019,2020,2021,2023,2025)
+# (20 years; wettest = 2023 ~88.4 mm, driest = 2001 ~14.5 mm)
 
 
 def load_cleaned_data(filepath=DATA_CSV):

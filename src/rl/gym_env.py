@@ -281,6 +281,7 @@ class IrrigationEnv(gym.Env):
         normalize_globals:       bool = NORMALIZE_GLOBALS_DEFAULT,
         reward_overshoot_mode:   str  = 'quadratic',
         rain_normaliser:         float = RAIN_REF,
+        eval_schedule:           "list | None" = None,
     ):
         super().__init__()
         self.randomize = randomize
@@ -306,6 +307,27 @@ class IrrigationEnv(gym.Env):
                 f"rain_normaliser must be positive, got {rain_normaliser!r}"
             )
         self._rain_normaliser = float(rain_normaliser)
+
+        # v2.19c: optional DETERMINISTIC evaluation schedule.  When provided,
+        # reset() walks this fixed list of (year, budget_frac) pairs in order
+        # (bypassing `randomize`), so every checkpoint is scored on an
+        # identical, reproducible set of held-out episodes.  Default None
+        # preserves byte-identical behaviour for every existing caller.
+        if eval_schedule is not None:
+            parsed_schedule = []
+            for item in eval_schedule:
+                if len(item) != 2:
+                    raise ValueError(
+                        "eval_schedule entries must be (year, budget_frac) "
+                        f"pairs; got {item!r}"
+                    )
+                yr, bf = item
+                parsed_schedule.append((int(yr), float(bf)))
+            if len(parsed_schedule) == 0:
+                raise ValueError("eval_schedule must be non-empty or None")
+            eval_schedule = parsed_schedule
+        self._eval_schedule = eval_schedule
+        self._eval_idx = 0
 
         # obs dim depends on whether x1_overshoot_norm is included:
         #   use_overshoot_feature=True  (v2.8 default): 9 feat/agent → 1227-dim
@@ -341,7 +363,16 @@ class IrrigationEnv(gym.Env):
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
 
-        if self.randomize:
+        if self._eval_schedule is not None:
+            # v2.19c: deterministic held-out evaluation.  Walk the fixed
+            # (year, budget_frac) schedule in order so every checkpoint is
+            # scored on the identical set of episodes.  No np_random is used
+            # here, so the episode is fully deterministic regardless of seed.
+            yr, bf = self._eval_schedule[self._eval_idx % len(self._eval_schedule)]
+            self._eval_idx += 1
+            self._year  = int(yr)
+            budget_frac = float(bf)
+        elif self.randomize:
             self._year  = int(self.np_random.choice(list(TRAINING_YEARS)))
             budget_frac = float(self.np_random.uniform(0.70, 1.00))
         else:
@@ -387,6 +418,16 @@ class IrrigationEnv(gym.Env):
 
         self._prev_x4_mean = float(np.mean(self._abm.x4))
         return self._build_obs(), {}
+
+    def reset_eval_schedule(self) -> None:
+        """Rewind the deterministic eval schedule to its first episode.
+
+        Called (via VecEnv.env_method) by FixedScheduleEvalCallback before each
+        evaluation, so every checkpoint is scored on the identical fixed set of
+        (year, budget) episodes -- independent of how many resets the previous
+        evaluation consumed.  No-op when no eval_schedule was supplied.
+        """
+        self._eval_idx = 0
 
     # ── step ──────────────────────────────────────────────────────────────────
     def step(self, action: np.ndarray):

@@ -71,6 +71,48 @@ def test_env_random_year_reset():
         assert np.all(np.isfinite(obs)), f"obs contains NaN or Inf on reset {i}"
 
 
+def test_eval_schedule_deterministic_and_rewindable():
+    """v2.19c: eval_schedule must drive reset() through a fixed (year, budget)
+    sequence, wrap via modulo, and rewind via reset_eval_schedule()."""
+    from src.rl.gym_env import IrrigationEnv, FULL_SEASON_NEED_MM
+    sched = [(2002, 0.70), (2013, 0.85), (2004, 1.00)]
+    env = IrrigationEnv(randomize=False, eval_schedule=sched)
+
+    def _walk(n):
+        out = []
+        for _ in range(n):
+            env.reset()
+            out.append((env._year, round(env._budget_mm / FULL_SEASON_NEED_MM, 3)))
+        return out
+
+    seen = _walk(len(sched))
+    assert seen == [(2002, 0.70), (2013, 0.85), (2004, 1.00)], seen
+    # 4th reset wraps back to the first entry (modulo).
+    env.reset()
+    assert env._year == 2002, env._year
+    # Rewinding reproduces the exact same sequence.
+    env.reset_eval_schedule()
+    assert _walk(len(sched)) == seen
+
+
+def test_eval_schedule_none_preserves_randomize():
+    """v2.19c: eval_schedule=None must leave randomize behaviour unchanged."""
+    from src.rl.gym_env import IrrigationEnv
+    env = IrrigationEnv(randomize=True)            # no eval_schedule
+    assert env._eval_schedule is None
+    obs, _ = env.reset(seed=0)                     # must not raise
+    assert np.all(np.isfinite(obs))
+
+
+def test_eval_schedule_rejects_malformed_entries():
+    """v2.19c: malformed schedule entries must raise at construction."""
+    from src.rl.gym_env import IrrigationEnv
+    with pytest.raises(ValueError):
+        IrrigationEnv(randomize=False, eval_schedule=[(2002,)])      # wrong arity
+    with pytest.raises(ValueError):
+        IrrigationEnv(randomize=False, eval_schedule=[])             # empty
+
+
 def test_runner_imports():
     """runner.py must import without ImportError."""
     from src.rl.runner import RLController  # noqa
