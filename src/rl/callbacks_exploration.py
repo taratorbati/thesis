@@ -38,12 +38,41 @@
 from __future__ import annotations
 
 import csv
+import sys
 from collections import deque
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
+
+
+def _safe_print(text: str) -> None:
+    """Emit a diagnostic line WITHOUT routing through a rich/tqdm stdout proxy.
+
+    SB3's ``progress_bar=True`` replaces ``sys.stdout`` with ``rich``'s
+    ``FileProxy``.  Under ipykernel (Colab/Jupyter), printing a multi-line banner
+    to that proxy can recurse without bound --
+    ``FileProxy.flush -> Console.print -> ipykernel._flush_streams ->
+    sys.stdout.flush -> FileProxy.flush -> ...`` -- and raise ``RecursionError``,
+    which kills the run.  (That is precisely what felled the collapse runs: the
+    CollapseGuard's "COLLAPSE DETECTED" banner detonated the proxy.)  Writing to
+    the *original* ``sys.__stdout__`` bypasses the proxy entirely; we never touch
+    the proxied ``sys.stdout`` here, so this can never recurse.  Best-effort and
+    never raises -- a diagnostic line must never be able to crash training.
+
+    The collapse is independently recorded via ``logger.record('guard/...')``
+    (so it still shows in the in-cell SB3 tables) and in the guard CSV, so even
+    if this banner is dropped (e.g. ``sys.__stdout__`` is None) no signal is lost.
+    """
+    try:
+        stream = sys.__stdout__
+        if stream is None:
+            return
+        stream.write(text if text.endswith("\n") else text + "\n")
+        stream.flush()
+    except Exception:
+        pass
 
 
 class ExplorationNoiseDecayCallback(BaseCallback):
@@ -108,7 +137,7 @@ class ExplorationNoiseDecayCallback(BaseCallback):
         noise = getattr(self.model, "action_noise", None)
         if noise is None:
             if not self._warned_no_noise and self.verbose:
-                print(
+                _safe_print(
                     "[ExplorationNoiseDecay] model.action_noise is None -- "
                     "callback is inert (no exploration noise to decay)."
                 )
@@ -352,8 +381,8 @@ class LateNoiseReinjectionCallback(BaseCallback):
         noise = getattr(self.model, "action_noise", None)
         if noise is None:
             if not self._warned_no_noise and self.verbose:
-                print("[LateNoiseReinjection] model.action_noise is None -- "
-                      "callback is inert.")
+                _safe_print("[LateNoiseReinjection] model.action_noise is None -- "
+                            "callback is inert.")
             self._warned_no_noise = True
             return
         sigma_attr = getattr(noise, "_sigma", None)
@@ -510,13 +539,127 @@ class CollapseGuardCallback(BaseCallback):
             )
             if self.verbose:
                 bar = "=" * 72
-                print(f"\n{bar}\n{msg}")
+                _safe_print(f"\n{bar}\n{msg}")
             if self.abort_on_collapse:
                 if self.verbose:
-                    print("[CollapseGuard] abort_on_collapse=True -> stopping "
-                          "training early to avoid burning the full run.\n" + "=" * 72)
+                    _safe_print("[CollapseGuard] abort_on_collapse=True -> stopping "
+                                "training early to avoid burning the full run.\n" + "=" * 72)
                 return False
             if self.verbose:
-                print("[CollapseGuard] abort_on_collapse=False -> warning only; "
-                      "run continues.\n" + "=" * 72)
+                _safe_print("[CollapseGuard] abort_on_collapse=False -> warning only; "
+                            "run continues.\n" + "=" * 72)
         return True
+
+
+class NonFiniteGuardCallback(BaseCallback):
+    """Fail LOUD (and stop cleanly) the instant training goes non-finite.
+
+    Why this exists
+    ---------------
+    When the deterministic TD3 actor collapses to the 0 mm corner (the v2.19
+    failure mode), the twin-Q critic can run away in a deadly-triad divergence
+    until a Q-value / loss overflows float32 to +/-inf and then NaN.  Stable-
+    Baselines3 performs NO finiteness check, and neither the env nor the
+    networks raise on NaN, so the failure surfaces in one of two unhelpful
+    ways:
+      * a bare traceback on STDERR -- invisible in a stdout-only Colab/Kaggle
+        capture, so the run appears to "just end" mid-stream while wandb is
+        still marked 'finished' (the finally-block already ran wandb.finish()
+        before the exception propagated); or
+      * silent training on NaN for the remaining steps (a dead policy that
+        still reports a 250k 'completed' run).
+
+    This callback reads the just-collected actions and the latest logged train
+    losses every step; on the FIRST non-finite value it prints a prominent,
+    stdout-captured message naming the exact step and quantity, appends a CSV
+    row, and (by default) returns False so SB3 stops cleanly, saves the final
+    model, and calls wandb.finish() with an unambiguous cause.  On a healthy
+    run it is a no-op (a few ``np.isfinite`` checks per step) and it makes no
+    RNG draw and mutates no model state, so the training trajectory is
+    byte-identical to a run without it.
+
+    Parameters
+    ----------
+    check_actions : bool
+        Check ``self.locals['actions']`` (the env-scaled collected action,
+        which goes non-finite one step after the actor weights do).
+    loss_keys : sequence of str
+        Logger keys to monitor for non-finite (default the TD3 train losses,
+        populated once past ``learning_starts``).
+    stop_on_nonfinite : bool
+        If True (default) return False on the first hit so the run stops with
+        a logged cause.  If False, warn once and keep running (e.g. to observe
+        how the NaN propagates).
+    csv_path : str or Path, optional
+        Append a ``(step, quantity, value)`` row on the first hit.
+    verbose : int
+    """
+
+    def __init__(
+        self,
+        check_actions: bool = True,
+        loss_keys: tuple = ("train/critic_loss", "train/actor_loss"),
+        stop_on_nonfinite: bool = True,
+        csv_path: Optional[str] = None,
+        verbose: int = 1,
+    ):
+        super().__init__(verbose=verbose)
+        self.check_actions = bool(check_actions)
+        self.loss_keys = tuple(loss_keys)
+        self.stop_on_nonfinite = bool(stop_on_nonfinite)
+        self.csv_path = Path(csv_path) if csv_path is not None else None
+        self._tripped = False
+        self._csv_initialised = False
+
+    def _on_training_start(self) -> None:
+        if self.csv_path is not None and not self._csv_initialised:
+            self.csv_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.csv_path, "w", newline="", encoding="utf-8") as f:
+                csv.writer(f).writerow(["step", "quantity", "value"])
+            self._csv_initialised = True
+
+    def _first_nonfinite(self):
+        """Return (quantity, value) of the first non-finite signal, else None."""
+        if self.check_actions:
+            actions = self.locals.get("actions", None)
+            if actions is not None:
+                arr = np.asarray(actions, dtype=np.float64)
+                if arr.size and not np.all(np.isfinite(arr)):
+                    finite = arr[np.isfinite(arr)]
+                    ctx = float(np.max(np.abs(finite))) if finite.size else float("nan")
+                    return "collected_action", ctx
+        nv = getattr(self.model.logger, "name_to_value", None) or {}
+        for key in self.loss_keys:
+            val = nv.get(key, None)
+            if val is not None and not np.isfinite(float(val)):
+                return key, float(val)
+        return None
+
+    def _on_step(self) -> bool:
+        if self._tripped:
+            return True
+        hit = self._first_nonfinite()
+        if hit is None:
+            return True
+
+        self._tripped = True
+        quantity, value = hit
+        self.model.logger.record("guard/nonfinite", 1.0)
+        if self.csv_path is not None:
+            with open(self.csv_path, "a", newline="", encoding="utf-8") as f:
+                csv.writer(f).writerow([int(self.num_timesteps), quantity, value])
+
+        if self.verbose:
+            bar = "=" * 72
+            _safe_print(f"\n{bar}")
+            _safe_print(f"[NonFiniteGuard] NON-FINITE detected at step "
+                        f"{self.num_timesteps:,}: {quantity} = {value}.")
+            _safe_print("[NonFiniteGuard] The deterministic actor has collapsed to the 0 mm "
+                        "corner and driven\n                 the twin-Q critic into a "
+                        "deadly-triad (inf -> NaN) divergence (the v2.19 mode).")
+            if self.stop_on_nonfinite:
+                _safe_print("[NonFiniteGuard] stop_on_nonfinite=True -> stopping cleanly so the "
+                            "cause is logged on\n                 stdout instead of dying on a "
+                            "(possibly uncaptured) stderr traceback.")
+            _safe_print(bar)
+        return not self.stop_on_nonfinite

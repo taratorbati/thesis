@@ -90,7 +90,7 @@ from stable_baselines3.common.noise import NormalActionNoise
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 from src.rl.gym_env import IrrigationEnv, RAIN_REF_V216
-from climate_data import DEV_YEARS
+from climate_data import DEV_YEARS, TRAINING_YEARS
 from src.rl.networks_td3 import TD3VDNPolicy, make_td3_policy_kwargs
 from src.rl.callbacks_v210 import (
     BiasRatioCallback,
@@ -101,6 +101,7 @@ from src.rl.callbacks_exploration import (
     ExplorationNoiseDecayCallback,
     LowActionCoverageCallback,
     CollapseGuardCallback,
+    NonFiniteGuardCallback,
 )
 from src.rl.callbacks_eval import FixedScheduleEvalCallback
 from src.rl.train import (
@@ -424,6 +425,17 @@ def train_td3_v219b(
         verbose=1,
     )
 
+    # *** Fail-LOUD tripwire.  If the collapse drives the critic non-finite
+    # (the deadly-triad inf->NaN seen ~38k on the {2002,2004,2013} training
+    # mix), convert SB3's silent / stderr-only death into a clean,
+    # stdout-captured, step-precise stop.  No-op on healthy runs; makes no RNG
+    # draw, so it does not perturb the training trajectory. ***
+    nonfinite_guard_cb = NonFiniteGuardCallback(
+        stop_on_nonfinite=True,
+        csv_path=str(save_dir / "nonfinite_guard_log.csv"),
+        verbose=1,
+    )
+
     cb_list = [
         eval_callback,
         checkpoint_callback,
@@ -435,6 +447,7 @@ def train_td3_v219b(
         noise_decay_cb,
         coverage_cb,
         collapse_guard_cb,
+        nonfinite_guard_cb,
     ]
 
     if wandb_active:
@@ -461,6 +474,10 @@ def train_td3_v219b(
           f"policy_delay={policy_delay}")
     print(f"  collapse guard: abort={guard_abort} if rolling low-action >= "
           f"{guard_collapse_frac:.0%} after {guard_warmup_steps:,} steps")
+    print(f"  dev/eval years: {list(DEV_YEARS)}  ->  training years "
+          f"({len(TRAINING_YEARS)}): {list(TRAINING_YEARS)}")
+    print(f"  NOTE: DEV_YEARS are EXCLUDED from TRAINING_YEARS (climate_data.py) -- "
+          f"changing the\n        eval set also changes what the agent trains on.")
     print(f"  rain_norm={rain_normaliser:.1f}  r6={reward_overshoot_mode}  gamma={gamma}  tau={TAU}")
     print(f"  Total steps: {total_timesteps:,}  | Output: {save_dir}")
     print(f"{'='*72}\n")
@@ -472,6 +489,28 @@ def train_td3_v219b(
             reset_num_timesteps=True,
             progress_bar=True,
         )
+    except BaseException:
+        # Mirror the traceback to the REAL stdout (sys.__stdout__), deliberately
+        # bypassing the rich/tqdm progress-bar proxy that progress_bar=True
+        # installs over sys.stdout.  Two reasons: (1) if the exception IS the
+        # rich RecursionError, a normal print() re-enters the same broken flush
+        # path and re-raises; (2) SB3/Colab otherwise send tracebacks only to
+        # stderr, so a stdout-only capture shows the run "just ending" with no
+        # error.  Best-effort; never masks or replaces the original exception.
+        import sys, traceback
+        _err = sys.__stdout__ or sys.__stderr__
+        try:
+            if _err is not None:
+                _err.write("\n" + "=" * 72 + "\n")
+                _err.write("[train] model.learn() raised -- full traceback below "
+                           "(mirrored to the real stdout, bypassing the "
+                           "progress-bar proxy):\n")
+                traceback.print_exc(file=_err)
+                _err.write("=" * 72 + "\n")
+                _err.flush()
+        except Exception:
+            pass
+        raise
     finally:
         if wandb_active:
             try:
