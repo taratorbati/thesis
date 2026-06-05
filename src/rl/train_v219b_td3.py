@@ -202,6 +202,7 @@ N_AGENTS = 130
 
 REWARD_OVERSHOOT_MODE = 'linear'
 RAIN_NORMALISER       = RAIN_REF_V216   # 30.0
+REWARD_DU_ALPHA       = 0.005           # v2.19d: MPC alpha5 (delta-u). 0.0 disables.
 
 
 def train_td3_v219b(
@@ -213,6 +214,7 @@ def train_td3_v219b(
     actor_lr_mult: float = ACTOR_LR_MULT,
     reward_overshoot_mode: str = REWARD_OVERSHOOT_MODE,
     rain_normaliser: float = RAIN_NORMALISER,
+    reward_du_alpha: float = REWARD_DU_ALPHA,
     target_policy_noise: float = TARGET_POLICY_NOISE,
     target_noise_clip: float = TARGET_NOISE_CLIP,
     policy_delay: int = POLICY_DELAY,
@@ -255,6 +257,7 @@ def train_td3_v219b(
         "guard_abort": guard_abort,
         "rain_normaliser": rain_normaliser,
         "reward_overshoot_mode": reward_overshoot_mode,
+        "reward_du_alpha": reward_du_alpha,
         "eval_protocol": (
             "v2.19c DETERMINISTIC held-out: DEV_YEARS x {0.70,0.85,1.00} = 9 "
             "episodes, fixed schedule rewound before each eval (replaces the "
@@ -291,6 +294,7 @@ def train_td3_v219b(
             normalize_globals=True,
             reward_overshoot_mode=reward_overshoot_mode,
             rain_normaliser=rain_normaliser,
+            reward_du_alpha=reward_du_alpha,
         )
 
     def _make_eval_env():
@@ -305,6 +309,7 @@ def train_td3_v219b(
             normalize_globals=True,
             reward_overshoot_mode=reward_overshoot_mode,
             rain_normaliser=rain_normaliser,
+            reward_du_alpha=reward_du_alpha,
         )
 
     def _make_bias_eval_env():
@@ -317,6 +322,7 @@ def train_td3_v219b(
             normalize_globals=True,
             reward_overshoot_mode=reward_overshoot_mode,
             rain_normaliser=rain_normaliser,
+            reward_du_alpha=reward_du_alpha,
         )
 
     train_env     = DummyVecEnv([_make_env])
@@ -479,6 +485,8 @@ def train_td3_v219b(
     print(f"  NOTE: DEV_YEARS are EXCLUDED from TRAINING_YEARS (climate_data.py) -- "
           f"changing the\n        eval set also changes what the agent trains on.")
     print(f"  rain_norm={rain_normaliser:.1f}  r6={reward_overshoot_mode}  gamma={gamma}  tau={TAU}")
+    print(f"  reward_du_alpha (delta-u, MPC alpha5)={reward_du_alpha}  "
+          f"({'ACTIVE' if reward_du_alpha > 0 else 'disabled'})")
     print(f"  Total steps: {total_timesteps:,}  | Output: {save_dir}")
     print(f"{'='*72}\n")
 

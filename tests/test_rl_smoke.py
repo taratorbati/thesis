@@ -496,3 +496,65 @@ def test_runner_obs_matches_env_obs():
             x3_run, x3_env, atol=1e-5,
             err_msg=f"x3 mismatch at step {step}.",
         )
+
+
+# ── v2.19d: delta-u (control-rate) smoothing reward term ──────────────────────
+def _du_step_collect(env, actions):
+    """Reset, then apply a sequence of full-field CONSTANT actions; return the
+    per-step info dicts (with the returned reward stored under '_reward')."""
+    env.reset(seed=0)
+    infos = []
+    for a in actions:
+        act = np.full(env.action_space.shape, float(a), dtype=np.float32)
+        _, r, _, _, info = env.step(act)
+        info = dict(info)
+        info['_reward'] = r
+        infos.append(info)
+    return infos
+
+
+def test_delta_u_disabled_by_default():
+    """reward_du_alpha defaults to 0.0 -> r5 is identically zero (back-compat)."""
+    from src.rl.gym_env import IrrigationEnv
+    env = IrrigationEnv(randomize=False, curriculum_warmup_steps=0)  # default du=0
+    infos = _du_step_collect(env, [0.0, 1.0, 0.0, 0.8, 0.2])
+    assert all(info['r5_delta_u'] == 0.0 for info in infos), \
+        "r5 must be 0 when reward_du_alpha=0 (backward compatibility)."
+
+
+def test_delta_u_zero_on_first_step():
+    """r5 must be 0 on the first step (no previous control; MPC sums from k=1)."""
+    from src.rl.gym_env import IrrigationEnv
+    env = IrrigationEnv(randomize=False, curriculum_warmup_steps=0,
+                        reward_du_alpha=0.005)
+    infos = _du_step_collect(env, [0.5, 0.5])
+    assert infos[0]['r5_delta_u'] == 0.0, "r5 must be 0 on the first step."
+
+
+def test_delta_u_penalises_jerk_not_smoothness():
+    """Constant actions -> r5 ~ 0 (after step 1); alternating actions -> r5 < 0."""
+    from src.rl.gym_env import IrrigationEnv
+    env_c = IrrigationEnv(randomize=False, curriculum_warmup_steps=0,
+                          reward_du_alpha=0.005)
+    infos_c = _du_step_collect(env_c, [0.5, 0.5, 0.5, 0.5])
+    assert all(abs(info['r5_delta_u']) < 1e-9 for info in infos_c[1:]), \
+        "Constant actions must incur ~0 delta-u penalty after the first step."
+    env_j = IrrigationEnv(randomize=False, curriculum_warmup_steps=0,
+                          reward_du_alpha=0.005)
+    infos_j = _du_step_collect(env_j, [0.0, 1.0, 0.0, 1.0])
+    assert infos_j[1]['r5_delta_u'] < 0.0, \
+        "Alternating (jerky) actions must incur a negative delta-u penalty."
+    assert infos_j[2]['r5_delta_u'] < 0.0
+
+
+def test_delta_u_reward_decomposition_sums_to_total():
+    """info reward components (r1,r2,r3,r5,r6) must sum to the returned reward."""
+    from src.rl.gym_env import IrrigationEnv
+    env = IrrigationEnv(randomize=False, curriculum_warmup_steps=0,
+                        reward_du_alpha=0.005)
+    infos = _du_step_collect(env, [0.3, 0.9, 0.1])
+    for info in infos:
+        comp = (info['r1_biomass'] + info['r2_water'] + info['r3_drought']
+                + info['r5_delta_u'] + info['r6_waterlog'])
+        assert abs(comp - info['_reward']) < 1e-6, \
+            "Reward components must sum to the total reward."

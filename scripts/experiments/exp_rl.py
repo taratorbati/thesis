@@ -148,7 +148,8 @@ def run_evaluation(args):
     forecast_mode = args.forecast
     noise_seed    = args.noise_seed
 
-    RUNS_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    runs_dir = (RUNS_OUTPUT_DIR / args.out_tag) if getattr(args, 'out_tag', '') else RUNS_OUTPUT_DIR
+    runs_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"\nEvaluation config:")
     print(f"  Model:         {model_path}")
@@ -182,7 +183,7 @@ def run_evaluation(args):
                 f"sac_{fc_tag}_{policy_tag}"
                 f"_{scenario}_rice_{budget_pct}pct_seed{seed_str}.parquet"
             )
-            output_path = RUNS_OUTPUT_DIR / output_filename
+            output_path = runs_dir / output_filename
 
             if output_path.exists() and not args.force:
                 print(f"  Skipping {output_filename} (already exists; use --force to overwrite)")
@@ -279,6 +280,11 @@ def main():
 
     parser.add_argument('--force', action='store_true',
                         help='Overwrite existing output files.')
+    parser.add_argument('--out-tag', default='',
+                        help='Optional subdirectory under results/runs/ for '
+                             'this eval. Keeps best vs final (and different '
+                             'models) from colliding in the flat namespace, '
+                             'which is the root of the eval-misattribution bug.')
 
     args = parser.parse_args()
 

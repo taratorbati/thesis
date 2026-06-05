@@ -140,6 +140,7 @@ RAIN_REF_V216 = 30.0   # tightened rainfall normaliser (v2.16)
 ALPHA1 = 1.0     # biomass increment
 ALPHA2 = 0.016   # water cost
 ALPHA3 = 0.1     # drought stress regulariser
+ALPHA5 = 0.005   # delta-u (control-rate) regulariser -- mirrors MPC cost term 5
 ALPHA6 = 8.0     # FC-overshoot penalty - QUADRATIC shape (v2.7-v2.14 default)
 C_TERM = 0.0     # terminal bonus (kept as 0)
 
@@ -281,6 +282,7 @@ class IrrigationEnv(gym.Env):
         normalize_globals:       bool = NORMALIZE_GLOBALS_DEFAULT,
         reward_overshoot_mode:   str  = 'quadratic',
         rain_normaliser:         float = RAIN_REF,
+        reward_du_alpha:         float = 0.0,
         eval_schedule:           "list | None" = None,
     ):
         super().__init__()
@@ -307,6 +309,19 @@ class IrrigationEnv(gym.Env):
                 f"rain_normaliser must be positive, got {rain_normaliser!r}"
             )
         self._rain_normaliser = float(rain_normaliser)
+
+        # v2.19d: optional delta-u (control-rate) smoothing penalty.  Mirrors
+        # the MPC cost's term 5 (src/mpc/cost.py):
+        #     J_delta_u = alpha5 * sum_k ||u(k) - u(k-1)||^2 / (u_max^2 * N)
+        # i.e. alpha5 * mean_n[((u_t - u_{t-1}) / u_max)^2] per consecutive
+        # day-pair.  Default 0.0 keeps byte-identical behaviour for every
+        # existing caller; the v2.19d trainer sets it to MPC's alpha5 = 0.005.
+        if reward_du_alpha < 0.0:
+            raise ValueError(
+                f"reward_du_alpha must be >= 0 (0 disables the term), "
+                f"got {reward_du_alpha!r}"
+            )
+        self._reward_du_alpha = float(reward_du_alpha)
 
         # v2.19c: optional DETERMINISTIC evaluation schedule.  When provided,
         # reset() walks this fixed list of (year, budget_frac) pairs in order
@@ -351,6 +366,8 @@ class IrrigationEnv(gym.Env):
         self._water_used: float = 0.0
         self._day: int = 0
         self._prev_x4_mean: float = 0.0
+        self._prev_irr_mm = None           # v2.19d: previous applied irr_mm (mm/day, per agent), for delta-u
+        self._last_reward_terms: dict = {} # v2.19d: components of the last reward, for telemetry
 
         # curriculum state (v2.8)
         self._global_step_count: int = 0   # increments on every step() call
@@ -417,6 +434,7 @@ class IrrigationEnv(gym.Env):
         self.abm = self._abm
 
         self._prev_x4_mean = float(np.mean(self._abm.x4))
+        self._prev_irr_mm = None   # v2.19d: no previous control on the first day
         return self._build_obs(), {}
 
     def reset_eval_schedule(self) -> None:
@@ -465,6 +483,10 @@ class IrrigationEnv(gym.Env):
         self._day += 1
         self._global_step_count += 1
         self._prev_x4_mean = x4_mean
+        # v2.19d: remember today's APPLIED water (post-clip) for the next
+        # step's delta-u penalty.  Stored after reward so _compute_reward sees
+        # yesterday's value.
+        self._prev_irr_mm = np.asarray(irr_mm, dtype=np.float64).copy()
 
         # 8. termination (v2.8)
         #    terminated=False always (no early termination from budget).
@@ -480,6 +502,13 @@ class IrrigationEnv(gym.Env):
             'yield_kg_ha':      x4_mean * _HI * 10.0,
             'truncation_day':   self._truncation_day,
             'global_step':      self._global_step_count,
+            # v2.19d: reward decomposition (lets diagnostics confirm the
+            # delta-u term r5 is gentle and not dominating r6).
+            'r1_biomass':       self._last_reward_terms.get('r1', 0.0),
+            'r2_water':         self._last_reward_terms.get('r2', 0.0),
+            'r3_drought':       self._last_reward_terms.get('r3', 0.0),
+            'r5_delta_u':       self._last_reward_terms.get('r5', 0.0),
+            'r6_waterlog':      self._last_reward_terms.get('r6', 0.0),
         }
         return self._build_obs(), float(reward), terminated, truncated, info
 
@@ -510,7 +539,22 @@ class IrrigationEnv(gym.Env):
             # Default: quadratic (v2.7-v2.14 byte-identical behaviour).
             r6 = -ALPHA6 * float(np.mean(overshoot ** 2)) \
                  / max(_FC_MM ** 2, 1e-6)
-        return r1 + r2 + r3 + r6
+        # ── r5: delta-u (control-rate) smoothing — mirrors MPC cost term 5 ──
+        #   MPC: J_delta_u = alpha5 * sum_k ||u(k)-u(k-1)||^2 / (u_max^2 * N)
+        #   here (per step):  -alpha5 * mean_n[ ((irr_mm - prev_irr_mm)/UB_MM)^2 ]
+        # u is the APPLIED (post-budget-clip) water, exactly like MPC's control
+        # variable.  No penalty on the first day of an episode (prev is None),
+        # mirroring MPC's sum starting at k=1.  Disabled when alpha5 == 0.
+        r5 = 0.0
+        if self._reward_du_alpha > 0.0 and self._prev_irr_mm is not None:
+            du_norm = (np.asarray(irr_mm, dtype=np.float64)
+                       - self._prev_irr_mm) / UB_MM
+            r5 = -self._reward_du_alpha * float(np.mean(du_norm ** 2))
+
+        self._last_reward_terms = {
+            'r1': r1, 'r2': r2, 'r3': r3, 'r5': r5, 'r6': r6,
+        }
+        return r1 + r2 + r3 + r5 + r6
 
     # ── observation (v2.8: 9-feature per-agent block) ─────────────────────────
     def _build_obs(self) -> np.ndarray:
