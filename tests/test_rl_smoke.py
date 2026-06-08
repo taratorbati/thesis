@@ -30,11 +30,11 @@ import pytest
 
 
 # v2.8 module-level constants
-V28_OBS_DIM         = 1227
-V28_N_AGENT_FEAT    = 9
-N_AGENTS            = 130
+V28_OBS_DIM = 1227
+V28_N_AGENT_FEAT = 9
+N_AGENTS = 130
 PER_AGENT_BLOCK_END = V28_N_AGENT_FEAT * N_AGENTS   # 1170
-SCALAR_BLOCK_END    = PER_AGENT_BLOCK_END + 9       # 1179
+SCALAR_BLOCK_END = PER_AGENT_BLOCK_END + 9       # 1179
 
 
 def test_env_instantiates_training_mode():
@@ -68,7 +68,8 @@ def test_env_random_year_reset():
     env = IrrigationEnv(randomize=True)
     for i in range(5):
         obs, _ = env.reset(seed=i)
-        assert np.all(np.isfinite(obs)), f"obs contains NaN or Inf on reset {i}"
+        assert np.all(np.isfinite(
+            obs)), f"obs contains NaN or Inf on reset {i}"
 
 
 def test_eval_schedule_deterministic_and_rewindable():
@@ -82,7 +83,8 @@ def test_eval_schedule_deterministic_and_rewindable():
         out = []
         for _ in range(n):
             env.reset()
-            out.append((env._year, round(env._budget_mm / FULL_SEASON_NEED_MM, 3)))
+            out.append(
+                (env._year, round(env._budget_mm / FULL_SEASON_NEED_MM, 3)))
         return out
 
     seen = _walk(len(sched))
@@ -108,7 +110,8 @@ def test_eval_schedule_rejects_malformed_entries():
     """v2.19c: malformed schedule entries must raise at construction."""
     from src.rl.gym_env import IrrigationEnv
     with pytest.raises(ValueError):
-        IrrigationEnv(randomize=False, eval_schedule=[(2002,)])      # wrong arity
+        IrrigationEnv(randomize=False, eval_schedule=[
+                      (2002,)])      # wrong arity
     with pytest.raises(ValueError):
         IrrigationEnv(randomize=False, eval_schedule=[])             # empty
 
@@ -134,8 +137,10 @@ def test_obs_dim_matches_v28_layout():
     )
 
     agent_block = obs_env[:PER_AGENT_BLOCK_END]
-    assert np.all(agent_block >= -0.1), "Per-agent block has large negative values"
-    assert np.all(agent_block < 10.0), "Per-agent block has implausibly large values"
+    assert np.all(agent_block >= -
+                  0.1), "Per-agent block has large negative values"
+    assert np.all(
+        agent_block < 10.0), "Per-agent block has implausibly large values"
 
 
 def test_reward_is_finite():
@@ -147,7 +152,8 @@ def test_reward_is_finite():
     for step in range(100):
         action = rng.uniform(0, 1, (env.N,)).astype(np.float32)
         obs, reward, terminated, truncated, info = env.step(action)
-        assert np.isfinite(reward), f"Non-finite reward at step {step}: {reward}"
+        assert np.isfinite(
+            reward), f"Non-finite reward at step {step}: {reward}"
         assert np.all(np.isfinite(obs)), f"Non-finite obs at step {step}"
         if terminated or truncated:
             env.reset()
@@ -160,7 +166,8 @@ def test_obs_layout_agent_major():
     obs, _ = env.reset(seed=0)
 
     # After reset, x1 is uniform across agents → x1_norm (feature 0) is uniform
-    x1_norms = obs[:PER_AGENT_BLOCK_END].reshape(N_AGENTS, V28_N_AGENT_FEAT)[:, 0]
+    x1_norms = obs[:PER_AGENT_BLOCK_END].reshape(
+        N_AGENTS, V28_N_AGENT_FEAT)[:, 0]
     assert x1_norms.std() < 0.01, (
         f"x1_norm should be ~uniform at reset; std={x1_norms.std():.4f}. "
         "Check that gym_env uses agent-major layout (stack axis=1 + flatten)."
@@ -193,13 +200,15 @@ def test_per_agent_topo_features_static_across_season():
     from src.rl.gym_env import IrrigationEnv
     env = IrrigationEnv(randomize=False, curriculum_warmup_steps=0)
     obs0, _ = env.reset(seed=0)
-    static0 = obs0[:PER_AGENT_BLOCK_END].reshape(N_AGENTS, V28_N_AGENT_FEAT)[:, 4:8].copy()
+    static0 = obs0[:PER_AGENT_BLOCK_END].reshape(
+        N_AGENTS, V28_N_AGENT_FEAT)[:, 4:8].copy()
 
     rng = np.random.default_rng(0)
     for step in range(5):
         action = rng.uniform(0, 1, (env.N,)).astype(np.float32)
         obs, _, _, _, _ = env.step(action)
-        static_now = obs[:PER_AGENT_BLOCK_END].reshape(N_AGENTS, V28_N_AGENT_FEAT)[:, 4:8]
+        static_now = obs[:PER_AGENT_BLOCK_END].reshape(
+            N_AGENTS, V28_N_AGENT_FEAT)[:, 4:8]
         np.testing.assert_allclose(
             static_now, static0,
             err_msg=f"Static topo features changed between reset and step {step}.",
@@ -243,7 +252,8 @@ def test_x1_overshoot_feature_nonzero_when_above_FC():
     for _ in range(15):
         action = np.ones(env.N, dtype=np.float32)   # max irrigation request
         obs, _, _, _, _ = env.step(action)
-        agent_grid = obs[:PER_AGENT_BLOCK_END].reshape(N_AGENTS, V28_N_AGENT_FEAT)
+        agent_grid = obs[:PER_AGENT_BLOCK_END].reshape(
+            N_AGENTS, V28_N_AGENT_FEAT)
         if agent_grid[:, 8].max() > 0.0:
             saw_overshoot = True
             break
@@ -269,7 +279,8 @@ def test_x1_overshoot_feature_matches_definition():
         obs, _, _, _, _ = env.step(action)
 
         x1 = env._abm.x1
-        agent_grid = obs[:PER_AGENT_BLOCK_END].reshape(N_AGENTS, V28_N_AGENT_FEAT)
+        agent_grid = obs[:PER_AGENT_BLOCK_END].reshape(
+            N_AGENTS, V28_N_AGENT_FEAT)
         obs_overshoot = agent_grid[:, 8]
 
         expected = np.clip(
@@ -303,7 +314,8 @@ def test_curriculum_truncates_short_episodes_during_warmup():
         if term or trunc:
             break
         if steps > 100:
-            pytest.fail("Episode did not end within 100 steps — curriculum broken")
+            pytest.fail(
+                "Episode did not end within 100 steps — curriculum broken")
 
     assert steps == 20, (
         f"Curriculum (short=20) should truncate after 20 steps; got {steps}. "
@@ -438,9 +450,9 @@ def test_runner_obs_matches_env_obs():
     # ── build a minimal runner-like object without loading a model ───────────
     # We replicate reset() + _build_obs() manually using the same logic
     # as the fixed runner so this test does not depend on model files.
-    crop    = get_crop('rice')
+    crop = get_crop('rice')
     terrain = load_terrain('gilan_farm.tif')
-    N       = terrain['N']
+    N = terrain['N']
 
     fc = crop['theta6'] * crop['theta5']
     wp = crop['theta2'] * crop['theta5']
@@ -448,10 +460,14 @@ def test_runner_obs_matches_env_obs():
 
     def runner_dynamic_features(abm_state):
         """Replicate exactly runner._build_obs dynamic block (v2.8.1 formulas)."""
-        x1_norm = np.clip((abm_state['x1'] - wp) / x1_range, 0.0, 1.5).astype(np.float32)
-        x5_norm = np.clip(abm_state['x5'] / 50.0,            0.0, 2.0).astype(np.float32)
-        x4_norm = np.clip(abm_state['x4'] / 600.0,           0.0, 1.5).astype(np.float32)
-        x3      = np.clip(abm_state['x3'],                    0.0, 2.0).astype(np.float32)
+        x1_norm = np.clip((abm_state['x1'] - wp) /
+                          x1_range, 0.0, 1.5).astype(np.float32)
+        x5_norm = np.clip(abm_state['x5'] / 50.0,
+                          0.0, 2.0).astype(np.float32)
+        x4_norm = np.clip(abm_state['x4'] / 900.0,
+                          0.0, 1.5).astype(np.float32)
+        x3 = np.clip(abm_state['x3'],
+                     0.0, 2.0).astype(np.float32)
         return x1_norm, x5_norm, x4_norm, x3
 
     # ── run the env and compare ──────────────────────────────────────────────
@@ -464,7 +480,8 @@ def test_runner_obs_matches_env_obs():
         obs_env, _, _, _, _ = env.step(action)
 
         # Extract per-agent block from env obs (agent-major, 9 feat/agent)
-        agent_grid_env = obs_env[:PER_AGENT_BLOCK_END].reshape(N_AGENTS, V28_N_AGENT_FEAT)
+        agent_grid_env = obs_env[:PER_AGENT_BLOCK_END].reshape(
+            N_AGENTS, V28_N_AGENT_FEAT)
         x1_env = agent_grid_env[:, 0]
         x5_env = agent_grid_env[:, 1]
         x4_env = agent_grid_env[:, 2]
@@ -482,7 +499,7 @@ def test_runner_obs_matches_env_obs():
         np.testing.assert_allclose(
             x1_run, x1_env, atol=1e-5,
             err_msg=f"x1_norm mismatch between runner and env at step {step}. "
-                    f"Check that runner uses (x1-WP)/(FC-WP) not x1/FC.",
+            f"Check that runner uses (x1-WP)/(FC-WP) not x1/FC.",
         )
         np.testing.assert_allclose(
             x5_run, x5_env, atol=1e-5,
@@ -516,7 +533,8 @@ def _du_step_collect(env, actions):
 def test_delta_u_disabled_by_default():
     """reward_du_alpha defaults to 0.0 -> r5 is identically zero (back-compat)."""
     from src.rl.gym_env import IrrigationEnv
-    env = IrrigationEnv(randomize=False, curriculum_warmup_steps=0)  # default du=0
+    env = IrrigationEnv(
+        randomize=False, curriculum_warmup_steps=0)  # default du=0
     infos = _du_step_collect(env, [0.0, 1.0, 0.0, 0.8, 0.2])
     assert all(info['r5_delta_u'] == 0.0 for info in infos), \
         "r5 must be 0 when reward_du_alpha=0 (backward compatibility)."
