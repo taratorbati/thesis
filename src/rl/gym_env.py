@@ -283,6 +283,7 @@ class IrrigationEnv(gym.Env):
         reward_overshoot_mode:   str  = 'quadratic',
         rain_normaliser:         float = RAIN_REF,
         reward_du_alpha:         float = 0.0,
+        biomass_shaping_gamma:   float = 1.0,
         eval_schedule:           "list | None" = None,
     ):
         super().__init__()
@@ -322,6 +323,21 @@ class IrrigationEnv(gym.Env):
                 f"got {reward_du_alpha!r}"
             )
         self._reward_du_alpha = float(reward_du_alpha)
+
+        # v2.21: gamma-correct potential-based reward shaping for the biomass
+        # term r1. Phi(s) = ALPHA1 * x4(s) / X4_REF; the shaping reward is
+        #     r1 = gamma * Phi(s') - Phi(s) = ALPHA1*(gamma*x4_t - x4_{t-1})/X4_REF.
+        # Default 1.0 == the v2.7-v2.20 telescoping increment (byte-identical).
+        # When set to the TRAINING discount, the discounted biomass return
+        # telescopes to exactly gamma^T * x4_T/X4_REF (minus the constant x4_0),
+        # i.e. a PURE TERMINAL-YIELD objective == MPC's biomass cost
+        # (-alpha1*x4_terminal/x4_ref), with no front-loading level term.
+        # MUST equal the per-step return discount (GAMMA_BASE), or the
+        # telescoping is only partial; the trainer sets it = gamma_base.
+        # (Ng, Harada & Russell 1999, policy-invariant shaping.)
+        if biomass_shaping_gamma <= 0.0:
+            raise ValueError(f"biomass_shaping_gamma must be > 0, got {biomass_shaping_gamma!r}")
+        self._biomass_shaping_gamma = float(biomass_shaping_gamma)
 
         # v2.19c: optional DETERMINISTIC evaluation schedule.  When provided,
         # reset() walks this fixed list of (year, budget_frac) pairs in order
@@ -519,7 +535,7 @@ class IrrigationEnv(gym.Env):
         x4_mean: float,
         irr_mm: np.ndarray,
     ) -> float:
-        r1 = ALPHA1 * (x4_mean - self._prev_x4_mean) / X4_REF
+        r1 = ALPHA1 * (self._biomass_shaping_gamma * x4_mean - self._prev_x4_mean) / X4_REF
         r2 = -ALPHA2 * float(np.mean(irr_mm)) / UB_MM
         drought   = np.maximum(_ST_MM - x1, 0.0)
         r3 = -ALPHA3 * float(np.mean(drought)) / max(_ST_MM - _WP_MM, 1e-6)
