@@ -64,7 +64,7 @@ from soil_data import get_crop
 
 # ── public scalar constants (consumed by runner.py) ──────────────────────────
 UB_MM = 12.0    # actuator upper bound mm/day
-X4_REF = 900.0   # reference biomass for normalisation (g/m²)
+X4_REF = 600.0   # reference biomass for normalisation (g/m²)
 X5_REF = 50.0    # reference surface ponding (mm)
 FULL_SEASON_NEED_MM = 484.0   # 100% seasonal budget reference (mm)
 FORECAST_H = 8       # forecast horizon (days)
@@ -140,7 +140,7 @@ RAIN_REF_V216 = 30.0   # tightened rainfall normaliser (v2.16)
 
 # ── reward weights (unchanged from v2.7) ──────────────────────────────────────
 ALPHA1 = 1.0     # biomass increment
-ALPHA2 = 0.01   # water cost
+ALPHA2 = 0.016   # water cost
 ALPHA3 = 0.1     # drought stress regulariser
 # delta-u (control-rate) regulariser -- mirrors MPC cost term 5
 ALPHA5 = 0.005
@@ -288,6 +288,7 @@ class IrrigationEnv(gym.Env):
         rain_normaliser:         float = RAIN_REF,
         reward_du_alpha:         float = 0.0,
         biomass_shaping_gamma:   float = 1.0,
+        reward_terminal_yield:   float = 0.0,
         eval_schedule:           "list | None" = None,
     ):
         super().__init__()
@@ -343,6 +344,18 @@ class IrrigationEnv(gym.Env):
             raise ValueError(
                 f"biomass_shaping_gamma must be > 0, got {biomass_shaping_gamma!r}")
         self._biomass_shaping_gamma = float(biomass_shaping_gamma)
+
+        # v2.21c: ADDITIVE terminal-yield bonus, paid ONCE at episode end ON TOP of
+        # the dense increment r1 (this is added WITHOUT touching r1 -- it does not
+        # replace it like biomass_shaping does). Counteracts gamma=0.99 discounting's
+        # under-weighting of final yield (the reproductive under-watering / drought
+        # seesaw) while keeping the full dense signal that made v2.20 Run A learn well.
+        # r_term = alpha_T * x4_final / X4_REF. MPC's biomass cost is itself a pure
+        # terminal term, so this ALIGNS the RL objective with MPC's. Default 0.0 keeps
+        # every prior caller byte-identical.
+        if reward_terminal_yield < 0.0:
+            raise ValueError(f"reward_terminal_yield must be >= 0, got {reward_terminal_yield!r}")
+        self._reward_terminal_yield = float(reward_terminal_yield)
 
         # v2.19c: optional DETERMINISTIC evaluation schedule.  When provided,
         # reset() walks this fixed list of (year, budget_frac) pairs in order
@@ -518,6 +531,14 @@ class IrrigationEnv(gym.Env):
         terminated = False
         truncated = (self._day >= self._truncation_day)
 
+        # v2.21c: additive terminal-yield bonus (see __init__). x4_mean is the
+        # field-mean terminal biomass for this final step.
+        r_term = 0.0
+        if truncated and self._reward_terminal_yield > 0.0:
+            r_term = self._reward_terminal_yield * x4_mean / X4_REF
+            reward = float(reward) + r_term
+        self._last_reward_terms['r_term'] = r_term
+
         info = {
             'day':              self._day,
             'water_used_mm':    self._water_used,
@@ -533,6 +554,7 @@ class IrrigationEnv(gym.Env):
             'r3_drought':       self._last_reward_terms.get('r3', 0.0),
             'r5_delta_u':       self._last_reward_terms.get('r5', 0.0),
             'r6_waterlog':      self._last_reward_terms.get('r6', 0.0),
+            'r_term_yield':     self._last_reward_terms.get('r_term', 0.0),
         }
         return self._build_obs(), float(reward), terminated, truncated, info
 
