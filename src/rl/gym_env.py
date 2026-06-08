@@ -63,11 +63,11 @@ from src.terrain import load_terrain
 from soil_data import get_crop
 
 # ── public scalar constants (consumed by runner.py) ──────────────────────────
-UB_MM               = 12.0    # actuator upper bound mm/day
-X4_REF              = 600.0   # reference biomass for normalisation (g/m²)
-X5_REF              = 50.0    # reference surface ponding (mm)
+UB_MM = 12.0    # actuator upper bound mm/day
+X4_REF = 900.0   # reference biomass for normalisation (g/m²)
+X5_REF = 50.0    # reference surface ponding (mm)
 FULL_SEASON_NEED_MM = 484.0   # 100% seasonal budget reference (mm)
-FORECAST_H          = 8       # forecast horizon (days)
+FORECAST_H = 8       # forecast horizon (days)
 
 # ── v2.12 GLOBAL/FORECAST FEATURE NORMALISATION (consumed by runner.py) ───────
 # v2.7..v2.11 fed the global scalar block and the forecast block to the actor
@@ -87,10 +87,12 @@ FORECAST_H          = 8       # forecast horizon (days)
 #     Kc_ET     : /  8.0   (record max  7.05)
 #     radiation : / 35.0   (record max 31.69)
 # h2, h7, g_base already live in [0, ~1], so they are left unscaled.
-RAIN_REF = 70.0    # mm/day normaliser for rainfall + rainfall forecast (v2.7-v2.15)
-ETC_REF  = 8.0     # mm/day normaliser for Kc_ET + Kc_ET forecast
-RAD_REF  = 35.0    # MJ m^-2 d^-1 normaliser for radiation forecast
-NORMALIZE_GLOBALS_DEFAULT = True   # v2.12 default; set False to reproduce v2.7/v2.11 obs
+# mm/day normaliser for rainfall + rainfall forecast (v2.7-v2.15)
+RAIN_REF = 70.0
+ETC_REF = 8.0     # mm/day normaliser for Kc_ET + Kc_ET forecast
+RAD_REF = 35.0    # MJ m^-2 d^-1 normaliser for radiation forecast
+# v2.12 default; set False to reproduce v2.7/v2.11 obs
+NORMALIZE_GLOBALS_DEFAULT = True
 
 # ── v2.16 NEW: tighter rainfall normaliser ────────────────────────────────────
 # RAIN_REF=70.0 (chosen against record-max 64.31 mm with margin) was
@@ -138,9 +140,10 @@ RAIN_REF_V216 = 30.0   # tightened rainfall normaliser (v2.16)
 
 # ── reward weights (unchanged from v2.7) ──────────────────────────────────────
 ALPHA1 = 1.0     # biomass increment
-ALPHA2 = 0.016   # water cost
+ALPHA2 = 0.01   # water cost
 ALPHA3 = 0.1     # drought stress regulariser
-ALPHA5 = 0.005   # delta-u (control-rate) regulariser -- mirrors MPC cost term 5
+# delta-u (control-rate) regulariser -- mirrors MPC cost term 5
+ALPHA5 = 0.005
 ALPHA6 = 8.0     # FC-overshoot penalty - QUADRATIC shape (v2.7-v2.14 default)
 C_TERM = 0.0     # terminal bonus (kept as 0)
 
@@ -167,25 +170,26 @@ C_TERM = 0.0     # terminal bonus (kept as 0)
 #   - ALPHA6_LIN to match gradient at RMS overshoot (13.4 mm):  1.5285
 # Chosen ALPHA6_LIN = 1.5 bracketed by both calibrations; preserves r6
 # dominance over r1+r2+r3 while uniformising the gradient across overshoot.
-ALPHA6_LIN  = 1.5    # FC-overshoot penalty - LINEAR shape (v2.15)
-ALPHA6_SQRT = 0.5    # FC-overshoot penalty - SQRT shape   (calibrated, unused default)
+ALPHA6_LIN = 1.5    # FC-overshoot penalty - LINEAR shape (v2.15)
+# FC-overshoot penalty - SQRT shape   (calibrated, unused default)
+ALPHA6_SQRT = 0.5
 
 # ── curriculum defaults (NEW in v2.8) ─────────────────────────────────────────
 CURRICULUM_WARMUP_STEPS_DEFAULT = 50_000    # transition point (env steps)
-CURRICULUM_SHORT_LEN_DEFAULT    = 60        # short-episode length (days)
+CURRICULUM_SHORT_LEN_DEFAULT = 60        # short-episode length (days)
 
 # ── environment dimensions (v2.8) ─────────────────────────────────────────────
-N_AGENTS         = 130
+N_AGENTS = 130
 N_AGENT_FEATURES = 9     # v2.8: 4 dynamic + 4 static topo + 1 overshoot
-N_GLOBAL_DIMS    = 57    # 9 scalars + 48 forecast
-OBS_DIM          = N_AGENT_FEATURES * N_AGENTS + N_GLOBAL_DIMS    # 1227
+N_GLOBAL_DIMS = 57    # 9 scalars + 48 forecast
+OBS_DIM = N_AGENT_FEATURES * N_AGENTS + N_GLOBAL_DIMS    # 1227
 
 
 # ── module-level asset cache (loaded once per process) ───────────────────────
 def _load_assets():
-    crop    = get_crop('rice')
+    crop = get_crop('rice')
     terrain = load_terrain('gilan_farm.tif')
-    df      = load_cleaned_data()
+    df = load_cleaned_data()
     return crop, terrain, df
 
 
@@ -195,8 +199,8 @@ _CROP, _TERRAIN, _CLIMATE_DF = _load_assets()
 _FC_MM = _CROP['theta6'] * _CROP['theta5']           # field capacity (mm)
 _WP_MM = _CROP['theta2'] * _CROP['theta5']           # wilting point  (mm)
 _ST_MM = _FC_MM - _CROP['p'] * (_FC_MM - _WP_MM)     # stress threshold (mm)
-_HI    = _CROP['HI']                                  # harvest index
-_K     = _CROP['season_days']                         # season length (93)
+_HI = _CROP['HI']                                  # harvest index
+_K = _CROP['season_days']                         # season length (93)
 _GDD_MATURITY = _CROP.get('theta18', 1250.0)
 
 _SCENARIO_YEAR_MAP = {2022: 'dry', 2018: 'moderate', 2024: 'wet'}
@@ -280,7 +284,7 @@ class IrrigationEnv(gym.Env):
         curriculum_short_len:    int = CURRICULUM_SHORT_LEN_DEFAULT,
         use_overshoot_feature:   bool = True,
         normalize_globals:       bool = NORMALIZE_GLOBALS_DEFAULT,
-        reward_overshoot_mode:   str  = 'quadratic',
+        reward_overshoot_mode:   str = 'quadratic',
         rain_normaliser:         float = RAIN_REF,
         reward_du_alpha:         float = 0.0,
         biomass_shaping_gamma:   float = 1.0,
@@ -289,9 +293,9 @@ class IrrigationEnv(gym.Env):
         super().__init__()
         self.randomize = randomize
         self._curriculum_warmup_steps = int(curriculum_warmup_steps)
-        self._curriculum_short_len    = int(curriculum_short_len)
-        self._use_overshoot_feature   = bool(use_overshoot_feature)
-        self._normalize_globals       = bool(normalize_globals)
+        self._curriculum_short_len = int(curriculum_short_len)
+        self._use_overshoot_feature = bool(use_overshoot_feature)
+        self._normalize_globals = bool(normalize_globals)
         # v2.15: validate and store reward_overshoot_mode.  Default 'quadratic'
         # preserves byte-identical behaviour for v2.7-v2.14 training scripts.
         if reward_overshoot_mode not in ('quadratic', 'linear', 'sqrt'):
@@ -336,7 +340,8 @@ class IrrigationEnv(gym.Env):
         # telescoping is only partial; the trainer sets it = gamma_base.
         # (Ng, Harada & Russell 1999, policy-invariant shaping.)
         if biomass_shaping_gamma <= 0.0:
-            raise ValueError(f"biomass_shaping_gamma must be > 0, got {biomass_shaping_gamma!r}")
+            raise ValueError(
+                f"biomass_shaping_gamma must be > 0, got {biomass_shaping_gamma!r}")
         self._biomass_shaping_gamma = float(biomass_shaping_gamma)
 
         # v2.19c: optional DETERMINISTIC evaluation schedule.  When provided,
@@ -363,7 +368,7 @@ class IrrigationEnv(gym.Env):
         # obs dim depends on whether x1_overshoot_norm is included:
         #   use_overshoot_feature=True  (v2.8 default): 9 feat/agent → 1227-dim
         #   use_overshoot_feature=False (v2.9 / v2.7):  8 feat/agent → 1097-dim
-        _n_feat  = 9 if self._use_overshoot_feature else 8
+        _n_feat = 9 if self._use_overshoot_feature else 8
         _obs_dim = _n_feat * N_AGENTS + N_GLOBAL_DIMS
 
         self.observation_space = spaces.Box(
@@ -382,8 +387,10 @@ class IrrigationEnv(gym.Env):
         self._water_used: float = 0.0
         self._day: int = 0
         self._prev_x4_mean: float = 0.0
-        self._prev_irr_mm = None           # v2.19d: previous applied irr_mm (mm/day, per agent), for delta-u
-        self._last_reward_terms: dict = {} # v2.19d: components of the last reward, for telemetry
+        # v2.19d: previous applied irr_mm (mm/day, per agent), for delta-u
+        self._prev_irr_mm = None
+        # v2.19d: components of the last reward, for telemetry
+        self._last_reward_terms: dict = {}
 
         # curriculum state (v2.8)
         self._global_step_count: int = 0   # increments on every step() call
@@ -401,20 +408,21 @@ class IrrigationEnv(gym.Env):
             # (year, budget_frac) schedule in order so every checkpoint is
             # scored on the identical set of episodes.  No np_random is used
             # here, so the episode is fully deterministic regardless of seed.
-            yr, bf = self._eval_schedule[self._eval_idx % len(self._eval_schedule)]
+            yr, bf = self._eval_schedule[self._eval_idx %
+                                         len(self._eval_schedule)]
             self._eval_idx += 1
-            self._year  = int(yr)
+            self._year = int(yr)
             budget_frac = float(bf)
         elif self.randomize:
-            self._year  = int(self.np_random.choice(list(TRAINING_YEARS)))
+            self._year = int(self.np_random.choice(list(TRAINING_YEARS)))
             budget_frac = float(self.np_random.uniform(0.70, 1.00))
         else:
-            self._year  = 2022   # dry scenario for fixed evaluation
+            self._year = 2022   # dry scenario for fixed evaluation
             budget_frac = 1.0
 
-        self._budget_mm  = FULL_SEASON_NEED_MM * budget_frac
+        self._budget_mm = FULL_SEASON_NEED_MM * budget_frac
         self._water_used = 0.0
-        self._day        = 0
+        self._day = 0
 
         # Curriculum: decide this episode's truncation day at the start of
         # the episode, so we don't switch mid-episode.
@@ -471,7 +479,7 @@ class IrrigationEnv(gym.Env):
 
         # 2. per-step budget clip (unchanged from v2.7)
         remaining = max(self._budget_mm - self._water_used, 0.0)
-        irr_mm    = np.minimum(irr_mm, remaining)
+        irr_mm = np.minimum(irr_mm, remaining)
 
         # 3. climate for today
         d = min(self._day, _K - 1)
@@ -484,12 +492,12 @@ class IrrigationEnv(gym.Env):
         }
 
         # 4. advance ABM, accumulate field-mean water depth
-        new_state         = self._abm.step(irr_mm, climate_today)
-        water_step_field  = float(np.mean(irr_mm))
+        new_state = self._abm.step(irr_mm, climate_today)
+        water_step_field = float(np.mean(irr_mm))
         self._water_used += water_step_field
 
         # 5. extract state arrays
-        x1      = new_state['x1']
+        x1 = new_state['x1']
         x4_mean = float(np.mean(new_state['x4']))
 
         # 6. reward (unchanged)
@@ -508,7 +516,7 @@ class IrrigationEnv(gym.Env):
         #    terminated=False always (no early termination from budget).
         #    truncated when day reaches the curriculum-dependent truncation day.
         terminated = False
-        truncated  = (self._day >= self._truncation_day)
+        truncated = (self._day >= self._truncation_day)
 
         info = {
             'day':              self._day,
@@ -535,9 +543,10 @@ class IrrigationEnv(gym.Env):
         x4_mean: float,
         irr_mm: np.ndarray,
     ) -> float:
-        r1 = ALPHA1 * (self._biomass_shaping_gamma * x4_mean - self._prev_x4_mean) / X4_REF
+        r1 = ALPHA1 * (self._biomass_shaping_gamma *
+                       x4_mean - self._prev_x4_mean) / X4_REF
         r2 = -ALPHA2 * float(np.mean(irr_mm)) / UB_MM
-        drought   = np.maximum(_ST_MM - x1, 0.0)
+        drought = np.maximum(_ST_MM - x1, 0.0)
         r3 = -ALPHA3 * float(np.mean(drought)) / max(_ST_MM - _WP_MM, 1e-6)
         overshoot = np.maximum(x1 - _FC_MM, 0.0)
         if self._reward_overshoot_mode == 'linear':
@@ -550,11 +559,11 @@ class IrrigationEnv(gym.Env):
             # Sub-quadratic shape (steeper than quadratic at moderate overshoot,
             # gentler than linear at large overshoot).  Provided for ablation.
             r6 = -ALPHA6_SQRT * float(np.mean(np.sqrt(overshoot))) \
-                 / max(np.sqrt(_FC_MM), 1e-6)
+                / max(np.sqrt(_FC_MM), 1e-6)
         else:
             # Default: quadratic (v2.7-v2.14 byte-identical behaviour).
             r6 = -ALPHA6 * float(np.mean(overshoot ** 2)) \
-                 / max(_FC_MM ** 2, 1e-6)
+                / max(_FC_MM ** 2, 1e-6)
         # ── r5: delta-u (control-rate) smoothing — mirrors MPC cost term 5 ──
         #   MPC: J_delta_u = alpha5 * sum_k ||u(k)-u(k-1)||^2 / (u_max^2 * N)
         #   here (per step):  -alpha5 * mean_n[ ((irr_mm - prev_irr_mm)/UB_MM)^2 ]
@@ -584,7 +593,7 @@ class IrrigationEnv(gym.Env):
         )
         x5_norm = np.clip(self._abm.x5 / X5_REF, 0.0, 2.0)
         x4_norm = np.clip(self._abm.x4 / X4_REF, 0.0, 1.5)
-        x3      = np.clip(self._abm.x3, 0.0, 2.0)
+        x3 = np.clip(self._abm.x3, 0.0, 2.0)
 
         # v2.8 NEW: explicit FC-overshoot feature.  Same quantity that
         # appears in r6 = -α6 × mean(this^2) / FC, giving the gradient
@@ -621,13 +630,13 @@ class IrrigationEnv(gym.Env):
             ], axis=1).flatten().astype(np.float32)   # (1040,) v2.7
 
         # ── scalar block (unchanged from v2.7) ──────────────────────────────
-        day_frac          = self._day / _K
-        budget_remaining  = max(self._budget_mm - self._water_used, 0.0)
-        budget_frac       = budget_remaining / max(self._budget_mm, 1e-6)
+        day_frac = self._day / _K
+        budget_remaining = max(self._budget_mm - self._water_used, 0.0)
+        budget_frac = budget_remaining / max(self._budget_mm, 1e-6)
         budget_total_norm = self._budget_mm / FULL_SEASON_NEED_MM
         if self._day > 0:
             daily_pace = FULL_SEASON_NEED_MM / _K
-            burn_rate  = self._water_used / max(self._day * daily_pace, 1e-6)
+            burn_rate = self._water_used / max(self._day * daily_pace, 1e-6)
         else:
             burn_rate = 0.0
 
@@ -639,8 +648,8 @@ class IrrigationEnv(gym.Env):
         # v2.16: rainfall denominator is now self._rain_normaliser (defaults to
         # RAIN_REF=70.0 for v2.7-v2.15; v2.16 sets it to RAIN_REF_V216=30.0).
         _rain_s = self._rain_normaliser if self._normalize_globals else 1.0
-        _etc_s  = ETC_REF  if self._normalize_globals else 1.0
-        _rad_s  = RAD_REF  if self._normalize_globals else 1.0
+        _etc_s = ETC_REF if self._normalize_globals else 1.0
+        _rad_s = RAD_REF if self._normalize_globals else 1.0
 
         scalar_block = np.array([
             day_frac,
