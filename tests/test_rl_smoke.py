@@ -28,6 +28,10 @@
 import numpy as np
 import pytest
 
+from src.rl.gym_env import (
+    X4_REF,
+    X5_REF,
+)
 
 # v2.8 module-level constants
 V28_OBS_DIM = 1227
@@ -458,13 +462,15 @@ def test_runner_obs_matches_env_obs():
     wp = crop['theta2'] * crop['theta5']
     x1_range = max(fc - wp, 1e-6)
 
+
+
     def runner_dynamic_features(abm_state):
         """Replicate exactly runner._build_obs dynamic block (v2.8.1 formulas)."""
         x1_norm = np.clip((abm_state['x1'] - wp) /
                           x1_range, 0.0, 1.5).astype(np.float32)
-        x5_norm = np.clip(abm_state['x5'] / 50.0,
+        x5_norm = np.clip(abm_state['x5'] / X5_REF,
                           0.0, 2.0).astype(np.float32)
-        x4_norm = np.clip(abm_state['x4'] / 900.0,
+        x4_norm = np.clip(abm_state['x4'] / X4_REF,
                           0.0, 1.5).astype(np.float32)
         x3 = np.clip(abm_state['x3'],
                      0.0, 2.0).astype(np.float32)
