@@ -41,6 +41,7 @@ import torch
 from stable_baselines3 import SAC
 
 from src.controllers.base import Controller
+
 from src.rl.gym_env import (
     UB_MM,
     X4_REF,
@@ -130,7 +131,8 @@ def _load_sac_model(model_path: Path, device: str = 'cpu'):
         (RAIN_REF=70.0 for v2.7-v2.15, RAIN_REF_V216=30.0 for v2.16).
         Used by the eval runner to apply the same rainfall scaling.
     """
-    dim, key_fmt, has_ln, obs_marker, has_log_std = _detect_critic_arch(model_path)
+    dim, key_fmt, has_ln, obs_marker, has_log_std = _detect_critic_arch(
+        model_path)
     # obs_marker: 0.0=v2.7/v2.11 (raw obs), 2.12=v2.12 (normalised globals),
     # 2.13=v2.13 (normalised globals + actor-only input re-centering),
     # 2.14=v2.14 (v2.13 architecture trained with α=0.01),
@@ -138,7 +140,7 @@ def _load_sac_model(model_path: Path, device: str = 'cpu'):
     # 2.16=v2.16 (v2.15 architecture + RAIN_REF=30 + capped auto-α),
     # 2.19=v2.19 (TD3: deterministic actor, no log_std, same VDN LayerNorm critic).
     normalize_globals = False
-    rain_normaliser   = RAIN_REF   # default for v2.7-v2.15 checkpoints
+    rain_normaliser = RAIN_REF   # default for v2.7-v2.15 checkpoints
 
     # ── v2.19 TD3 branch (MUST be checked before the SAC 2.155 branch) ──────────
     # A TD3 checkpoint has the same VDN LayerNorm critic (dim=66, flat, has_ln)
@@ -159,16 +161,16 @@ def _load_sac_model(model_path: Path, device: str = 'cpu'):
 
     if dim == 837:
         policy_class = MonolithicCTDESACPolicy
-        label        = 'monolithic (pre-VDN)'
-        obs_layout   = 'v26'
+        label = 'monolithic (pre-VDN)'
+        obs_layout = 'v26'
     elif dim == 63 and key_fmt == 'wrapped':
         policy_class = WrappedVDNCTDESACPolicy
-        label        = 'VDN factorised - v2.6 (local_q_net wrapper)'
-        obs_layout   = 'v26'
+        label = 'VDN factorised - v2.6 (local_q_net wrapper)'
+        obs_layout = 'v26'
     elif dim == 63 and key_fmt == 'flat':
         policy_class = WrappedVDNCTDESACPolicy
-        label        = 'VDN factorised - v2.6 (flat keys, treated as legacy)'
-        obs_layout   = 'v26'
+        label = 'VDN factorised - v2.6 (flat keys, treated as legacy)'
+        obs_layout = 'v26'
     elif dim == 66 and key_fmt == 'flat' and has_ln and obs_marker >= 2.155:
         # v2.16: v2.15 architecture + RAIN_REF=30 + capped auto-α.
         # Architecturally byte-identical to v2.15; the marker change lets the
@@ -179,11 +181,11 @@ def _load_sac_model(model_path: Path, device: str = 'cpu'):
         # torch.tensor([2.15]) as 2.1499998..., so strict ">= 2.16" would
         # mis-classify v2.16.
         policy_class = V216CTDESACPolicy
-        label        = ('VDN factorised - v2.16 (v2.15 architecture + RAIN_REF=30 '
-                        '+ capped auto-α for rain-input dynamic range)')
-        obs_layout   = 'v27'
+        label = ('VDN factorised - v2.16 (v2.15 architecture + RAIN_REF=30 '
+                 '+ capped auto-α for rain-input dynamic range)')
+        obs_layout = 'v27'
         normalize_globals = True
-        rain_normaliser   = RAIN_REF_V216   # tightened rainfall normaliser
+        rain_normaliser = RAIN_REF_V216   # tightened rainfall normaliser
     elif dim == 66 and key_fmt == 'flat' and has_ln and obs_marker >= 2.145:
         # v2.15: v2.14 architecture trained with LINEAR r6 (instead of quadratic).
         # Architecturally byte-identical to v2.14; the marker change lets the
@@ -193,9 +195,9 @@ def _load_sac_model(model_path: Path, device: str = 'cpu'):
         # through the saved zip as 2.1499998... and torch.tensor([2.14]) as
         # 2.1399998..., so a strict ">= 2.15" check would mis-classify v2.15.
         policy_class = V215CTDESACPolicy
-        label        = ('VDN factorised - v2.15 (v2.14 architecture + linear r6 '
-                        'for uniform overshoot-gradient signal)')
-        obs_layout   = 'v27'
+        label = ('VDN factorised - v2.15 (v2.14 architecture + linear r6 '
+                 'for uniform overshoot-gradient signal)')
+        obs_layout = 'v27'
         normalize_globals = True
     elif dim == 66 and key_fmt == 'flat' and has_ln and obs_marker >= 2.135:
         # v2.14: v2.13 architecture trained with α=0.01.  Architecturally
@@ -206,9 +208,9 @@ def _load_sac_model(model_path: Path, device: str = 'cpu'):
         # through the saved zip as 2.1399998... and torch.tensor([2.13]) as
         # 2.1299999..., so a strict ">= 2.14" check would mis-classify v2.14.
         policy_class = V214CTDESACPolicy
-        label        = ('VDN factorised - v2.14 (v2.13 architecture + α=0.01 '
-                        'for entropy/reward SNR recovery)')
-        obs_layout   = 'v27'
+        label = ('VDN factorised - v2.14 (v2.13 architecture + α=0.01 '
+                 'for entropy/reward SNR recovery)')
+        obs_layout = 'v27'
         normalize_globals = True
     elif dim == 66 and key_fmt == 'flat' and has_ln and obs_marker >= 2.125:
         # v2.13: v2.12 + actor-only input re-centering (2*x - 1 on the actor's
@@ -216,9 +218,9 @@ def _load_sac_model(model_path: Path, device: str = 'cpu'):
         # runner must still divide rainfall/Kc_ET/radiation by their refs).
         # 2.125 = midway between 2.12 and 2.13.
         policy_class = V213CTDESACPolicy
-        label        = ('VDN factorised - v2.13 (v2.12 + actor-only input '
-                        're-centering for dead-ReLU capacity recovery)')
-        obs_layout   = 'v27'
+        label = ('VDN factorised - v2.13 (v2.12 + actor-only input '
+                 're-centering for dead-ReLU capacity recovery)')
+        obs_layout = 'v27'
         normalize_globals = True
     elif dim == 66 and key_fmt == 'flat' and has_ln and obs_marker >= 2.0:
         # v2.12: v2.11 LayerNorm critic + LeakyReLU actor, trained on the
@@ -227,24 +229,24 @@ def _load_sac_model(model_path: Path, device: str = 'cpu'):
         # Threshold 2.0 catches the v2.12 marker (2.119...) while excluding
         # legacy v2.11/v2.7 checkpoints which have NO marker (treated as 0.0).
         policy_class = V212CTDESACPolicy
-        label        = ('VDN factorised - v2.12 (8 features/agent, LayerNorm '
-                        'critic, LeakyReLU actor, normalised globals)')
-        obs_layout   = 'v27'
+        label = ('VDN factorised - v2.12 (8 features/agent, LayerNorm '
+                 'critic, LeakyReLU actor, normalised globals)')
+        obs_layout = 'v27'
         normalize_globals = True
     elif dim == 66 and key_fmt == 'flat' and has_ln:
         # v2.11: same obs layout as v2.7 (8 features/agent, 1097-dim) but
         # the critic has LayerNorm after each hidden Linear layer.
         policy_class = V211CTDESACPolicy
-        label        = 'VDN factorised - v2.11 (8 features/agent, LayerNorm critic)'
-        obs_layout   = 'v27'
+        label = 'VDN factorised - v2.11 (8 features/agent, LayerNorm critic)'
+        obs_layout = 'v27'
     elif dim == 66 and key_fmt == 'flat':
         policy_class = V27CTDESACPolicy
-        label        = 'VDN factorised - v2.7 (8 features/agent)'
-        obs_layout   = 'v27'
+        label = 'VDN factorised - v2.7 (8 features/agent)'
+        obs_layout = 'v27'
     elif dim == 67 and key_fmt == 'flat':
         policy_class = CTDESACPolicy
-        label        = 'VDN factorised - v2.8 (9 features/agent)'
-        obs_layout   = 'v28'
+        label = 'VDN factorised - v2.8 (9 features/agent)'
+        obs_layout = 'v28'
     else:
         raise ValueError(
             f"Unrecognised critic architecture: dim={dim}, key_format={key_fmt!r}, "
@@ -325,10 +327,10 @@ class RLController(Controller):
         else:
             self.model, _arch_label, obs_layout = _loaded
             normalize_globals = False
-            rain_normaliser   = RAIN_REF
+            rain_normaliser = RAIN_REF
         self._obs_layout = obs_layout    # 'v28' | 'v27' | 'v26'
         self._normalize_globals = bool(normalize_globals)
-        self._rain_normaliser   = float(rain_normaliser)
+        self._rain_normaliser = float(rain_normaliser)
 
         if self.verbose:
             print(f"  Loaded checkpoint: critic architecture = {_arch_label}")
@@ -337,13 +339,15 @@ class RLController(Controller):
                 'v27': '1097-dim, 8 features/agent',
                 'v26': '707-dim, 5 features/agent',
             }
-            print(f"  Observation layout = {obs_layout} ({layout_desc[obs_layout]})")
+            print(
+                f"  Observation layout = {obs_layout} ({layout_desc[obs_layout]})")
             _normdesc = ('v2.12 (per-agent + normalised global/forecast block)'
                          if self._normalize_globals
                          else 'v2.8.1 (per-agent only; raw global/forecast block)')
             print(f"  Obs normalisation:  {_normdesc}")
             if self._normalize_globals:
-                print(f"  rain_normaliser:    {self._rain_normaliser:.1f} mm/day")
+                print(
+                    f"  rain_normaliser:    {self._rain_normaliser:.1f} mm/day")
 
         self._inference_times = []
         self._noisy_forecast = None
@@ -462,8 +466,8 @@ class RLController(Controller):
                           rain_today ETc_today h2 h7 g_base
         Forecast block (48): rain[0:8] ETc[0:8] rad[0:8] h2[0:8] h7[0:8] g[0:8]
         """
-        fc       = self._fc_total
-        wp       = self._wp_total
+        fc = self._fc_total
+        wp = self._wp_total
         x1_range = self._x1_range    # FC - WP, pre-computed in reset()
 
         # ── dynamic per-agent features (v2.8.1: all match gym_env.py) ───────
@@ -481,6 +485,8 @@ class RLController(Controller):
             state['x4'] / X4_REF,
             0.0, 1.5,
         ).astype(np.float32)
+
+        x4_norm = np.clip(state['x4'] / X4_REF, 0.0, 1.5).astype(np.float32)
 
         x3 = np.clip(state['x3'], 0.0, 2.0).astype(np.float32)
 
@@ -522,11 +528,11 @@ class RLController(Controller):
             ], axis=1).flatten().astype(np.float32)   # (650,)
 
         # ── scalar block ─────────────────────────────────────────────────────
-        day_frac          = day / self._season_days
-        budget_frac       = budget_remaining / max(self._budget_total, 1e-6)
+        day_frac = day / self._season_days
+        budget_frac = budget_remaining / max(self._budget_total, 1e-6)
         budget_total_norm = self._budget_total / FULL_SEASON_NEED_MM
 
-        water_spent  = self._budget_total - float(budget_remaining)
+        water_spent = self._budget_total - float(budget_remaining)
         daily_budget = self._budget_total / self._season_days
         burn_rate = (
             (water_spent / max(day, 1)) / max(daily_budget, 1e-6)
@@ -541,13 +547,13 @@ class RLController(Controller):
         # v2.7-v2.15, RAIN_REF_V216=30.0 for v2.16).  Set in __init__ from
         # the loaded model's marker.
         _rain_s = self._rain_normaliser if self._normalize_globals else 1.0
-        _etc_s  = ETC_REF  if self._normalize_globals else 1.0
-        _rad_s  = RAD_REF  if self._normalize_globals else 1.0
+        _etc_s = ETC_REF if self._normalize_globals else 1.0
+        _rad_s = RAD_REF if self._normalize_globals else 1.0
 
-        rain_today   = float(self._climate['rainfall'][d]) / _rain_s
-        ETc_today    = float(self._precomputed.Kc_ET[d]) / _etc_s
-        h2_today     = float(self._precomputed.h2[d])
-        h7_today     = float(self._precomputed.h7[d])
+        rain_today = float(self._climate['rainfall'][d]) / _rain_s
+        ETc_today = float(self._precomputed.Kc_ET[d]) / _etc_s
+        h2_today = float(self._precomputed.h2[d])
+        h7_today = float(self._precomputed.h7[d])
         g_base_today = float(self._precomputed.g_base[d])
 
         scalars = np.array([
@@ -556,7 +562,7 @@ class RLController(Controller):
         ], dtype=np.float32)
 
         # ── forecast block ───────────────────────────────────────────────────
-        H   = self.forecast_horizon
+        H = self.forecast_horizon
         end = min(d + H, self._season_days)
 
         def _pad(arr):
@@ -574,18 +580,18 @@ class RLController(Controller):
                 day, self._climate, self._precomputed, H
             )
             rain_fc = _pad(fc_dict['rainfall']) / _rain_s
-            ETc_fc  = _pad(fc_dict['ETc']) / _etc_s
-            rad_fc  = _pad(fc_dict['radiation']) / _rad_s
-            h2_fc   = _pad(self._precomputed.h2[d:end])
-            h7_fc   = _pad(self._precomputed.h7[d:end])
-            g_fc    = _pad(self._precomputed.g_base[d:end])
+            ETc_fc = _pad(fc_dict['ETc']) / _etc_s
+            rad_fc = _pad(fc_dict['radiation']) / _rad_s
+            h2_fc = _pad(self._precomputed.h2[d:end])
+            h7_fc = _pad(self._precomputed.h7[d:end])
+            g_fc = _pad(self._precomputed.g_base[d:end])
         else:
             rain_fc = _pad(self._climate['rainfall'][d:end]) / _rain_s
-            ETc_fc  = _pad(self._precomputed.Kc_ET[d:end]) / _etc_s
-            rad_fc  = _pad(self._climate['radiation'][d:end]) / _rad_s
-            h2_fc   = _pad(self._precomputed.h2[d:end])
-            h7_fc   = _pad(self._precomputed.h7[d:end])
-            g_fc    = _pad(self._precomputed.g_base[d:end])
+            ETc_fc = _pad(self._precomputed.Kc_ET[d:end]) / _etc_s
+            rad_fc = _pad(self._climate['radiation'][d:end]) / _rad_s
+            h2_fc = _pad(self._precomputed.h2[d:end])
+            h7_fc = _pad(self._precomputed.h7[d:end])
+            g_fc = _pad(self._precomputed.g_base[d:end])
 
         return np.concatenate([
             agent_block,
