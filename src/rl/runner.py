@@ -1,6 +1,6 @@
 # =============================================================================
-# src/rl/runner.py  v2.8.1
-# Inference runner for trained SAC models.
+# src/rl/runner.py  v2.8.1 + TD3 support (v2.19-v2.22)
+# Inference runner for trained SAC and TD3 models.
 #
 # Loads a trained SB3 SAC model (v2.8 default, v2.7 legacy, v2.6 legacy, or
 # pre-VDN monolithic), runs it through the full ABM season, and saves
@@ -72,7 +72,7 @@ def _detect_critic_arch(model_path: Path):
     Returns
     -------
     (int, str, bool, float)
-        input_dim     : first Linear layer's input dimension (67=v2.8, 66=v2.7/11/12/13,
+        input_dim     : first Linear layer's input dimension (67=v2.8/v2.22, 66=v2.7/11/12/13/19,
                         63=v2.6, 837=pre-VDN monolithic)
         key_format    : 'flat' | 'wrapped'
         has_layernorm : True if critic.qf0.1.weight exists and is 1-D (v2.11+ marker)
@@ -158,6 +158,22 @@ def _load_sac_model(model_path: Path, device: str = 'cpu'):
                  'target-policy smoothing; same VDN LayerNorm critic)')
         # v2.19 uses the v2.16 observation contract (normalised globals, RAIN_REF=30).
         return model, label, 'v27', True, RAIN_REF_V216
+
+    # ── v2.22 TD3 branch (9-feature: prev_u in obs → dim 67 critic) ────────
+    # v2.22 adds u_{t-1} as a 9th per-agent feature for Markov-r5.  The critic
+    # input dim goes from 66 (8-feat) to 67 (9-feat), which would otherwise
+    # fall through to the old v2.8 SAC branch (also dim=67 but with log_std).
+    # Guard: dim==67 + no log_std (TD3) + has_ln (v2.11 LayerNorm critic).
+    if dim == 67 and key_fmt == 'flat' and has_ln and (not has_log_std):
+        from stable_baselines3 import TD3
+        from src.rl.networks_td3_prevu import TD3VDNPolicyPrevU
+        model = TD3.load(
+            str(model_path), device=device,
+            custom_objects={'policy_class': TD3VDNPolicyPrevU},
+        )
+        label = ('VDN factorised - v2.22 (TD3 + prev_u: 9 features/agent, '
+                 'Markov-r5; same VDN LayerNorm critic)')
+        return model, label, 'v27_prevu', True, RAIN_REF_V216
 
     if dim == 837:
         policy_class = MonolithicCTDESACPolicy
@@ -337,6 +353,7 @@ class RLController(Controller):
             layout_desc = {
                 'v28': '1227-dim, 9 features/agent',
                 'v27': '1097-dim, 8 features/agent',
+                'v27_prevu': '1227-dim, 9 features/agent (8 + prev_u)',
                 'v26': '707-dim, 5 features/agent',
             }
             print(
@@ -518,6 +535,24 @@ class RLController(Controller):
                 self._Nr_internal_norm,
                 self._n_upstream_norm,
             ], axis=1).flatten().astype(np.float32)   # (1040,)
+        elif self._obs_layout == 'v27_prevu':
+            # v2.22: 8 base features + prev_u_norm as 9th per-agent feature.
+            # Mirrors gym_env_prev_u.py: prev_u_norm = clip(u_{t-1}/UB_MM, 0, 1).
+            # On the first day (or after reset), self._u_prev is zeros.
+            prev_u_norm = np.clip(
+                self._u_prev / UB_MM, 0.0, 1.0,
+            ).astype(np.float32)
+            agent_block = np.stack([
+                x1_norm,
+                x5_norm,
+                x4_norm,
+                x3,
+                self._elev_norm,
+                self._Nr_norm,
+                self._Nr_internal_norm,
+                self._n_upstream_norm,
+                prev_u_norm,
+            ], axis=1).flatten().astype(np.float32)   # (1170,)
         else:  # 'v26'
             agent_block = np.stack([
                 x1_norm,
