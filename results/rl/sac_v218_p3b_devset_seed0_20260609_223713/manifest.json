@@ -1,0 +1,88 @@
+{
+  "version": "2.18.0-P3b-devset",
+  "experiment": "v218_p3b_deterministic_devset_eval",
+  "seed": 0,
+  "algorithm": "SAC (stable_baselines3) + asymmetric actor LR + action noise",
+  "policy_class": "V216CTDESACPolicy (marker=2.16)",
+  "total_timesteps": 250000,
+  "ent_coef": 0.002,
+  "gamma": 0.99,
+  "tau": 0.005,
+  "actor_lr_mult": 5.0,
+  "learning_starts": 1000,
+  "explore_sigma_start": 0.3,
+  "explore_sigma_floor": 0.0,
+  "explore_sigma_reinject": 0.15,
+  "explore_decay_steps": 60000,
+  "reinject_start": 150000,
+  "reinject_end": 180000,
+  "rain_normaliser": 30.0,
+  "reward_overshoot_mode": "linear",
+  "dev_years": [
+    2002,
+    2004,
+    2013
+  ],
+  "training_years": [
+    2000,
+    2001,
+    2003,
+    2005,
+    2006,
+    2007,
+    2008,
+    2009,
+    2010,
+    2011,
+    2012,
+    2014,
+    2015,
+    2016,
+    2017,
+    2019,
+    2020,
+    2021,
+    2023,
+    2025
+  ],
+  "eval_schedule": [
+    [
+      2002,
+      0.7
+    ],
+    [
+      2002,
+      0.85
+    ],
+    [
+      2002,
+      1.0
+    ],
+    [
+      2004,
+      0.7
+    ],
+    [
+      2004,
+      0.85
+    ],
+    [
+      2004,
+      1.0
+    ],
+    [
+      2013,
+      0.7
+    ],
+    [
+      2013,
+      0.85
+    ],
+    [
+      2013,
+      1.0
+    ]
+  ],
+  "eval_method": "deterministic_devset (FixedScheduleEvalCallback)",
+  "change_from_v218": "ONLY the eval method changed: randomized training-year eval replaced with deterministic DEV_YEARS x budgets scheduling. Training env, architecture, reward, and all hyperparameters are byte-identical to v2.18-P3b."
+}
