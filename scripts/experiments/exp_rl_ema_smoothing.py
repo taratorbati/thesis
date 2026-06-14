@@ -73,25 +73,56 @@ def alpha_tag(alpha: float) -> str:
     return f"{alpha:.2f}".replace('.', 'p')
 
 
-def discover_v221c_checkpoints() -> dict:
+POOL_DEV_YEARS = {
+    'A': (2002, 2016, 2023),
+    'B': (2002, 2004, 2013),
+}
+
+
+def _read_manifest_dev_years(run_dir):
+    """Read dev_years from a training run's manifest.json, or None."""
+    import json as _json
+    mp = run_dir / 'manifest.json'
+    if not mp.exists():
+        return None
+    try:
+        return tuple(_json.loads(mp.read_text(encoding='utf-8'))['dev_years'])
+    except Exception:
+        return None
+
+
+def discover_v221c_checkpoints(pool: str = None) -> dict:
     """Locate the v2.21c best_model.zip for each available seed.
 
-    Globs results/rl/td3_v221c_termyield_seed<S>_*/best_model/best_model.zip
-    (the layout written by train_v221c_td3).  Falls back to the *_final.zip if
-    a best_model.zip is absent.
+    Parameters
+    ----------
+    pool : str or None
+        'A' — only checkpoints trained on DEV_YEARS = (2002, 2016, 2023).
+        'B' — only checkpoints trained on DEV_YEARS = (2002, 2004, 2013).
+        None — pick the latest per seed regardless of pool (legacy behaviour,
+               can silently mix pools when both exist).
 
     Returns
     -------
     dict
         {seed:int -> Path-to-checkpoint}
     """
+    target_dev = POOL_DEV_YEARS.get(pool.upper()) if pool else None
+
     found: dict = {}
     for run_dir in sorted(RL_OUTPUT_DIR.glob('td3_v221c_termyield_seed*')):
+        if not run_dir.is_dir():
+            continue
         name = run_dir.name
         try:
             seed = int(name.split('seed')[1].split('_')[0])
         except (IndexError, ValueError):
             continue
+        # Pool filter: skip runs whose manifest dev_years don't match.
+        if target_dev is not None:
+            manifest_dev = _read_manifest_dev_years(run_dir)
+            if manifest_dev is not None and tuple(manifest_dev) != target_dev:
+                continue
         best = run_dir / 'best_model' / 'best_model.zip'
         if best.exists():
             found[seed] = best
@@ -127,96 +158,106 @@ def run_sweep(args):
     budget_pcts = list(BUDGET_LEVELS) if args.budget == 'all' else [int(args.budget)]
     alphas      = [float(a) for a in args.alphas]
 
-    # Resolve checkpoints: explicit overrides win, otherwise auto-discover.
-    ckpts = discover_v221c_checkpoints()
-    ckpts.update(parse_ckpt_overrides(args.ckpt))
-    if not ckpts:
-        raise SystemExit(
-            "No v2.21c checkpoints found under results/rl/td3_v221c_termyield_seed*/ "
-            "and none given via --ckpt. Train them first (run_seeds_v221c) or pass "
-            "--ckpt seed=path."
-        )
-
-    seeds = [s for s in args.seeds if s in ckpts]
-    missing = [s for s in args.seeds if s not in ckpts]
-    if missing:
-        print(f"[warn] no checkpoint for seed(s) {missing}; skipping them. "
-              f"Available seeds: {sorted(ckpts)}")
-    if not seeds:
-        raise SystemExit("None of the requested seeds have a checkpoint.")
+    # Determine which pool(s) to sweep.
+    pools_to_run = list(POOL_DEV_YEARS.keys()) if args.pool == 'both' else [args.pool.upper()]
 
     forecast_mode = args.forecast
     noise_seed    = args.noise_seed
 
-    print("\nEMA smoothing sweep")
-    print(f"  alphas:    {alphas}")
-    print(f"  seeds:     {seeds}  (checkpoints: "
-          f"{ {s: ckpts[s].parent.parent.name for s in seeds} })")
-    print(f"  scenarios: {scenarios}")
-    print(f"  budgets:   {budget_pcts}")
-    print(f"  forecast:  {forecast_mode}"
-          + (f"  (noise_seed={noise_seed})" if forecast_mode == 'noisy' else ""))
-    n_total = len(alphas) * len(seeds) * len(scenarios) * len(budget_pcts)
-    print(f"  total cells to evaluate: {n_total}\n")
+    for pool in pools_to_run:
+        pool_dev = POOL_DEV_YEARS[pool]
+        pool_tag = f"pool{pool}"   # 'poolA' or 'poolB'
 
-    done = skipped = 0
-    for alpha in alphas:
-        tag = alpha_tag(alpha)
-        runs_dir = RUNS_OUTPUT_DIR / f"td3_v221c_ema_a{tag}"
-        runs_dir.mkdir(parents=True, exist_ok=True)
+        # Resolve checkpoints for this pool.
+        ckpts = discover_v221c_checkpoints(pool=pool)
+        ckpts.update(parse_ckpt_overrides(args.ckpt))
+        if not ckpts:
+            print(f"\n[skip] No v2.21c checkpoints found for pool {pool} "
+                  f"(DEV_YEARS={pool_dev}). Train them first or pass --ckpt.")
+            continue
 
-        for seed in seeds:
-            model_path = ckpts[seed]
+        seeds = [s for s in args.seeds if s in ckpts]
+        missing = [s for s in args.seeds if s not in ckpts]
+        if missing:
+            print(f"[warn] pool {pool}: no checkpoint for seed(s) {missing}; "
+                  f"skipping. Available: {sorted(ckpts)}")
+        if not seeds:
+            print(f"[skip] pool {pool}: none of the requested seeds have a checkpoint.")
+            continue
 
-            for scenario in scenarios:
-                climate = extract_scenario_by_name(df_climate, scenario, crop)
-                climate['year'] = SCENARIO_YEARS[scenario]
+        print(f"\n{'='*70}")
+        print(f"EMA smoothing sweep — pool {pool} (DEV={pool_dev})")
+        print(f"{'='*70}")
+        print(f"  alphas:    {alphas}")
+        print(f"  seeds:     {seeds}  (checkpoints: "
+              f"{ {s: ckpts[s].parent.parent.name for s in seeds} })")
+        print(f"  scenarios: {scenarios}")
+        print(f"  budgets:   {budget_pcts}")
+        print(f"  forecast:  {forecast_mode}"
+              + (f"  (noise_seed={noise_seed})" if forecast_mode == 'noisy' else ""))
+        n_total = len(alphas) * len(seeds) * len(scenarios) * len(budget_pcts)
+        print(f"  total cells to evaluate: {n_total}\n")
 
-                for budget_pct in budget_pcts:
-                    budget_total = full_need_mm * BUDGET_LEVELS[budget_pct]
+        done = skipped = 0
+        for alpha in alphas:
+            tag = alpha_tag(alpha)
+            runs_dir = RUNS_OUTPUT_DIR / f"td3_v221c_ema_{pool_tag}_a{tag}"
+            runs_dir.mkdir(parents=True, exist_ok=True)
 
-                    fc_tag = ('perfect' if forecast_mode == 'perfect'
-                              else f"noisy_ns{noise_seed}")
-                    out_name = (f"td3_v221c_ema_a{tag}_{fc_tag}_det_"
-                                f"{scenario}_rice_{budget_pct}pct_seed{seed}.parquet")
-                    out_path = runs_dir / out_name
+            for seed in seeds:
+                model_path = ckpts[seed]
 
-                    if out_path.exists() and not args.force:
-                        skipped += 1
-                        print(f"  [skip] a={alpha:.2f} seed{seed} "
-                              f"{scenario}/{budget_pct}% (exists)")
-                        continue
+                for scenario in scenarios:
+                    climate = extract_scenario_by_name(df_climate, scenario, crop)
+                    climate['year'] = SCENARIO_YEARS[scenario]
 
-                    controller = EMASmoothedRLController(
-                        model_path=str(model_path),
-                        ema_alpha=alpha,
-                        deterministic=True,
-                        forecast_mode=forecast_mode,
-                        noise_sigma=args.noise_sigma,
-                        noise_rho=args.noise_rho,
-                        noise_seed=noise_seed,
-                        verbose=args.verbose,
-                    )
+                    for budget_pct in budget_pcts:
+                        budget_total = full_need_mm * BUDGET_LEVELS[budget_pct]
 
-                    print(f"  [run ] a={alpha:.2f} seed{seed} "
-                          f"{scenario}/{budget_pct}%  ({model_path.parent.parent.name})")
-                    run_season(
-                        controller=controller,
-                        terrain=terrain,
-                        crop=crop,
-                        climate=climate,
-                        budget_total=budget_total,
-                        output_path=out_path,
-                        scenario_name=scenario,
-                        seed=int(seed),
-                        force=args.force,
-                        verbose=args.verbose,
-                    )
-                    done += 1
+                        fc_tag = ('perfect' if forecast_mode == 'perfect'
+                                  else f"noisy_ns{noise_seed}")
+                        out_name = (f"td3_v221c_ema_{pool_tag}_a{tag}_{fc_tag}_det_"
+                                    f"{scenario}_rice_{budget_pct}pct_seed{seed}.parquet")
+                        out_path = runs_dir / out_name
 
-    print(f"\n[ema sweep] complete: {done} evaluated, {skipped} skipped "
-          f"(already present). Outputs under {RUNS_OUTPUT_DIR}/td3_v221c_ema_a*/")
-    print("Next: python -m scripts.analysis.ema_pareto")
+                        if out_path.exists() and not args.force:
+                            skipped += 1
+                            if args.verbose:
+                                print(f"  [skip] {pool} a={alpha:.2f} seed{seed} "
+                                      f"{scenario}/{budget_pct}% (exists)")
+                            continue
+
+                        controller = EMASmoothedRLController(
+                            model_path=str(model_path),
+                            ema_alpha=alpha,
+                            deterministic=True,
+                            forecast_mode=forecast_mode,
+                            noise_sigma=args.noise_sigma,
+                            noise_rho=args.noise_rho,
+                            noise_seed=noise_seed,
+                            verbose=args.verbose,
+                        )
+
+                        print(f"  [run ] {pool} a={alpha:.2f} seed{seed} "
+                              f"{scenario}/{budget_pct}%  ({model_path.parent.parent.name})")
+                        run_season(
+                            controller=controller,
+                            terrain=terrain,
+                            crop=crop,
+                            climate=climate,
+                            budget_total=budget_total,
+                            output_path=out_path,
+                            scenario_name=scenario,
+                            seed=int(seed),
+                            force=args.force,
+                            verbose=args.verbose,
+                        )
+                        done += 1
+
+        print(f"\n[ema sweep {pool}] {done} evaluated, {skipped} skipped. "
+              f"Outputs: {RUNS_OUTPUT_DIR}/td3_v221c_ema_{pool_tag}_a*/")
+
+    print("\nNext: python -m scripts.analysis.ema_pareto")
 
 
 def main():
@@ -227,6 +268,10 @@ def main():
                    help=f'EMA smoothing weights in (0,1]. Default {DEFAULT_ALPHAS}.')
     p.add_argument('--seeds', type=int, nargs='+', default=DEFAULT_SEEDS,
                    help=f'Seeds to evaluate. Default {DEFAULT_SEEDS}.')
+    p.add_argument('--pool', choices=['A', 'B', 'both'], default='both',
+                   help="Which pool's checkpoints to use. "
+                        "A = DEV {2002,2016,2023}, B = DEV {2002,2004,2013}, "
+                        "both = sweep each pool separately (default).")
     p.add_argument('--scenario', choices=SCENARIOS_ALL + ['all'], default='all')
     p.add_argument('--budget', choices=[str(b) for b in BUDGET_LEVELS] + ['all'],
                    default='all')
