@@ -1,0 +1,33 @@
+┌──────────────────────────────────────── one simulated day ─────────────────────────────────────────┐
+                    │                                                                 │
+  ┌──────────────┐  │   obs (1227)    ┌──────────────────────┐   action a_n (130)     │
+  │  ABM "plant" │──┼───────────────► │  SHARED ACTOR (SAC)  │ ── sample from ────────┼──┐
+  │ 130 cells,   │  │  + 8-day        │ 66→128→128, LeakyReLU│   Gaussian(μ_n,σ_n)    │  │
+  │ soil/crop/   │  │   FORECAST      │ heads: μ_n , log_std │   (+ explore noise)    │  │
+  │ cascade flow │  │                 └──────────────────────┘                        │  │
+  └──────────────┘  │                                                                 │  │
+        ▲           │                                            apply irrigation ◄───┼──┘
+        │           └─────────────────────────────────────────────────────────────────┘
+        │  next state                                   │ reward r = r1+r2+r3+r6  (from REAL ABM)
+        │                                               ▼
+        │                                   ┌────────────────────────┐
+        └───────────────────────────────────│  REPLAY BUFFER (250k)  │
+                                            │  (s, a, r, s′)         │
+                                            └───────────┬────────────┘
+                                       sample 256       │
+                                            ▼           ▼
+                       ┌──────────────── VDN TWIN CRITIC (training only) ────────────┐
+                       │ per cell: 67→256→256→1, ReLU+LayerNorm, ×2 (Q1,Q2)          │
+                       │ Q_total = Σ_n Q_n ;  target = r + γ·[min(Q1,Q2) − α·logπ]   │
+                       └───────────────┬─────────────────────────────────────────────┘
+                          gradient (value + entropy α=0.002) → updates SHARED ACTOR
+
+
+ACTOR (TD3): 66→128→128 LeakyReLU → single μ head (tanh)   ← DETERMINISTIC, no σ
+  COLLECT:     a_n = μ_n + decaying NormalActionNoise (σ 0.40→0.15)   ← exploration only
+  BUFFER:      stores EXACT 5-step returns (model.gamma = 0.99^5)
+  CRITIC TARGET: a′ = π_target(s′) + clip(ε,−0.5,0.5), ε~N(0,0.2)     ← target smoothing
+                 target = R_5 + γ^5 · min(Q1_target, Q2_target)(s′,a′)   ← no entropy term
+  ACTOR UPDATE:  maximize E[ Q1(s, π(s)) ]   every policy_delay = 2 critic steps  ← delayed
+  REWARD:        r1(dense) + r2 + r3 + r6  +  terminal bonus 1.0·x4_final/600 at season end
+  DEPLOYMENT:    μ_n  →  EMA filter (α≈0.3)  →  irrigation   ← deterministic, then smoothed

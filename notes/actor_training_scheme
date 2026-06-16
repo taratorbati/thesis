@@ -1,0 +1,20 @@
+SAC training step (per environment step):                 TD3 training step (per environment step):
+────────────────────────────────────────                 ────────────────────────────────────────
+COLLECT:                                                  COLLECT:
+  a_n ~ Gaussian(μ_n, σ_n)  (sample — stochastic)           a_n = μ_n + NormalActionNoise  (deterministic + noise)
+  store (s, a, r, s′) in replay buffer                      store (s, a, r, s′) in replay buffer
+
+CRITIC UPDATE (every step):                               CRITIC UPDATE (every step):
+  a′_n ~ π(·|s′)              (sample next action)           a′_n = π_target(s′) + clip(ε,−0.5,0.5)  ← target smoothing
+  target = r + γ·[ min(Q1,Q2)(s′,a′) − α·logπ(a′|s′) ]      target = r + γ·min(Q1_target,Q2_target)(s′,a′)
+           └─ entropy term INSIDE the target ─┘             (no entropy term)
+  regress Q1,Q2 → target   (VDN: Q = Σ_n Q_n)               regress Q1,Q2 → target   (VDN: Q = Σ_n Q_n)
+
+ACTOR UPDATE (every step):                                ACTOR UPDATE (every policy_delay = 2 steps):  ← delayed
+  maximize  E[ min(Q1,Q2)(s,a) − α·logπ(a|s) ]              maximize  E[ Q1(s, π(s)) ]
+            └ reward + entropy ┘                            (pure value climb, no entropy)
+
+  (α auto-tuned toward a target entropy)                   target nets updated every policy_delay steps too
+  target nets Polyak-updated (τ=0.005) every step          Polyak τ = 0.005
+
+  

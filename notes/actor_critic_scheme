@@ -1,0 +1,28 @@
+EXECUTION (deployed — decentralized, no critic):
+
+  cell 0:  [9 local feats ⧺ 57 global] = 66 ─┐
+  cell 1:  [9 local feats ⧺ 57 global] = 66 ─┤
+    ...                                       ├──►  SAME shared actor MLP  ──►  u_n (mm/day)
+  cell 129:[9 local feats ⧺ 57 global] = 66 ─┘     66→128→128→1 (take μ)     one per cell
+
+  • Run the one small network 130 times, once per cell, independently.
+  • Only the μ head is used (deterministic). No critic exists at deployment.
+  • ~25k parameters total, ~100 KB. Runs on a microcontroller.
+
+
+TRAINING (centralized critic teaches the shared actor):
+
+  all 130 cells ─► shared actor ─► 130 actions a_n ─┐
+                                                     │   (each cell: 9 feats ⧺ 57 global ⧺ a_n = 67)
+                                                     ▼
+                              ┌─────────── VDN critic (sees ALL cells) ───────────┐
+                              │  per-cell Q-net (67→256→256→1, +LayerNorm, twin)  │
+                              │  Q_total = Σ_n Q_n   ◄── one joint value          │
+                              └───────────────────────────────────────────────────┘
+                                                     │
+                          gradient of Q_total ──────►│ flows back into the ONE
+                                                      shared actor's weights
+                                                      (so every cell's experience
+                                                       trains the same network)
+
+  • The critic is thrown away after training. Only the actor ships.
