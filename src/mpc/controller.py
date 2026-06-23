@@ -20,8 +20,8 @@ import numpy as np
 
 from src.controllers.base import Controller
 from src.mpc.solver import build_nlp, solve_step
-from src.terrain import get_sink_agents
-from src.precompute import get_precomputed
+from src.model.terrain import get_sink_agents
+from src.sim.precompute import get_precomputed
 
 
 class MPCController(Controller):
@@ -112,10 +112,10 @@ class MPCController(Controller):
 
         # Set up forecast provider
         if self.forecast_mode == 'perfect':
-            from src.forecast import PerfectForecast
+            from src.model.forecast import PerfectForecast
             self._forecast_provider = PerfectForecast()
         elif self.forecast_mode == 'noisy':
-            from src.forecast import NoisyForecast
+            from src.model.forecast import NoisyForecast
             self._forecast_provider = NoisyForecast(
                 sigma_base=self.noise_sigma,
                 rho=self.noise_rho,

@@ -14,10 +14,10 @@ from plotly.subplots import make_subplots
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.terrain import load_dem
+from src.model.terrain import load_dem
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-DEM_PATH = PROJECT_ROOT / 'gilan_farm.tif'
+DEM_PATH = PROJECT_ROOT / 'data/gilan_farm.tif'
 
 def main():
     # ── Load real DEM ─────────────────────────────────────────────────────────

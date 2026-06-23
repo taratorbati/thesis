@@ -47,10 +47,10 @@ from matplotlib.patches import FancyArrowPatch
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.terrain import load_terrain
+from src.model.terrain import load_terrain
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-DEM_PATH    = PROJECT_ROOT / 'gilan_farm.tif'
+DEM_PATH    = PROJECT_ROOT / 'data/gilan_farm.tif'
 FIGURES_DIR = PROJECT_ROOT / 'figures'
 OUT_PDF     = FIGURES_DIR  / 'ch3_flow_graph.pdf'
 OUT_PNG     = FIGURES_DIR  / 'ch3_flow_graph.png'

@@ -196,8 +196,8 @@ def test_runner_imports():
 
 def test_runner_dynamic_features_match_env():
     """Runner per-cell dynamic formulas must match gym_env bit-for-bit."""
-    from soil_data import get_crop
-    from src.terrain import load_terrain
+    from src.model.soil_data import get_crop
+    from src.model.terrain import load_terrain
     crop = get_crop('rice')
     fc = crop['theta6'] * crop['theta5']
     wp = crop['theta2'] * crop['theta5']

@@ -19,12 +19,12 @@
 #   - Yield (kg/ha) = x4 × HI × 10
 #
 # Usage:
-#   from soil_data import get_crop
+#   from src.model.soil_data import get_crop
 #   crop = get_crop('rice')           # or 'tobacco'
 #   model = CropSoilABM(theta=crop, ...)
 #
 # RICE and TOBACCO are also exported directly for explicit use:
-#   from soil_data import RICE
+#   from src.model.soil_data import RICE
 # =============================================================================
 
 # ── Shared soil parameters (silty loam, same for all crops) ───────────────────

@@ -17,8 +17,8 @@ See **[`ARCHITECTURE.md`](ARCHITECTURE.md)** for the full system design.
 
 ```bash
 pip install -r requirements.txt          # core stack; RL extras: torch, stable-baselines3, gymnasium
-python preprocess.py                      # NASA POWER -> cleaned CSV with Penman-Monteith ET0
-python validate_physics_fao.py            # FAO-56 physics unit test on a flat topology
+python scripts/preprocess/preprocess.py   # NASA POWER -> cleaned CSV with Penman-Monteith ET0
+python scripts/validate_physics_fao.py    # FAO-56 physics unit test on a flat topology
 ```
 
 Run a controller over the 9 evaluation cells (3 held-out years x 3 budgets):
@@ -40,21 +40,19 @@ python -m src.rl.train_td3 --seed 0       # TD3  (the v2.21c configuration)
 
 | Path | Contents |
 |---|---|
-| `abm.py`, `soil_data.py`, `climate_data.py` | Crop-soil ABM, crop parameters, climate loader and the train/dev/test year split |
-| `preprocess.py` | NASA POWER -> cleaned CSV with Penman-Monteith ET0 |
-| `validate_physics_fao.py`, `run_plots.py` | FAO-56 physics check; climate visualisations |
-| `src/terrain.py`, `src/persistence.py`, `src/precompute.py`, `src/forecast.py` | Terrain graph, parquet I/O, precomputed biology, perfect/noisy forecasts |
-| `src/runner.py` | `run_season` — the single closed-loop loop shared by every controller |
+| `data/` | Raw inputs: NASA POWER climate CSV and `gilan_farm.tif` DEM (10 x 13, elevation 74-181 m) |
+| `src/model/` | Crop-soil ABM, crop/soil parameters, climate loader + year split, terrain graph, forecasts |
+| `src/sim/` | `run_season` closed-loop runner, parquet persistence, thermal precomputation |
 | `src/controllers/` | No-irrigation, fixed-schedule, reactive-schedule baselines |
 | `src/mpc/` | MPC: cost, dynamics, smoothing, solver, controller |
 | `src/rl/` | RL: env, networks (SAC + TD3), trainers, eval runner, callbacks |
-| `scripts/` | Experiment runners, analysis, and visualisation |
+| `src/analysis/` | Trajectory metrics shared by the analysis scripts |
+| `scripts/` | Entry points: `preprocess/`, `experiments/`, `analysis/`, `visualization/`, plus `validate_physics_fao.py` and `run_plots.py` |
 | `notebooks/` | Colab/Kaggle training notebooks for the SAC and TD3 controllers |
 | `tests/` | Pytest suite (`pytest tests/`) |
-| `gilan_farm.tif` | Digital elevation model, 10 x 13, elevation 74-181 m |
+| `figures/`, `results/` | Exported thesis figures; generated outputs (models, evaluations) |
 | `notes/`, `reports/` | Agronomic notes, baseline paper, thesis drafts and sub-deliverables |
 | `history/` | Superseded code retained for provenance |
-| `results/` | Generated outputs (models, evaluations, figures) |
 
 ## The two RL controllers
 

@@ -15,15 +15,15 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from climate_data import load_cleaned_data, extract_scenario_by_name, SCENARIO_YEARS
-from soil_data import get_crop
+from src.model.climate_data import load_cleaned_data, extract_scenario_by_name, SCENARIO_YEARS
+from src.model.soil_data import get_crop
 from src.controllers.no_irrigation import NoIrrigationController
-from src.runner import run_season
-from src.terrain import load_terrain
+from src.sim.runner import run_season
+from src.model.terrain import load_terrain
 
 
 SCENARIOS_ALL = list(SCENARIO_YEARS.keys())  # ['dry', 'moderate', 'wet']
-DEM_PATH = PROJECT_ROOT / 'gilan_farm.tif'
+DEM_PATH = PROJECT_ROOT / 'data/gilan_farm.tif'
 OUTPUT_DIR = PROJECT_ROOT / 'results' / 'runs'
 
 

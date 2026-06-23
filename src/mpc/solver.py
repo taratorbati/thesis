@@ -77,7 +77,7 @@ def build_nlp(terrain, crop, Hp, sink_agents, weights=None, refs=None,
     # Budget remaining
     W_remaining = ca.SX.sym('W_remaining')
 
-    # Precomputed climate arrays over the horizon (from src.precompute)
+    # Precomputed climate arrays over the horizon (from src.sim.precompute)
     rain_h  = ca.SX.sym('rain_h', Hp)
     ETc_h   = ca.SX.sym('ETc_h', Hp)
     rad_h   = ca.SX.sym('rad_h', Hp)

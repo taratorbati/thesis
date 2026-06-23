@@ -38,7 +38,7 @@ def load_dem(filepath):
     Parameters
     ----------
     filepath : str or Path
-        Path to the GeoTIFF (e.g. 'gilan_farm.tif').
+        Path to the GeoTIFF (e.g. 'data/gilan_farm.tif').
 
     Returns
     -------

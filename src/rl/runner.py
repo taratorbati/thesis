@@ -146,15 +146,15 @@ class RLController(Controller):
 
         self._u_prev = np.zeros(self._N)
 
-        from src.precompute import get_precomputed
-        from climate_data import load_cleaned_data, extract_scenario_by_name
+        from src.sim.precompute import get_precomputed
+        from src.model.climate_data import load_cleaned_data, extract_scenario_by_name
         scenario = scenario_name or 'dry'
         self._precomputed = get_precomputed(scenario, crop['name'].lower())
         df = load_cleaned_data()
         self._climate = extract_scenario_by_name(df, scenario, crop)
 
         if self.forecast_mode == 'noisy':
-            from src.forecast import NoisyForecast
+            from src.model.forecast import NoisyForecast
             self._noisy_forecast = NoisyForecast(
                 sigma_base=self.noise_sigma, rho=self.noise_rho, seed=self.noise_seed)
         else:

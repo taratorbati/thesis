@@ -51,15 +51,15 @@ for _stream_name in ("stdout", "stderr"):
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from climate_data import SCENARIO_YEARS                       # noqa: E402
-from soil_data import get_crop                                # noqa: E402
-from src.terrain import load_terrain                          # noqa: E402
+from src.model.climate_data import SCENARIO_YEARS                       # noqa: E402
+from src.model.soil_data import get_crop                                # noqa: E402
+from src.model.terrain import load_terrain                          # noqa: E402
 
 SCENARIOS_ALL = list(SCENARIO_YEARS.keys())                   # ['dry','moderate','wet']
 BUDGET_LEVELS = {100: 1.00, 85: 0.85, 70: 0.70}
 CROP_FULL_BUDGET_MM = {'rice': 484.0}
 
-DEM_PATH        = PROJECT_ROOT / 'gilan_farm.tif'
+DEM_PATH        = PROJECT_ROOT / 'data/gilan_farm.tif'
 RL_OUTPUT_DIR   = PROJECT_ROOT / 'results' / 'rl'
 RUNS_OUTPUT_DIR = PROJECT_ROOT / 'results' / 'runs'
 
@@ -146,8 +146,8 @@ def parse_ckpt_overrides(items) -> dict:
 
 def run_sweep(args):
     from src.rl.ema_smoothing import EMASmoothedRLController
-    from src.runner import run_season
-    from climate_data import load_cleaned_data, extract_scenario_by_name
+    from src.sim.runner import run_season
+    from src.model.climate_data import load_cleaned_data, extract_scenario_by_name
 
     crop         = get_crop('rice')
     terrain      = load_terrain(str(DEM_PATH))

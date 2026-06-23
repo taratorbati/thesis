@@ -28,7 +28,7 @@
 # Cache key: 'precomputed_{scenario}_{crop}.npz' under results/precomputed/.
 #
 # Usage:
-#     from src.precompute import get_precomputed
+#     from src.sim.precompute import get_precomputed
 #     pre = get_precomputed('dry', 'rice')   # loads from cache, or computes & saves
 #     pre.h1                                 # np.ndarray, shape (n_days,)
 #     pre.x2                                 # np.ndarray, shape (n_days,)
@@ -37,7 +37,7 @@
 # quantities on-the-fly for the sampled training year, avoiding the previous
 # Markov leak where all training years used the dry-year cached precomputed):
 #
-#     from src.precompute import compute_precomputed_from_climate
+#     from src.sim.precompute import compute_precomputed_from_climate
 #     pre = compute_precomputed_from_climate(climate_dict, 'rice')
 # =============================================================================
 
@@ -47,8 +47,8 @@ from pathlib import Path
 
 import numpy as np
 
-from soil_data import get_crop
-from climate_data import load_cleaned_data, extract_scenario_by_name
+from src.model.soil_data import get_crop
+from src.model.climate_data import load_cleaned_data, extract_scenario_by_name
 
 
 # Default cache directory — relative to project root by convention.

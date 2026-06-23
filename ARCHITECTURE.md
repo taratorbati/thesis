@@ -17,16 +17,16 @@ held-out cells through one shared closed-loop runner.
 
 ## 2. System layers
 
-1. **Environment** — the ABM (`abm.py`), terrain graph (`src/terrain.py`),
-   climate (`climate_data.py`), and precomputed biology/forecasts
-   (`src/precompute.py`, `src/forecast.py`).
+1. **Environment** (`src/model/`) — the ABM (`src/model/abm.py`), terrain graph
+   (`src/model/terrain.py`), climate (`src/model/climate_data.py`), and
+   precomputed biology/forecasts (`src/sim/precompute.py`, `src/model/forecast.py`).
 2. **Controllers** — all implement `src/controllers/base.Controller`:
    no-irrigation, fixed-schedule, reactive-schedule, MPC (`src/mpc/`), and RL
    (`src/rl/`).
-3. **Runner** — `src/runner.run_season` drives every controller through an
+3. **Runner** — `src/sim/runner.run_season` drives every controller through an
    identical loop (cascade routing, initial x1 = FC, field-averaged budget).
 
-## 3. Year split (`climate_data.py`)
+## 3. Year split (`src/model/climate_data.py`)
 
 | Set | Years | Use |
 |---|---|---|
@@ -99,8 +99,8 @@ time. Significance via Mann-Whitney U across seeds.
 
 | File | Role |
 |---|---|
-| `abm.py` | Ground-truth crop-soil ABM |
-| `climate_data.py` | Train/dev/test year split and scenario loader |
+| `src/model/abm.py` | Ground-truth crop-soil ABM |
+| `src/model/climate_data.py` | Train/dev/test year split and scenario loader |
 | `src/rl/gym_env.py` | Gymnasium env, observation/reward (dedup flag) |
 | `src/rl/networks.py` | `SharedActor`, `VdnCritic`, `SacVdnPolicy` |
 | `src/rl/networks_td3.py` | `DeterministicSharedActor`, `Td3VdnPolicy` |
@@ -109,5 +109,5 @@ time. Significance via Mann-Whitney U across seeds.
 | `src/rl/common.py` | Shared SB3 helpers (LR schedule, callbacks, LR-asymmetric algorithms) |
 | `src/rl/nstep_buffer.py` | Exact n-step replay buffer (TD3) |
 | `src/mpc/controller.py`, `src/mpc/dynamics_sym.py` | MPC controller and CasADi dynamics |
-| `src/forecast.py` | Perfect and AR(1)-noisy forecasts |
+| `src/model/forecast.py` | Perfect and AR(1)-noisy forecasts |
 | `src/controllers/base.py` | Abstract Controller interface |

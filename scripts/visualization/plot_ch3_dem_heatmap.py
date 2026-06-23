@@ -37,10 +37,10 @@ from matplotlib.colors import Normalize
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.terrain import load_dem, normalize_elevation
+from src.model.terrain import load_dem, normalize_elevation
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-DEM_PATH     = PROJECT_ROOT / 'gilan_farm.tif'
+DEM_PATH     = PROJECT_ROOT / 'data/gilan_farm.tif'
 FIGURES_DIR  = PROJECT_ROOT / 'figures'
 OUT_PDF      = FIGURES_DIR  / 'ch3_dem_heatmap.pdf'
 OUT_PNG      = FIGURES_DIR  / 'ch3_dem_heatmap.png'

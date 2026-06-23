@@ -10,8 +10,9 @@ from pathlib import Path
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-RAW_CSV = 'POWER_Point_Daily_20000101_20260417_038d30N_048d85E_LST.csv'
-OUTPUT_DIR = Path('results/preprocessing')
+PROJECT_ROOT = Path(__file__).resolve().parents[2]   # scripts/preprocess/ -> repo root
+RAW_CSV = PROJECT_ROOT / 'data' / 'POWER_Point_Daily_20000101_20260417_038d30N_048d85E_LST.csv'
+OUTPUT_DIR = PROJECT_ROOT / 'results' / 'preprocessing'
 OUTPUT_CSV = OUTPUT_DIR / 'climate_apr_oct_cleaned.csv'
 REPORT_TXT = OUTPUT_DIR / 'cleaning_report.txt'
 

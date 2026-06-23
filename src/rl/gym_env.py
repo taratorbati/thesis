@@ -35,11 +35,11 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 
-from abm import CropSoilABM
-from climate_data import TRAINING_YEARS, load_cleaned_data, extract_scenario
-from src.precompute import get_precomputed, compute_precomputed_from_climate
-from src.terrain import load_terrain
-from soil_data import get_crop
+from src.model.abm import CropSoilABM
+from src.model.climate_data import TRAINING_YEARS, load_cleaned_data, extract_scenario
+from src.sim.precompute import get_precomputed, compute_precomputed_from_climate
+from src.model.terrain import load_terrain
+from src.model.soil_data import get_crop
 
 # ── public scalar constants (consumed by runner.py) ──────────────────────────
 UB_MM = 12.0                 # actuator upper bound (mm/day)
@@ -70,7 +70,7 @@ FORECAST_DIMS = 6 * FORECAST_H   # 48
 
 # ── module-level asset cache (loaded once per process) ───────────────────────
 def _load_assets():
-    return get_crop('rice'), load_terrain('gilan_farm.tif'), load_cleaned_data()
+    return get_crop('rice'), load_terrain('data/gilan_farm.tif'), load_cleaned_data()
 
 
 _CROP, _TERRAIN, _CLIMATE_DF = _load_assets()

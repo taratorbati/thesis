@@ -3,9 +3,9 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from PIL import Image
 
-from soil_data import RICE as crop_params
-from climate_data import extract_scenario, load_cleaned_data
-from abm import CropSoilABM
+from src.model.soil_data import RICE as crop_params
+from src.model.climate_data import extract_scenario, load_cleaned_data
+from src.model.abm import CropSoilABM
 
 OUTPUT_DIR = Path('results/validation')
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
