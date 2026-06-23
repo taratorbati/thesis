@@ -70,6 +70,10 @@ SCENARIO_YEAR = {'dry': 2022, 'moderate': 2018, 'wet': 2024}
 FULL_SEASON_NEED_MM = 484.0
 UB_MM = 12.0
 
+# Observation layout of the loaded checkpoint (set in main() from load_policy);
+# the analysis env must match it so model.predict receives the right obs width.
+_DEDUPE = True
+
 
 def _make_env(scenario: str, budget_pct: int):
     """Create a fixed-mode IrrigationEnv forced to the given scenario/budget."""
@@ -78,7 +82,7 @@ def _make_env(scenario: str, budget_pct: int):
     from soil_data import get_crop
     from src.precompute import get_precomputed
 
-    env = IrrigationEnv(randomize=False, curriculum_warmup_steps=0)
+    env = IrrigationEnv(randomize=False, dedupe_today_weather=_DEDUPE)
     # The env defaults to dry/100 on reset; patch it post-construction.
     # We store the overrides and apply them after each reset.
     env._target_year    = SCENARIO_YEAR[scenario]
@@ -249,10 +253,10 @@ def main():
     print(f"Model: {model_path}")
 
     # ── load model ───────────────────────────────────────────────────────────
-    from src.rl.runner import _load_sac_model
-    model, arch_label, obs_layout = _load_sac_model(model_path, device='cpu')
+    from src.rl.runner import load_policy
+    model, arch_label, dedupe = load_policy(model_path, device='cpu')
+    globals()['_DEDUPE'] = dedupe   # env obs layout must match the checkpoint
     print(f"Architecture: {arch_label}")
-    print(f"Obs layout:   {obs_layout}")
 
     # ── load terrain (for elevation correlation) ─────────────────────────────
     from src.terrain import load_terrain
