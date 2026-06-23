@@ -20,6 +20,20 @@ from stable_baselines3 import SAC, TD3
 from stable_baselines3.common.callbacks import BaseCallback
 
 
+# ── optional TensorBoard ──────────────────────────────────────────────────────
+def tensorboard_dir(path) -> Optional[str]:
+    """Return str(path) if TensorBoard is installed, else None.
+
+    SB3 raises if ``tensorboard_log`` is set but the package is missing, so this
+    lets training run anywhere; TensorBoard is an optional dependency.
+    """
+    try:
+        import tensorboard  # noqa: F401
+        return str(path)
+    except Exception:
+        return None
+
+
 # ── learning-rate schedule ────────────────────────────────────────────────────
 def make_lr_schedule(lr_start: float, lr_end: float) -> Callable[[float], float]:
     """Linear decay from ``lr_start`` (progress=1.0) to ``lr_end`` (progress=0.0)."""

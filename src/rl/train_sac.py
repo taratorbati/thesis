@@ -36,7 +36,7 @@ from climate_data import DEV_YEARS, TRAINING_YEARS
 from src.rl.gym_env import IrrigationEnv
 from src.rl.networks import SacVdnPolicy, make_sac_policy_kwargs
 from src.rl.common import (
-    make_lr_schedule, init_wandb, RotatingReplayBufferCheckpoint,
+    make_lr_schedule, init_wandb, tensorboard_dir, RotatingReplayBufferCheckpoint,
     GradClipCallback, AsymmetricLRSAC,
 )
 from src.rl.callbacks_train import (
@@ -173,7 +173,7 @@ def train_sac(
         policy_kwargs=policy_kwargs,
         verbose=1,
         seed=seed,
-        tensorboard_log=str(save_dir / "tensorboard"),
+        tensorboard_log=tensorboard_dir(save_dir / "tensorboard"),
     )
 
     callbacks = [
