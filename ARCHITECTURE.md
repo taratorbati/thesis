@@ -1,83 +1,113 @@
-# Thesis Implementation Report v2.1
+# Thesis Implementation Architecture
 ## MPC and RL Controllers for Constrained Irrigation in Topographically Heterogeneous Terrain
 
-**Author:** Tara Torbati, ITMO University, R4237c  
-**Supervisor:** Peregudin A.A.  
-**Document version:** 2.1 — May 2026  
-**Status:** MPC complete; RL implemented and training on Kaggle GPU
+**Author:** Tara Torbati, ITMO University, R4237c
+**Supervisor:** Peregudin A. A.
 
 ---
 
-## 1. Executive Summary
+## 1. Summary
 
-This thesis investigates whether a Soft Actor-Critic (SAC) RL agent can match MPC performance on constrained irrigation for a topographically heterogeneous rice field in Gilan Province, Iran. The plant model is a 130-agent crop-soil ABM with cascade water routing and surface ponding dynamics, validated against NASA satellite data (r=0.74).
+This thesis asks whether reinforcement-learning agents (SAC and TD3) can match a
+Model Predictive Controller on constrained irrigation of a topographically
+heterogeneous rice field. The plant is a 130-cell crop-soil ABM with cascade
+water routing and surface-ponding dynamics, cross-validated against NASA GWETROOT
+(Pearson r = 0.74 on the dry year). All controllers are evaluated on the same
+held-out cells through one shared closed-loop runner.
 
-The MPC uses CasADi+IPOPT in a multiple-shooting formulation with smooth approximations. First result: 4261 kg/ha on dry/100% (18% above the fixed-schedule baseline of 3607 kg/ha).
+## 2. System layers
 
-## 2. Scope
+1. **Environment** — the ABM (`abm.py`), terrain graph (`src/terrain.py`),
+   climate (`climate_data.py`), and precomputed biology/forecasts
+   (`src/precompute.py`, `src/forecast.py`).
+2. **Controllers** — all implement `src/controllers/base.Controller`:
+   no-irrigation, fixed-schedule, reactive-schedule, MPC (`src/mpc/`), and RL
+   (`src/rl/`).
+3. **Runner** — `src/runner.run_season` drives every controller through an
+   identical loop (cascade routing, initial x1 = FC, field-averaged budget).
 
-**In scope:** Rice (Hashemi, 93-day season). Evaluation: 3 held-out years × 3 budgets = 9 cells. Training: 23 years × continuous U(70%,100%) budget.
+## 3. Year split (`climate_data.py`)
 
-**Out of scope:** Tobacco (Phase 2), field validation, stochastic MPC, edge profiling, model-based RL.
+| Set | Years | Use |
+|---|---|---|
+| Train | 20 years (2000-2025 minus dev/test) | sampled uniformly per training episode |
+| Dev | 2002, 2016, 2023 | deterministic best-model selection during training |
+| Test | 2022 (dry), 2018 (moderate), 2024 (wet) | final evaluation only |
 
-## 3. System Architecture
+Evaluation grid: 3 test years x 3 budgets {70%, 85%, 100%} = 9 cells.
 
-Three layers: Environment (ABM, terrain, climate) → Controllers (all implement base.Controller) → Runner (run_season, identical loop for all controllers).
+## 4. MPC formulation (`src/mpc/`)
 
-Cascade routing mode. Initial x1=140mm (FC), x5=0. Budget tracked field-averaged.
+- **Variables:** u in R^(N x Hp), N = 130, Hp in {8, 14}.
+- **Shooting states:** x1 (root-zone water), x5 (surface ponding); x2 precomputed;
+  x3, x4 tracked from the true state.
+- **Cost (5 terms, all O(1) normalised):** terminal biomass (Mayer), water,
+  drought, sink ponding, and delta-u, with weights alpha1=1.0, alpha2=0.016,
+  alpha3=0.1, alpha4=0.5, alpha5=0.005.
+- **Constraints:** box [0, 12 mm], seasonal budget (linear), dynamics (equality).
+- **Solver:** CasADi + IPOPT (MUMPS), smooth approximations, tol 1e-4.
 
-## 4. MPC Formulation
+## 5. RL formulation (`src/rl/`)
 
-- **Variables:** u in R^(N×Hp), N=130, Hp in {8,14}
-- **Shooting states:** x1, x5 only. x2 precomputed. x3, x4 tracked from true state.
-- **Cost:** 5 terms — terminal biomass (Mayer), water (path), drought (path), sink ponding (path), delta-u (path). All O(1) normalized.
-- **Weights:** alpha1=1.0, alpha2=0.01 (nominal), alpha3=0.1, alpha4=0.5, alpha5=0.005.
-- **Constraints:** Box [0,12mm], budget (linear, inside IPOPT), dynamics (equality).
-- **Solver:** CasADi+IPOPT, MUMPS, smooth approx, max_iter=500, tol=1e-4.
+### Observation (agent-major, flat)
+- **Per-cell block, 8 x 130 = 1040:** x1_norm, x5_norm, x4_norm, x3 (dynamic);
+  elev_norm, Nr_norm, Nr_internal_norm, n_upstream_norm (static topography).
+- **Global block:** 4 scalars (day_frac, budget_frac, budget_total_norm,
+  burn_rate) + 48 forecast values (rain, ETc, radiation, h2, h7, g_base over an
+  8-day horizon).
+- **Today's weather is fed once**, via forecast day 0. `dedupe_today_weather`
+  (default True) drops the redundant today-scalars -> 52-dim global / 1092-dim
+  obs. The legacy layout (today repeated; 57-dim global / 1097-dim) is still
+  loadable: the networks infer dims from the obs width and the runner
+  auto-detects the layout.
 
-## 5. RL Formulation
+### Action
+`Box(0, 1)^130`, scaled to [0, 12] mm/day and clipped to the remaining budget.
 
-- **Env:** Gymnasium wrapper. Obs=707 dims. Action=Box(0,1,shape=(130,)).
-- **Obs layout (707 dims at H=8):**
-  - [0:650]   Per-agent (5×130): x1_norm, x5_norm, x4_norm, x3, elevation
-  - [650:659] Global scalars (9): day_frac, budget_frac, burn_rate,
-              rain_today, ETc_today, h2_today, h7_today, g_base_today,
-              budget_total_norm
-  - [659:707] Per-day forecasts (6×8=48): rain, ETc, rad, h2, h7, g_base
-- **Reward:** Dense, approximate negation of MPC path cost under gamma→1.
-- **Algorithm:** SAC (SB3 2.6.0). Shared-parameter actor (CTDE). Centralized critic.
-- **Training design:** One policy across 23 years × U(70%,100%) budget,
-  randomized per episode. Eval cells never seen during training.
-- **Eval cells:** 2018/2022/2024 × {70%,85%,100%} = 9 cells (held out entirely).
-- **Hyperparameters (all from measurement):**
-  - target_entropy=-65 (pilot: -130 clearly worse; -65 vs -32 within noise)
-  - buffer_size=200k, gradient_steps=1, batch_size=256
-  - Kaggle T4 measured: 68 steps/sec; 500k steps ~2 hrs/seed; 5 seeds ~10 GPU-hrs
+### Networks (`networks.py`, `networks_td3.py`)
+- **Actor:** one parameter-shared MLP over all cells (each cell sees its local
+  features + the broadcast global block, re-centred to ~[-1, 1], LeakyReLU).
+  SAC uses (mu, log_std) squashed-Gaussian heads; TD3 uses a deterministic
+  mu + tanh head.
+- **Critic (shared by both):** twin VDN — Q_total = sum_n Q_local(s_n, g, a_n),
+  with LayerNorm after each hidden layer to suppress value divergence.
 
-## 6. Evaluation Framework
+### Reward
+r1 biomass increment, r2 water cost, r3 drought-stress, r6 field-capacity
+overshoot (linear, aligned with the ABM's waterlog term). TD3 adds r5
+(control-rate smoothing, mirroring MPC term 5) and an additive terminal-yield
+bonus.
 
-Controllers × 9 eval cells. Metrics: yield (kg/ha), WUE (kg/m3), budget compliance, drought days, solve/inference time. Mann-Whitney U across 5 seeds.
+### The two chosen controllers
+- **SAC** (`train_sac.py`): ent_coef = 0.002, asymmetric actor LR (x5),
+  two-phase exploration noise (anneal then late re-injection), 250k steps.
+- **TD3** (`train_td3.py`): exact n-step returns (n = 5) via the model-gamma
+  trick, policy_delay = 2, target-policy smoothing, learning_starts = 50k,
+  r5 = 0.005, terminal-yield = 1.0, 250k steps.
 
-## 7. Scenario Split
+Both select the best model on the dev set via `FixedScheduleEvalCallback`, so the
+SAC-vs-TD3 comparison is apples-to-apples.
 
-| Year | Rainfall | Role |
-|------|----------|------|
-| 2022 | 39.7 mm  | Eval: dry (in-distribution) |
-| 2018 | 108.8 mm | Eval: moderate (upper training edge) |
-| 2024 | 176.8 mm | Eval: wet (OOD extreme) |
-| 23 others | 14–88 mm | Training only |
+## 6. Evaluation
 
-## 8. Key Files
+Each controller is run over the 9 cells with perfect and AR(1)-noisy forecasts.
+Metrics: yield (kg/ha), water-use efficiency, budget compliance, drought days,
+wet-year waterlog days, control smoothness (mean |delta u|), and solve/inference
+time. Significance via Mann-Whitney U across seeds.
+
+## 7. Key files
 
 | File | Role |
-|------|------|
-| abm.py | Ground-truth crop-soil ABM |
-| climate_data.py | TRAINING_YEARS, EVAL_YEARS constants |
-| src/rl/gym_env.py | Gymnasium env, obs_dim=707 |
-| src/rl/networks.py | CTDESACPolicy, SharedActor (62-dim per-agent input) |
-| src/rl/train.py | SAC training loop |
-| src/rl/runner.py | Inference (707-dim obs, matches gym_env exactly) |
-| src/mpc/dynamics_sym.py | CasADi dynamics (v2.2: drought stress fix) |
-| src/forecast.py | PerfectForecast, NoisyForecast (AR(1) rho=0.6) |
-| src/mpc/controller.py | MPCController |
-| src/controllers/base.py | Abstract Controller interface |
+|---|---|
+| `abm.py` | Ground-truth crop-soil ABM |
+| `climate_data.py` | Train/dev/test year split and scenario loader |
+| `src/rl/gym_env.py` | Gymnasium env, observation/reward (dedup flag) |
+| `src/rl/networks.py` | `SharedActor`, `VdnCritic`, `SacVdnPolicy` |
+| `src/rl/networks_td3.py` | `DeterministicSharedActor`, `Td3VdnPolicy` |
+| `src/rl/train_sac.py`, `src/rl/train_td3.py` | The two chosen trainers |
+| `src/rl/runner.py` | Inference runner (auto-detects SAC/TD3 + obs layout) |
+| `src/rl/common.py` | Shared SB3 helpers (LR schedule, callbacks, LR-asymmetric algorithms) |
+| `src/rl/nstep_buffer.py` | Exact n-step replay buffer (TD3) |
+| `src/mpc/controller.py`, `src/mpc/dynamics_sym.py` | MPC controller and CasADi dynamics |
+| `src/forecast.py` | Perfect and AR(1)-noisy forecasts |
+| `src/controllers/base.py` | Abstract Controller interface |
