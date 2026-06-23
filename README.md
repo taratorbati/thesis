@@ -4,51 +4,75 @@
 **Student:** Tara Torbati
 **Supervisor:** Peregudin A. A.
 
-This repository contains the code, data, and writeup for an MSc thesis investigating whether a Soft Actor-Critic reinforcement learning agent can match the performance of a Model Predictive Controller on constrained irrigation control for a topographically heterogeneous rice field in Gilan Province, Iran.
+Code, data, and writeup for an MSc thesis investigating whether reinforcement
+learning agents (SAC and TD3) can match a Model Predictive Controller on
+constrained irrigation of a topographically heterogeneous rice field in Gilan
+Province, Iran. The plant is a 130-cell crop-soil agent-based model (ABM) with
+cascade water routing and surface-ponding dynamics, cross-validated against NASA
+satellite soil moisture (Pearson r = 0.74 on the dry year).
+
+See **[`ARCHITECTURE.md`](ARCHITECTURE.md)** for the full system design.
 
 ## Quick start
 
-The complete design and implementation plan is in **[`ARCHITECTURE.md`](ARCHITECTURE.md)**. Read that first.
+```bash
+pip install -r requirements.txt          # core stack; RL extras: torch, stable-baselines3, gymnasium
+python preprocess.py                      # NASA POWER -> cleaned CSV with Penman-Monteith ET0
+python validate_physics_fao.py            # FAO-56 physics unit test on a flat topology
+```
 
-For a working end-to-end run with no irrigation, on the dry 2022 climate scenario:
+Run a controller over the 9 evaluation cells (3 held-out years x 3 budgets):
 
 ```bash
-pip install -r requirements.txt
-python preprocess.py                                    # one-time: clean climate data
-python cross_validate_gwetroot.py                       # validate ABM against satellite
-python run_comparison.py                                # demonstrate cascade routing
+python -m scripts.experiments.exp_mpc              # MPC (CasADi + IPOPT)
+python -m scripts.experiments.exp_fixed_schedule   # fixed-schedule baseline
+python -m scripts.experiments.exp_rl --model results/rl/<run>/best_model/best_model.zip
+```
+
+Train the RL controllers (GPU recommended; see `notebooks/` for Colab/Kaggle):
+
+```bash
+python -m src.rl.train_sac --seed 0       # SAC  (the v2.18-p3b configuration)
+python -m src.rl.train_td3 --seed 0       # TD3  (the v2.21c configuration)
 ```
 
 ## Repository layout
 
 | Path | Contents |
 |---|---|
-| `abm.py`, `soil_data.py`, `climate_data.py` | Core domain code: agent-based crop-soil model, crop parameters, climate loader |
-| `preprocess.py` | NASA POWER → cleaned CSV with Penman-Monteith ET₀ |
-| `plot_*.py`, `run_plots.py` | 25-year climate visualizations |
-| `validate_physics_fao.py` | FAO-56 unit test on flat 10-agent topology |
-| `cross_validate_gwetroot.py` | ABM cross-validation against NASA GWETROOT (cascade mode) |
-| `run_comparison.py`, `run_comparison_2.py` | Runoff-mode (none / simple / cascade) comparison studies |
-| `src/` | Shared infrastructure: terrain graph, parquet I/O, runner (in progress) |
-| `controllers/` | Controller implementations (no-irrigation, fixed-schedule, MPC, RL) — in progress |
-| `gilan_farm.tif` | Digital elevation model, 10 × 13, elevation 74–181 m |
-| `POWER_..._LST.csv` | NASA POWER 2000–2026 raw climate data |
-| `notes/` | Baseline paper, agronomic notes, thesis draft |
-| `reports/` | Finished sub-deliverables (e.g. field dynamics report) |
+| `abm.py`, `soil_data.py`, `climate_data.py` | Crop-soil ABM, crop parameters, climate loader and the train/dev/test year split |
+| `preprocess.py` | NASA POWER -> cleaned CSV with Penman-Monteith ET0 |
+| `validate_physics_fao.py`, `run_plots.py` | FAO-56 physics check; climate visualisations |
+| `src/terrain.py`, `src/persistence.py`, `src/precompute.py`, `src/forecast.py` | Terrain graph, parquet I/O, precomputed biology, perfect/noisy forecasts |
+| `src/runner.py` | `run_season` — the single closed-loop loop shared by every controller |
+| `src/controllers/` | No-irrigation, fixed-schedule, reactive-schedule baselines |
+| `src/mpc/` | MPC: cost, dynamics, smoothing, solver, controller |
+| `src/rl/` | RL: env, networks (SAC + TD3), trainers, eval runner, callbacks |
+| `scripts/` | Experiment runners, analysis, and visualisation |
+| `notebooks/` | Colab/Kaggle training notebooks for the SAC and TD3 controllers |
+| `tests/` | Pytest suite (`pytest tests/`) |
+| `gilan_farm.tif` | Digital elevation model, 10 x 13, elevation 74-181 m |
+| `notes/`, `reports/` | Agronomic notes, baseline paper, thesis drafts and sub-deliverables |
 | `history/` | Superseded code retained for provenance |
-| `results/` | Generated outputs (gitignored) |
+| `results/` | Generated outputs (models, evaluations, figures) |
 
-## Status
+## The two RL controllers
 
-- ✅ ABM with cascade water routing, surface ponding state, drought-stress biomass coupling
-- ✅ NASA GWETROOT cross-validation (Pearson r = 0.74 dry year)
-- ✅ FAO-56 physics unit test
-- ✅ 25-year Penman-Monteith ET₀ climatology
-- ✅ Step A foundation: `src/terrain.py`, `src/persistence.py`
-- ⏳ Step B: controller interface, runner, no-irrigation + fixed-schedule baselines
-- ⏳ Step C: precomputation cache (thermal time, forecasts)
-- ⏳ Step D: MPC (CasADi + IPOPT)
-- ⏳ Step E: RL (Stable-Baselines3 SAC, Kaggle GPU training)
-- ⏳ Step F: aggregation, statistical tests, thesis figures
+The project explored many SAC and TD3 variants; the repository keeps the two
+chosen configurations:
 
-See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the full plan.
+- **SAC** (`src/rl/train_sac.py`) — parameter-shared LeakyReLU actor + twin VDN
+  LayerNorm critic, asymmetric actor LR, weak entropy pin, and a two-phase
+  exploration-noise schedule. The standing baseline (~99% of MPC yield).
+- **TD3** (`src/rl/train_td3.py`) — deterministic actor reusing the same VDN
+  critic, exact n-step returns, a control-rate smoothing reward, and an additive
+  terminal-yield bonus (~99.7% of MPC yield; beats MPC on wet-year waterlogging).
+
+Both share the observation, action space, and evaluation protocol in
+`src/rl/gym_env.py` and `src/rl/runner.py`.
+
+## Testing
+
+```bash
+pytest tests/        # env, observation layout, network architecture, runner equivalence
+```
