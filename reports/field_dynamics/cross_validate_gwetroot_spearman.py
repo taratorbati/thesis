@@ -10,16 +10,16 @@ from pathlib import Path
 from PIL import Image
 from scipy import stats
 
-from soil_data import RICE as crop_params
-from climate_data import extract_scenario, load_cleaned_data
-from abm import CropSoilABM
+from src.model.soil_data import RICE as crop_params
+from src.model.climate_data import extract_scenario, load_cleaned_data
+from src.model.abm import CropSoilABM
 
 OUTPUT_DIR = Path('results/crossval')
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── Load DEM and build topology ──────────────────────────────────────────────
 
-elevation_matrix = np.array(Image.open('gilan_farm.tif'))
+elevation_matrix = np.array(Image.open('data/gilan_farm.tif'))
 rows, cols = elevation_matrix.shape
 
 
