@@ -78,9 +78,9 @@ _DEDUPE = True
 def _make_env(scenario: str, budget_pct: int):
     """Create a fixed-mode IrrigationEnv forced to the given scenario/budget."""
     from src.rl.gym_env import IrrigationEnv, FULL_SEASON_NEED_MM as FSN
-    from climate_data import load_cleaned_data, extract_scenario
-    from soil_data import get_crop
-    from src.precompute import get_precomputed
+    from src.model.climate_data import load_cleaned_data, extract_scenario
+    from src.model.soil_data import get_crop
+    from src.sim.precompute import get_precomputed
 
     env = IrrigationEnv(randomize=False, dedupe_today_weather=_DEDUPE)
     # The env defaults to dry/100 on reset; patch it post-construction.
@@ -259,8 +259,8 @@ def main():
     print(f"Architecture: {arch_label}")
 
     # ── load terrain (for elevation correlation) ─────────────────────────────
-    from src.terrain import load_terrain
-    terrain = load_terrain('gilan_farm.tif')
+    from src.model.terrain import load_terrain
+    terrain = load_terrain('data/gilan_farm.tif')
 
     # ── build cell list ───────────────────────────────────────────────────────
     scenarios = SCENARIOS if args.scenario == 'all' else [args.scenario]

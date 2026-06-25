@@ -26,8 +26,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from climate_data import SCENARIO_YEARS
-from src.precompute import compute_precomputed, save_precomputed, cache_path
+from src.model.climate_data import SCENARIO_YEARS
+from src.sim.precompute import compute_precomputed, save_precomputed, cache_path
 
 
 SCENARIOS_ALL = list(SCENARIO_YEARS.keys())

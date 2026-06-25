@@ -128,7 +128,7 @@ def extract_scenario_by_name(df, scenario_name, crop, **kwargs):
 
 
 if __name__ == '__main__':
-    from soil_data import get_crop
+    from src.model.soil_data import get_crop
     crop = get_crop('rice')
     df = load_cleaned_data()
     print(f"Training years ({len(TRAINING_YEARS)}): {TRAINING_YEARS}")

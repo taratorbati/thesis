@@ -50,8 +50,14 @@ results/preprocessing/*
 !results/preprocessing/climate_apr_oct_cleaned.csv
 !results/preprocessing/cleaning_report.txt
 
+# History / archive — ignore NEW contents going forward.
+# (The provenance files already tracked under history/ are intentionally kept;
+#  .gitignore does not untrack them.)
+history/
+
 # Logs
 *.log
+logs.txt
 
 # Environment / credentials
 .env

@@ -34,7 +34,7 @@ import matplotlib.pyplot as plt
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.persistence import load_run, long_df_to_trajectory
+from src.sim.persistence import load_run, long_df_to_trajectory
 
 ANALYSIS_DIR = PROJECT_ROOT / 'results' / 'analysis'
 FIGURES_DIR = ANALYSIS_DIR / 'figures'

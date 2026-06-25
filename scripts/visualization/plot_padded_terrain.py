@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from matplotlib import cm
 import rasterio
 
-def plot_padded_3d_dem(dem_path='gilan_farm.tif'):
+def plot_padded_3d_dem(dem_path='data/gilan_farm.tif'):
     # 1. Load the original 10x13 farm elevation
     with rasterio.open(dem_path) as src:
         base_elev = src.read(1)[0:10, 0:13]  # Ensure it's exactly 10x13

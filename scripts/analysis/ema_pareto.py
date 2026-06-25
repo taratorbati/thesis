@@ -30,7 +30,7 @@ import pandas as pd
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.analysis_lib.trajectory_metrics import (        # noqa: E402
+from src.analysis.trajectory_metrics import (        # noqa: E402
     mean_abs_delta_u_from_parquet,
     read_final_metrics,
     build_mpc_reference,

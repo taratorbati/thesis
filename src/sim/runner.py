@@ -12,8 +12,8 @@ from pathlib import Path
 
 import numpy as np
 
-from abm import CropSoilABM
-from src.persistence import (
+from src.model.abm import CropSoilABM
+from src.sim.persistence import (
     save_run, save_partial, load_partial, discard_partial, should_skip
 )
 

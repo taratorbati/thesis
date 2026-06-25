@@ -5,6 +5,9 @@
 
 import subprocess
 import sys
+from pathlib import Path
+
+VIZ_DIR = Path(__file__).resolve().parent / 'visualization'
 
 plots = [
     'plot_temperature.py',
@@ -18,7 +21,7 @@ plots = [
 ]
 
 for script in plots:
-    result = subprocess.run([sys.executable, script], capture_output=True, text=True)
+    result = subprocess.run([sys.executable, str(VIZ_DIR / script)], capture_output=True, text=True)
     if result.returncode != 0:
         print(f"FAILED: {script}")
         print(result.stderr)

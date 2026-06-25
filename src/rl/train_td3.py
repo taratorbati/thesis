@@ -36,7 +36,7 @@ from stable_baselines3.common.callbacks import CallbackList, CheckpointCallback
 from stable_baselines3.common.noise import NormalActionNoise
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-from climate_data import DEV_YEARS, TRAINING_YEARS
+from src.model.climate_data import DEV_YEARS, TRAINING_YEARS
 from src.rl.gym_env import IrrigationEnv
 from src.rl.networks_td3 import Td3VdnPolicy, make_td3_policy_kwargs
 from src.rl.nstep_buffer import NStepReplayBuffer
