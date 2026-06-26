@@ -1,0 +1,93 @@
+{
+  "algorithm": "WarmupAsymmetricLRTD3 (SB3 TD3) + exact n-step VDN",
+  "policy_class": "Td3VdnPolicy (deterministic shared actor + VDN LayerNorm critic)",
+  "git_sha": "8be1be2",
+  "seed": 0,
+  "total_timesteps": 250000,
+  "n_steps": 5,
+  "gamma_base": 0.99,
+  "model_gamma": 0.9509900498999999,
+  "policy_delay": 2,
+  "target_policy_noise": 0.2,
+  "target_noise_clip": 0.5,
+  "learning_starts": 50000,
+  "reward_du_alpha": 0.005,
+  "reward_terminal_yield": 1.0,
+  "tau": 0.005,
+  "buffer_size": 250000,
+  "batch_size": 256,
+  "lr_start": 0.0003,
+  "lr_end": 5e-05,
+  "explore": {
+    "start": 0.4,
+    "end": 0.15,
+    "decay_steps": 150000
+  },
+  "dev_years": [
+    2002,
+    2016,
+    2023
+  ],
+  "training_years": [
+    2000,
+    2001,
+    2003,
+    2004,
+    2005,
+    2006,
+    2007,
+    2008,
+    2009,
+    2010,
+    2011,
+    2012,
+    2013,
+    2014,
+    2015,
+    2017,
+    2019,
+    2020,
+    2021,
+    2025
+  ],
+  "eval_schedule": [
+    [
+      2002,
+      0.7
+    ],
+    [
+      2002,
+      0.85
+    ],
+    [
+      2002,
+      1.0
+    ],
+    [
+      2016,
+      0.7
+    ],
+    [
+      2016,
+      0.85
+    ],
+    [
+      2016,
+      1.0
+    ],
+    [
+      2023,
+      0.7
+    ],
+    [
+      2023,
+      0.85
+    ],
+    [
+      2023,
+      1.0
+    ]
+  ],
+  "eval_method": "deterministic dev-set (FixedScheduleEvalCallback)",
+  "completed_utc": "2026-06-26T12:01:03.171286+00:00"
+}
