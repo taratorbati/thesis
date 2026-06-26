@@ -1,5 +1,12 @@
 # tests/test_networks.py
 # Architecture tests for the SAC and TD3 CTDE VDN networks.
+#
+# DEVICE-SAFE VERSION: every hand-built tensor is created on ``model.device``
+# so the forward-pass tests run identically on a CPU runtime (where SB3 keeps
+# the policy on CPU) and on a GPU runtime (where SB3 moves the policy to cuda).
+# The previous version built CPU tensors unconditionally, which matched the
+# weights on a CPU runtime but raised a device-mismatch RuntimeError on a GPU
+# runtime — the cause of the Colab "TESTS FAILED" assertion.
 
 import numpy as np
 import pytest
@@ -34,6 +41,11 @@ def _build_td3(env):
                buffer_size=500, learning_starts=10, batch_size=32, verbose=0, seed=0)
 
 
+def _obs_tensor(env, model):
+    """Build a single batched observation on the SAME device as the model."""
+    return torch.as_tensor(env.reset()[0], device=model.device).float().unsqueeze(0)
+
+
 # ── dimension inference ───────────────────────────────────────────────────────
 def test_per_agent_dims_inferred_from_obs(clean_env, legacy_env):
     """Critic first-layer width = 8 + G + 1, derived from the observation width."""
@@ -45,7 +57,7 @@ def test_per_agent_dims_inferred_from_obs(clean_env, legacy_env):
 # ── SAC actor / critic shapes ─────────────────────────────────────────────────
 def test_sac_actor_and_critic_shapes(clean_env):
     model = _build_sac(clean_env)
-    obs = torch.as_tensor(clean_env.reset()[0]).float().unsqueeze(0)
+    obs = _obs_tensor(clean_env, model)
     assert isinstance(model.policy.actor, SharedActor)
     action = model.policy.actor(obs)
     assert action.shape == (1, N_AGENTS_DEFAULT)
@@ -58,8 +70,8 @@ def test_vdn_critic_is_sum_over_cells(clean_env):
     """Q_total must equal the sum of the per-cell local Q-values (VDN property)."""
     model = _build_sac(clean_env)
     critic: VdnCritic = model.policy.critic
-    obs = torch.as_tensor(clean_env.reset()[0]).float().unsqueeze(0)
-    action = torch.zeros(1, N_AGENTS_DEFAULT)
+    obs = _obs_tensor(clean_env, model)
+    action = torch.zeros(1, N_AGENTS_DEFAULT, device=model.device)
     qnet = critic.q_networks[0]
     B, N, F = 1, N_AGENTS_DEFAULT, N_AGENT_FEATURES
     local_obs = obs[:, : F * N].reshape(B, N, F)
@@ -82,7 +94,7 @@ def test_td3_actor_is_deterministic_with_no_log_std(clean_env):
     assert isinstance(model.policy.actor, DeterministicSharedActor)
     assert not hasattr(model.policy.actor, "log_std") or "log_std" not in dict(
         model.policy.actor.named_parameters())
-    obs = torch.as_tensor(clean_env.reset()[0]).float().unsqueeze(0)
+    obs = _obs_tensor(clean_env, model)
     a1 = model.policy.actor(obs)
     a2 = model.policy.actor(obs)
     assert a1.shape == (1, N_AGENTS_DEFAULT)
