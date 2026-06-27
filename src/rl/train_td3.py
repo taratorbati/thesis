@@ -79,6 +79,7 @@ ACTOR_WARMUP_UPDATES = 0
 # Reward shaping (MPC-aligned).
 REWARD_DU_ALPHA       = 0.005   # control-rate smoothing r5 (MPC term 5)
 REWARD_TERMINAL_YIELD = 1.0     # additive terminal-yield bonus
+REWARD_ALPHA3         = 0.1     # drought-stress penalty r3 (sweep target; gym_env default)
 
 # Exploration noise (decay to a sustained floor).
 EXPLORE_SIGMA_START = 0.40
@@ -126,11 +127,12 @@ def train_td3(
     output_dir: str = "results/rl",
     wandb_project: Optional[str] = None,
     total_timesteps: int = TOTAL_TIMESTEPS,
+    alpha3: float = REWARD_ALPHA3,
 ) -> WarmupAsymmetricLRTD3:
     """Train the TD3 irrigation controller (exact n-step + terminal-yield bonus)."""
     model_gamma = GAMMA_BASE ** N_STEPS   # exact n-step bootstrap discount
 
-    run_name = f"td3_seed{seed}"
+    run_name = f"td3_a3-{alpha3:g}_seed{seed}"
     save_dir = Path(output_dir) / run_name
     save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -145,6 +147,7 @@ def train_td3(
         "target_noise_clip": TARGET_NOISE_CLIP,
         "learning_starts": LEARNING_STARTS,
         "reward_du_alpha": REWARD_DU_ALPHA, "reward_terminal_yield": REWARD_TERMINAL_YIELD,
+        "reward_alpha3": alpha3,
         "tau": TAU, "buffer_size": BUFFER_SIZE, "batch_size": BATCH_SIZE,
         "lr_start": LR_START, "lr_end": LR_END,
         "explore": {"start": EXPLORE_SIGMA_START, "end": EXPLORE_SIGMA_END,
@@ -160,7 +163,8 @@ def train_td3(
     def _make_env(randomize, schedule=None):
         return IrrigationEnv(
             randomize=randomize, eval_schedule=schedule,
-            reward_du_alpha=REWARD_DU_ALPHA, reward_terminal_yield=REWARD_TERMINAL_YIELD)
+            reward_du_alpha=REWARD_DU_ALPHA, reward_terminal_yield=REWARD_TERMINAL_YIELD,
+            reward_alpha3=alpha3)
 
     train_env     = DummyVecEnv([lambda: _make_env(True)])
     eval_env      = DummyVecEnv([lambda: _make_env(False, EVAL_SCHEDULE)])
@@ -241,7 +245,7 @@ def train_td3(
     print(f"\n{'='*72}\n  TD3 training - seed {seed}\n"
           f"  n-step n={N_STEPS}  gamma_base={GAMMA_BASE}  model_gamma={model_gamma:.6f}\n"
           f"  policy_delay={POLICY_DELAY}  target_noise={TARGET_POLICY_NOISE}/{TARGET_NOISE_CLIP}\n"
-          f"  learning_starts={LEARNING_STARTS:,}  r5(du)={REWARD_DU_ALPHA}  "
+          f"  learning_starts={LEARNING_STARTS:,}  r5(du)={REWARD_DU_ALPHA}  a3(drought)={alpha3}  "
           f"terminal_yield={REWARD_TERMINAL_YIELD}\n"
           f"  noise {EXPLORE_SIGMA_START}->{EXPLORE_SIGMA_END} over {EXPLORE_DECAY_STEPS:,}\n"
           f"  dev years {list(DEV_YEARS)}  git={config['git_sha']}  total steps {total_timesteps:,}\n"
@@ -276,6 +280,9 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", type=str, default="results/rl")
     parser.add_argument("--wandb-project", type=str, default=None)
     parser.add_argument("--total-timesteps", type=int, default=TOTAL_TIMESTEPS)
+    parser.add_argument("--alpha3", type=float, default=REWARD_ALPHA3,
+                        help="drought-stress reward weight r3 (default 0.1)")
     args = parser.parse_args()
     train_td3(seed=args.seed, output_dir=args.output_dir,
-              wandb_project=args.wandb_project, total_timesteps=args.total_timesteps)
+              wandb_project=args.wandb_project, total_timesteps=args.total_timesteps,
+              alpha3=args.alpha3)

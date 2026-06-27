@@ -121,6 +121,8 @@ class IrrigationEnv(gym.Env):
         Weight of the control-rate smoothing penalty r5 (0 disables it).
     reward_terminal_yield : float
         Weight of the additive terminal-yield bonus paid once at episode end.
+    reward_alpha3 : float
+        Weight of the drought-stress penalty r3 (defaults to the module ALPHA3).
     """
 
     metadata = {"render_modes": []}
@@ -133,6 +135,7 @@ class IrrigationEnv(gym.Env):
         dedupe_today_weather: bool = True,
         reward_du_alpha: float = 0.0,
         reward_terminal_yield: float = 0.0,
+        reward_alpha3: float = ALPHA3,
     ):
         super().__init__()
         self.randomize = randomize
@@ -145,6 +148,10 @@ class IrrigationEnv(gym.Env):
         if reward_terminal_yield < 0.0:
             raise ValueError(f"reward_terminal_yield must be >= 0, got {reward_terminal_yield!r}")
         self._reward_terminal_yield = float(reward_terminal_yield)
+
+        if reward_alpha3 < 0.0:
+            raise ValueError(f"reward_alpha3 must be >= 0, got {reward_alpha3!r}")
+        self._alpha3 = float(reward_alpha3)
 
         if eval_schedule is not None:
             parsed = []
@@ -281,7 +288,7 @@ class IrrigationEnv(gym.Env):
         r1 = ALPHA1 * (x4_mean - self._prev_x4_mean) / X4_REF
         r2 = -ALPHA2 * float(np.mean(irr_mm)) / UB_MM
         drought = np.maximum(_ST_MM - x1, 0.0)
-        r3 = -ALPHA3 * float(np.mean(drought)) / max(_ST_MM - _WP_MM, 1e-6)
+        r3 = -self._alpha3 * float(np.mean(drought)) / max(_ST_MM - _WP_MM, 1e-6)
         overshoot = np.maximum(x1 - _FC_MM, 0.0)
         r6 = -ALPHA6 * float(np.mean(overshoot)) / max(_FC_MM, 1e-6)
 
