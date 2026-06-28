@@ -59,7 +59,7 @@ EVAL_YEARS = frozenset(SCENARIO_YEARS.values())   # {2018, 2022, 2024}
 #   - 2013 (82.1 mm) — wet (highest non-test, non-extreme year)
 # Each dev year is comfortably (>20 mm) clear of any test year, so no
 # near-duplicate climate leaks into best_model selection.
-DEV_YEARS = (2002, 2016, 2023)  # (2002, 2004, 2013)
+DEV_YEARS = (2002, 2004, 2013)  # (2002, 2016, 2023)  #
 DEV_YEARS_SET = frozenset(DEV_YEARS)
 
 # ── Training years (20) — sampled uniformly per training episode ─────────────
